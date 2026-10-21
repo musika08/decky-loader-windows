@@ -1,11 +1,14 @@
-import asyncio, hmac, secrets, time
+import asyncio, hashlib, hmac, secrets, socket, sys, time
 from typing import Any, Callable, Coroutine
 import random
 
 from .localplatform import ON_WINDOWS
 
 BUFFER_LIMIT = 2 ** 20  # 1 MiB
-AUTH_TIMEOUT = 5.0  # seconds a PortSocket client gets to send its token line
+AUTH_TIMEOUT = 5.0  # seconds each side of the PortSocket handshake waits for the other
+NONCE_BYTES = 16  # sent as 32 hex chars
+CONNECT_RETRIES = 10
+CONNECT_RETRY_DELAY = 2.0
 
 class UnixSocket:
     def __init__(self):
@@ -133,54 +136,117 @@ class PortSocket (UnixSocket):
         It's return value gets used, if not None, to write data to the socket.
         Method should be async
 
-        Any local process can reach a TCP port, so the client must send `token` as its first line.
-        The server drops connections that do not, before any message is handled.
+        Any local process can reach a TCP port, and one could bind it before the real server does.
+        So both ends prove they know `token` with a nonce challenge-response before any message flows,
+        and the token itself never crosses the wire.
         '''
         super().__init__()
         self.host = "127.0.0.1"
         self.port = port if port is not None else random.sample(range(40000, 60000), 1)[0]
         self.token = token if token is not None else secrets.token_hex(16)
-    
+
+    def _mac(self, *parts: bytes) -> str:
+        return hmac.new(self.token.encode("utf-8"), b"|".join(parts), hashlib.sha256).hexdigest()
+
     async def setup_server(self, on_new_message: Callable[[str], Coroutine[Any, Any, Any]]):
         try:
             self.on_new_message = on_new_message
-            self.socket = await asyncio.start_server(self._listen_for_method_call, host=self.host, port=self.port, limit=BUFFER_LIMIT)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                if sys.platform == "win32":
+                    # Nobody else may bind this port while we hold it, not even with SO_REUSEADDR
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                sock.bind((self.host, self.port))
+                sock.listen()
+                sock.setblocking(False)
+            except BaseException:
+                sock.close()
+                raise
+            self.socket = await asyncio.start_server(self._listen_for_method_call, sock=sock, limit=BUFFER_LIMIT)
         except asyncio.CancelledError:
             await self.close_socket_connection()
             raise
 
+    async def _client_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        server_nonce = (await reader.readline()).rstrip(b"\n")
+        if not _is_nonce(server_nonce):
+            raise ConnectionError("bad server nonce")
+        client_nonce = secrets.token_hex(NONCE_BYTES).encode("ascii")
+        writer.write(client_nonce + b" " + self._mac(b"client", server_nonce, client_nonce).encode("ascii") + b"\n")
+        await writer.drain()
+        proof = (await reader.readline()).rstrip(b"\n")
+        if not hmac.compare_digest(proof, self._mac(b"server", client_nonce, server_nonce).encode("ascii")):
+            raise ConnectionError("server failed to prove it knows the token")
+
+    async def _server_handshake(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> bool:
+        server_nonce = secrets.token_hex(NONCE_BYTES).encode("ascii")
+        writer.write(server_nonce + b"\n")
+        await writer.drain()
+        parts = (await reader.readline()).rstrip(b"\n").split(b" ")
+        if len(parts) != 2 or not _is_nonce(parts[0]):
+            return False
+        client_nonce, proof = parts
+        if not hmac.compare_digest(proof, self._mac(b"client", server_nonce, client_nonce).encode("ascii")):
+            return False
+        writer.write(self._mac(b"server", client_nonce, server_nonce).encode("ascii") + b"\n")
+        await writer.drain()
+        return True
+
     async def _open_socket_if_not_exists(self):
         if not self.reader:
             retries = 0
-            while retries < 10:
+            while retries < CONNECT_RETRIES:
                 try:
                     reader, writer = await asyncio.open_connection(host=self.host, port=self.port, limit=BUFFER_LIMIT)
-                    writer.write(self._token_line())
-                    await writer.drain()
+                    try:
+                        await asyncio.wait_for(self._client_handshake(reader, writer), AUTH_TIMEOUT)
+                    except BaseException:
+                        writer.close()
+                        raise
                     self.reader, self.writer = reader, writer
                     return True
                 except:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(CONNECT_RETRY_DELAY)
                     retries += 1
             return False
         else:
             return True
 
-    def _token_line(self) -> bytes:
-        return (self.token + "\n").encode("utf-8")
-
     async def _listen_for_method_call(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
-            line = await asyncio.wait_for(reader.readline(), AUTH_TIMEOUT)
-        except asyncio.CancelledError:
+            try:
+                ok = await asyncio.wait_for(self._server_handshake(reader, writer), AUTH_TIMEOUT)
+            except asyncio.CancelledError:
+                raise
+            except Exception: # timeout, oversized line, reset connection
+                ok = False
+            if not ok:
+                return
+
+            self.server_writer = writer
+
+            def _(task: asyncio.Task[str|None]):
+                res = task.result()
+                if res is not None:
+                    asyncio.create_task(self._write_single_line(writer, res))
+
+            while self.active:
+                handler = self.on_new_message
+                if handler is None:
+                    break
+                line = await self._read_single_line(reader)
+                if not line: # EOF: the client hung up. The base loop would spin here.
+                    break
+                asyncio.create_task(handler(line)).add_done_callback(_)
+        finally:
             writer.close()
-            raise
-        except Exception: # timeout, oversized line, reset connection
-            line = b""
-        if not hmac.compare_digest(line, self._token_line()):
-            writer.close()
-            return
-        await super()._listen_for_method_call(reader, writer)
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+
+def _is_nonce(b: bytes) -> bool:
+    return len(b) == 2 * NONCE_BYTES and all(c in b"0123456789abcdef" for c in b)
 
 if ON_WINDOWS:
     class LocalSocket (PortSocket):  # type: ignore

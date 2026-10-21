@@ -2,13 +2,21 @@
 
 Root-flag plugins run with the loader's own (elevated) token. Every other plugin runs with a restricted copy of it:
 Administrators deny-only, all privileges but SeChangeNotify removed, medium integrity, owned by the user.
+
+Each child starts suspended inside its own kill-on-close Job object, so stopping a plugin also stops every process
+it started (the PyInstaller onefile bootloader runs the real interpreter as its child).
 '''
 import ctypes, subprocess
 from ctypes import wintypes
 from typing import Any
 
+CREATE_SUSPENDED = 0x00000004
 CREATE_NO_WINDOW = 0x08000000
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
+
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+JobObjectBasicAccountingInformation = 1
+JobObjectExtendedLimitInformation = 9
 
 TOKEN_ASSIGN_PRIMARY = 0x0001
 TOKEN_DUPLICATE = 0x0002
@@ -27,8 +35,6 @@ TokenIntegrityLevel = 25
 
 SE_GROUP_INTEGRITY = 0x20
 SDDL_REVISION_1 = 1
-WAIT_OBJECT_0 = 0
-WAIT_TIMEOUT = 0x102
 
 ADMINISTRATORS_SID = "S-1-5-32-544"
 MEDIUM_INTEGRITY_SID = "S-1-16-8192"
@@ -76,6 +82,55 @@ class STARTUPINFOW(ctypes.Structure):
     ]
 
 
+class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("PerProcessUserTimeLimit", ctypes.c_int64),
+        ("PerJobUserTimeLimit", ctypes.c_int64),
+        ("LimitFlags", wintypes.DWORD),
+        ("MinimumWorkingSetSize", ctypes.c_size_t),
+        ("MaximumWorkingSetSize", ctypes.c_size_t),
+        ("ActiveProcessLimit", wintypes.DWORD),
+        ("Affinity", ctypes.c_size_t), # ULONG_PTR
+        ("PriorityClass", wintypes.DWORD),
+        ("SchedulingClass", wintypes.DWORD),
+    ]
+
+
+class IO_COUNTERS(ctypes.Structure):
+    _fields_ = [
+        ("ReadOperationCount", ctypes.c_uint64),
+        ("WriteOperationCount", ctypes.c_uint64),
+        ("OtherOperationCount", ctypes.c_uint64),
+        ("ReadTransferCount", ctypes.c_uint64),
+        ("WriteTransferCount", ctypes.c_uint64),
+        ("OtherTransferCount", ctypes.c_uint64),
+    ]
+
+
+class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+        ("IoInfo", IO_COUNTERS),
+        ("ProcessMemoryLimit", ctypes.c_size_t),
+        ("JobMemoryLimit", ctypes.c_size_t),
+        ("PeakProcessMemoryUsed", ctypes.c_size_t),
+        ("PeakJobMemoryUsed", ctypes.c_size_t),
+    ]
+
+
+class JOBOBJECT_BASIC_ACCOUNTING_INFORMATION(ctypes.Structure):
+    _fields_ = [
+        ("TotalUserTime", ctypes.c_int64),
+        ("TotalKernelTime", ctypes.c_int64),
+        ("ThisPeriodTotalUserTime", ctypes.c_int64),
+        ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+        ("TotalPageFaultCount", wintypes.DWORD),
+        ("TotalProcesses", wintypes.DWORD),
+        ("ActiveProcesses", wintypes.DWORD),
+        ("TotalTerminatedProcesses", wintypes.DWORD),
+    ]
+
+
 class PROCESS_INFORMATION(ctypes.Structure):
     _fields_ = [
         ("hProcess", HANDLE),
@@ -100,12 +155,25 @@ def _api() -> tuple[Any, Any]:
     k.GetCurrentProcess.restype = HANDLE
     k.CloseHandle.argtypes = [HANDLE]
     k.CloseHandle.restype = BOOL
-    k.WaitForSingleObject.argtypes = [HANDLE, DWORD]
-    k.WaitForSingleObject.restype = DWORD
     k.TerminateProcess.argtypes = [HANDLE, wintypes.UINT]
     k.TerminateProcess.restype = BOOL
     k.LocalFree.argtypes = [ctypes.c_void_p]
     k.LocalFree.restype = ctypes.c_void_p
+    k.CreateProcessW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.c_void_p, ctypes.c_void_p, BOOL, DWORD,
+                                 ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(STARTUPINFOW), ctypes.POINTER(PROCESS_INFORMATION)]
+    k.CreateProcessW.restype = BOOL
+    k.ResumeThread.argtypes = [HANDLE]
+    k.ResumeThread.restype = DWORD
+    k.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k.CreateJobObjectW.restype = HANDLE
+    k.SetInformationJobObject.argtypes = [HANDLE, ctypes.c_int, ctypes.c_void_p, DWORD]
+    k.SetInformationJobObject.restype = BOOL
+    k.QueryInformationJobObject.argtypes = [HANDLE, ctypes.c_int, ctypes.c_void_p, DWORD, ctypes.POINTER(DWORD)]
+    k.QueryInformationJobObject.restype = BOOL
+    k.AssignProcessToJobObject.argtypes = [HANDLE, HANDLE]
+    k.AssignProcessToJobObject.restype = BOOL
+    k.TerminateJobObject.argtypes = [HANDLE, wintypes.UINT]
+    k.TerminateJobObject.restype = BOOL
 
     a.OpenProcessToken.argtypes = [HANDLE, DWORD, ctypes.POINTER(HANDLE)]
     a.OpenProcessToken.restype = BOOL
@@ -235,72 +303,108 @@ def _env_block(env: dict[str, str]) -> ctypes.Array[ctypes.c_char]:
     return ctypes.create_string_buffer(block.encode("utf-16-le"))
 
 
+def _create_job() -> int:
+    k = _api()[0]
+    job = k.CreateJobObjectW(None, None)
+    _check(job)
+    try:
+        info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        _check(k.SetInformationJobObject(job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)))
+    except BaseException:
+        _close(job)
+        raise
+    return job
+
+
 class PluginProcess:
-    '''The subset of multiprocessing.Process that PluginWrapper uses, for a plugin host started as its own program.'''
+    """The subset of multiprocessing.Process that PluginWrapper uses, for a plugin host started as its own program.
+
+    The process and everything it starts live in a kill-on-close Job object owned by this instance.
+    """
 
     def __init__(self, argv: list[str], env: dict[str, str], elevated: bool) -> None:
         self.argv = argv
         self.env = env
         self.elevated = elevated
         self.pid: int = 0
-        self._popen: subprocess.Popen[bytes] | None = None
-        self._handle: int | None = None
+        self._job: int | None = None
 
     def start(self) -> None:
         if self.elevated or not is_elevated():
-            self._popen = subprocess.Popen(self.argv, env=self.env, creationflags=CREATE_NO_WINDOW)
-            self.pid = self._popen.pid
+            self._spawn(None)
         else:
             self.start_restricted()
 
     def start_restricted(self) -> None:
-        '''Start under a restricted medium-integrity copy of this process's token, whatever its elevation.'''
-        a = _api()[1]
+        """Start under a restricted medium-integrity copy of this process's token, whatever its elevation."""
         token = _open_own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT)
         restricted = None
         try:
             restricted = _restrict_token(token)
-            si = STARTUPINFOW()
-            si.cb = ctypes.sizeof(si)
-            pi = PROCESS_INFORMATION()
-            cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(self.argv))
-            env = _env_block(self.env)
-            _check(a.CreateProcessAsUserW(restricted, None, cmdline, None, None, False,
-                                          CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW, env, None,
-                                          ctypes.byref(si), ctypes.byref(pi)))
-            _close(pi.hThread)
-            self._handle = pi.hProcess
-            self.pid = pi.dwProcessId
+            self._spawn(restricted)
         finally:
             _close(restricted)
             _close(token)
 
+    def _spawn(self, token: int | None) -> None:
+        """Create the process suspended with `token` (None: our own), put it in a new job, then let it run."""
+        if self._job is not None:
+            raise RuntimeError("process already started")
+        k, a = _api()
+        si = STARTUPINFOW()
+        si.cb = ctypes.sizeof(si)
+        pi = PROCESS_INFORMATION()
+        cmdline = ctypes.create_unicode_buffer(subprocess.list2cmdline(self.argv))
+        env = _env_block(self.env)
+        flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW | CREATE_SUSPENDED
+        job = _create_job()
+        try:
+            if token is None:
+                _check(k.CreateProcessW(None, cmdline, None, None, False, flags, env, None, ctypes.byref(si), ctypes.byref(pi)))
+            else:
+                _check(a.CreateProcessAsUserW(token, None, cmdline, None, None, False, flags, env, None,
+                                              ctypes.byref(si), ctypes.byref(pi)))
+            try:
+                if not k.AssignProcessToJobObject(job, pi.hProcess):
+                    err = ctypes.get_last_error()
+                    k.TerminateProcess(pi.hProcess, 1)
+                    raise ctypes.WinError(err) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+                if k.ResumeThread(pi.hThread) == 0xFFFFFFFF:
+                    err = ctypes.get_last_error()
+                    k.TerminateJobObject(job, 1)
+                    raise ctypes.WinError(err) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+            finally:
+                _close(pi.hThread)
+                _close(pi.hProcess)
+        except BaseException:
+            _close(job) # kill-on-close takes any member down with it
+            raise
+        self._job = job
+        self.pid = pi.dwProcessId
+
     def is_alive(self) -> bool:
-        if self._popen is not None:
-            return self._popen.poll() is None
-        if self._handle is None:
+        if self._job is None:
             return False
-        if _api()[0].WaitForSingleObject(self._handle, 0) == WAIT_TIMEOUT:
-            return True
-        self._release()
-        return False
+        info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION()
+        _check(_api()[0].QueryInformationJobObject(self._job, JobObjectBasicAccountingInformation, ctypes.byref(info),
+                                                   ctypes.sizeof(info), None))
+        return info.ActiveProcesses > 0
 
     def terminate(self) -> None:
-        if self._popen is not None:
-            if self._popen.poll() is None:
-                self._popen.terminate() # TerminateProcess(h, 1)
-        elif self._handle is not None:
-            _api()[0].TerminateProcess(self._handle, 1)
+        if self._job is not None:
+            _api()[0].TerminateJobObject(self._job, 1)
 
     def kill(self) -> None:
         self.terminate()
 
-    def _release(self) -> None:
-        h, self._handle = self._handle, None
-        _close(h)
+    def close(self) -> None:
+        """Release the job. Any process still in it is killed."""
+        job, self._job = self._job, None
+        _close(job)
 
     def __del__(self) -> None:
         try:
-            self._release()
+            self.close()
         except Exception:
             pass

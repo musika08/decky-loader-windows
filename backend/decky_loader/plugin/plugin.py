@@ -95,6 +95,14 @@ class PluginWrapper:
         while self._socket.active:
             try:
                 line = await self._socket.read_single_line()
+                if ON_WINDOWS and line == "":
+                    # EOF: the plugin host closed the connection or died. Reading again would spin.
+                    self.log.info(f"Plugin {self.get_display_name()} closed its socket")
+                    await self._socket.close_socket_connection()
+                    for request in self._method_call_requests.values():
+                        request.cancel()
+                    self._method_call_requests = {}
+                    return
                 if line != None:
                     res = loads(line)
                     if res["type"] == SocketMessageType.EVENT.value:

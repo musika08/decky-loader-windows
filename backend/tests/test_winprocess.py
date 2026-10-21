@@ -1,6 +1,6 @@
-import asyncio, base64, json, logging, os, socket, sys, time
+import asyncio, base64, ctypes, json, logging, os, shutil, socket, sys, tempfile, threading, time, uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only module")
@@ -53,6 +53,47 @@ with open(sys.argv[1], "w") as f:
 '''
 
 
+@pytest.fixture
+def child_dir() -> Iterator[Path]:
+    """A directory a restricted (medium, non-admin) child can use.
+
+    pytest's tmp_path is created with mode 0o700, which Python 3.13+ turns into an ACL for SYSTEM, Administrators
+    and the owner. Under an elevated shell the owner is Administrators, so a restricted child could not touch it.
+    A plain mkdir in %TEMP% inherits the profile's ACL, which grants the user.
+    """
+    d = Path(tempfile.gettempdir()) / f"decky-test-{uuid.uuid4().hex}"
+    os.mkdir(d)
+    yield d
+    for _ in range(50): # a just-killed child can hold its files for a moment
+        shutil.rmtree(d, ignore_errors=True)
+        if not d.exists():
+            break
+        time.sleep(0.1)
+
+
+def _wait_dead(proc: "winprocess.PluginProcess", seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while proc.is_alive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not proc.is_alive()
+
+
+def _pid_gone(pid: int, wait_ms: int = 5000) -> bool:
+    k = ctypes.WinDLL("kernel32", use_last_error=True) # pyright: ignore
+    k.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k.WaitForSingleObject.restype = ctypes.c_uint32
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    h = k.OpenProcess(0x00100000 | 0x1000, 0, pid) # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return True
+    try:
+        return k.WaitForSingleObject(h, wait_ms) == 0
+    finally:
+        k.CloseHandle(h)
+
+
 def _run_probe(tmp_path: Path, elevated: bool | None) -> dict[str, Any]:
     out = tmp_path / "probe.json"
     env = dict(os.environ)
@@ -62,13 +103,10 @@ def _run_probe(tmp_path: Path, elevated: bool | None) -> dict[str, Any]:
     else:
         proc.start()
     assert proc.pid > 0
-    deadline = time.monotonic() + 30
-    while proc.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    alive = proc.is_alive()
-    if alive:
-        proc.kill()
-    assert not alive, "probe child did not exit"
+    try:
+        assert _wait_dead(proc, 30), "probe child did not exit"
+    finally:
+        proc.close()
     return json.loads(out.read_text())
 
 
@@ -76,25 +114,26 @@ def test_is_elevated_returns_bool():
     assert isinstance(is_elevated(), bool)
 
 
-def test_restricted_token_child_from_current_token(tmp_path: Path):
+def test_restricted_token_child_from_current_token(child_dir: Path):
     # Works unelevated: a restricted copy of our own token needs no SeAssignPrimaryTokenPrivilege.
-    res = _run_probe(tmp_path, None)
+    res = _run_probe(child_dir, None)
     assert res["il"] == 0x2000
     assert res["elevation"] == 0
     assert res["owner"] == res["user"]
 
 
 @pytest.mark.skipif(not is_elevated(), reason="needs an elevated shell")
-def test_non_root_child_is_medium_integrity(tmp_path: Path):
-    res = _run_probe(tmp_path, False)
+def test_non_root_child_is_medium_integrity(child_dir: Path):
+    # The loader is elevated here, so start() must take the restricted path on its own
+    res = _run_probe(child_dir, False)
     assert res["elevation"] == 0
     assert res["il"] == 0x2000
     assert res["owner"] == res["user"]
 
 
 @pytest.mark.skipif(not is_elevated(), reason="needs an elevated shell")
-def test_root_child_stays_elevated(tmp_path: Path):
-    res = _run_probe(tmp_path, True)
+def test_root_child_stays_elevated(child_dir: Path):
+    res = _run_probe(child_dir, True)
     assert res["elevation"] == 1
     assert res["il"] >= 0x3000
 
@@ -104,21 +143,54 @@ def test_terminate_stops_restricted_child():
     proc.start_restricted()
     assert proc.is_alive()
     proc.terminate()
-    deadline = time.monotonic() + 10
-    while proc.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not proc.is_alive()
+    assert _wait_dead(proc, 10)
     proc.kill() # no-op after exit, must not raise
+    proc.close()
 
 
-def test_terminate_stops_popen_child():
+def test_kill_stops_unrestricted_child():
     proc = winprocess.PluginProcess([sys.executable, "-c", "import time; time.sleep(60)"], dict(os.environ), elevated=True)
     proc.start()
     assert proc.is_alive()
     proc.kill()
-    deadline = time.monotonic() + 10
-    while proc.is_alive() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    assert _wait_dead(proc, 10)
+    assert _pid_gone(proc.pid)
+    proc.close()
+
+
+@pytest.mark.parametrize("restricted", [False, True])
+def test_kill_takes_grandchildren_down(child_dir: Path, restricted: bool):
+    pids = child_dir / "pids.json"
+    script = ("import json, os, subprocess, sys, time; "
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+              f"open({str(pids)!r}, 'w').write(json.dumps({{'child': os.getpid(), 'grandchild': p.pid}})); "
+              "time.sleep(60)")
+    proc = winprocess.PluginProcess([sys.executable, "-c", script], dict(os.environ), elevated=True)
+    if restricted:
+        proc.start_restricted()
+    else:
+        proc.start()
+    try:
+        deadline = time.monotonic() + 30
+        while not pids.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.2) # let the write finish
+        got = json.loads(pids.read_text())
+        assert not _pid_gone(got["grandchild"], 0)
+        proc.kill()
+        assert _wait_dead(proc, 10)
+        for pid in (proc.pid, got["child"], got["grandchild"]):
+            assert _pid_gone(pid), pid
+    finally:
+        proc.close()
+
+
+def test_close_kills_remaining_members():
+    proc = winprocess.PluginProcess([sys.executable, "-c", "import time; time.sleep(60)"], dict(os.environ), elevated=True)
+    proc.start()
+    pid = proc.pid
+    proc.close()
+    assert _pid_gone(pid)
     assert not proc.is_alive()
 
 
@@ -203,6 +275,51 @@ def _start_wrapper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, flags: list[
     return FakeProcess.instances[0]
 
 
+def test_loader_listener_ends_when_plugin_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from decky_loader.localplatform.localsocket import PortSocket
+
+    plugins = tmp_path / "plugins"
+    pdir = plugins / "MyPlugin"
+    pdir.mkdir(parents=True)
+    (pdir / "plugin.json").write_text(json.dumps({"name": "My Plugin", "author": "me", "flags": [], "api_version": 1}))
+    (pdir / "main.py").write_text("class Plugin: pass\n")
+    monkeypatch.setattr(plugin_mod, "get_homebrew_path", lambda: str(tmp_path / "home"))
+    monkeypatch.setattr(winprocess, "PluginProcess", FakeProcess)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+
+    async def noop(*_: Any) -> None:
+        pass
+
+    async def run() -> bool:
+        server = PortSocket(port, "tok")
+
+        async def handler(line: str) -> None:
+            pass
+
+        await server.setup_server(handler)
+        w = plugin_mod.PluginWrapper(str(pdir / "main.py"), "MyPlugin", str(plugins), noop)
+        w._socket = PortSocket(port, "tok") # pyright: ignore [reportPrivateUsage, reportAttributeAccessIssue]
+        w.start()
+        for _ in range(100):
+            if server.server_writer is not None:
+                break
+            await asyncio.sleep(0.05)
+        assert server.server_writer is not None
+        server.server_writer.close() # the plugin host goes away
+        await asyncio.wait_for(w._listener_task, 5) # pyright: ignore [reportPrivateUsage]
+        await asyncio.wait_for(server.close_socket_connection(), 5)
+        return w._listener_task.done() # pyright: ignore [reportPrivateUsage]
+
+    done: list[bool] = []
+    t = threading.Thread(target=lambda: done.append(asyncio.run(run())), daemon=True)
+    t.start()
+    t.join(20)
+    assert not t.is_alive(), "listener did not stop (busy loop?)"
+    assert done == [True]
+
+
 def test_root_plugin_unelevated_logs_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
     with caplog.at_level(logging.WARNING):
         proc = _start_wrapper(tmp_path, monkeypatch, ["root"], elevated_loader=False)
@@ -217,17 +334,22 @@ def test_non_root_plugin_starts_restricted(tmp_path: Path, monkeypatch: pytest.M
     assert not any("unelevated" in r.getMessage() for r in caplog.records)
 
 
-def test_plugin_host_end_to_end_restricted(tmp_path: Path):
+def test_plugin_host_end_to_end_restricted(child_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    from decky_loader.localplatform import localsocket
     from decky_loader.localplatform.localsocket import PortSocket
     from decky_loader.localplatform.winsupervisor import self_command
 
+    tmp_path = child_dir
+    touched = child_dir / "touched"
     pdir = tmp_path / "plugins" / "Echo"
     pdir.mkdir(parents=True)
     (pdir / "main.py").write_text(
         "import os\n"
         "class Plugin:\n"
         "    async def double(self, x):\n"
-        "        return [x * 2, os.environ.get('DECKY_PLUGIN_SOCKET_TOKEN')]\n")
+        "        return [x * 2, os.environ.get('DECKY_PLUGIN_SOCKET_TOKEN')]\n"
+        "    async def touch(self):\n"
+        f"        open({str(touched)!r}, 'w').close()\n")
     home = tmp_path / "home"
     for sub in ("logs", "settings", "data"):
         (home / sub / "Echo").mkdir(parents=True) # PluginWrapper creates these in the loader
@@ -241,19 +363,33 @@ def test_plugin_host_end_to_end_restricted(tmp_path: Path):
     proc = winprocess.PluginProcess(self_command() + ["--plugin-host", plugin_host.encode_params(sp, port)], env, elevated=False)
     proc.start_restricted()
 
-    async def call(token: str) -> str | None:
+    async def call(token: str, method: str, args: list[Any]) -> str | None:
         client = PortSocket(port, token)
         try:
-            await client.write_single_line(json.dumps({"type": 0, "method": "double", "args": [21], "id": "1"}))
+            await client.write_single_line(json.dumps({"type": 0, "method": method, "args": args, "id": "1"}))
             return await asyncio.wait_for(client.read_single_line(), 10)
-        except ConnectionResetError:
-            return "" # a rejected client can see a reset instead of EOF when the server closes with unread data
+        except ConnectionError:
+            return None
         finally:
             await client.close_socket_connection()
 
     try:
-        assert asyncio.run(call("wrong")) == ""
-        res = json.loads(asyncio.run(call("tok-123")) or "null")
+        # The right token works (default retries cover the host's start-up) and the plugin cannot see the token
+        res = json.loads(asyncio.run(call("tok-123", "double", [21])) or "null")
         assert res["success"] and res["res"] == [42, None] and res["id"] == "1"
+
+        # A wrong token never gets a connection, so the call never reaches the plugin
+        monkeypatch.setattr(localsocket, "CONNECT_RETRIES", 1)
+        monkeypatch.setattr(localsocket, "CONNECT_RETRY_DELAY", 0.05)
+        assert asyncio.run(call("wrong", "touch", [])) is None
+        time.sleep(0.5)
+        assert not touched.exists()
+
+        # Control: the side effect does happen with the right token
+        monkeypatch.setattr(localsocket, "CONNECT_RETRIES", 10)
+        assert asyncio.run(call("tok-123", "touch", [])) is not None
+        assert touched.exists()
     finally:
         proc.kill()
+        _wait_dead(proc, 10)
+        proc.close()
