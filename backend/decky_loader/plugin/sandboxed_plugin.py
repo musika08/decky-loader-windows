@@ -11,7 +11,7 @@ from setproctitle import setproctitle, setthreadtitle
 
 from .messages import SocketResponseDict, SocketMessageType
 from ..localplatform.localsocket import UnixSocket
-from ..localplatform.localplatform import setgid, setuid, get_username, get_home_path, ON_LINUX
+from ..localplatform.localplatform import setgid, setuid, get_username, get_home_path, ON_LINUX, ON_WINDOWS
 from ..enums import UserType
 from .. import helpers
 from .. import settings # pyright: ignore [reportUnusedImport]
@@ -108,6 +108,10 @@ class SandboxedPlugin:
             sys.modules["decky"] = decky
             # provided for compatibility
             sys.modules["decky_plugin"] = decky
+
+            if ON_WINDOWS:
+                from ..localplatform.winsymlink import install_symlink_fallback
+                install_symlink_fallback()
 
             spec = spec_from_file_location("_", self.file)
             assert spec is not None
