@@ -112,6 +112,8 @@ class SandboxedPlugin:
             if ON_WINDOWS:
                 from ..localplatform.winsymlink import install_symlink_fallback
                 install_symlink_fallback()
+                from ..localplatform.winsteamlinks import setup_steam_home_links
+                setup_steam_home_links()
 
             spec = spec_from_file_location("_", self.file)
             assert spec is not None
