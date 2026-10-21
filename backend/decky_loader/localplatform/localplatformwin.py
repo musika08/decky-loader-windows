@@ -2,6 +2,7 @@ from ..enums import UserType
 import os, sys
 from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
+from .wininstall import known_program_data
 
 _exit_code: int | None = None
 
@@ -59,9 +60,11 @@ def get_username() -> str:
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
-def installed_root() -> str | None:
-    r'''`%ProgramData%\decky` when running from `%ProgramData%\decky\services`, else None.'''
-    root = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "decky")
+def installed_root(program_data: str | None = None) -> str | None:
+    r'''`%ProgramData%\decky` when running from `%ProgramData%\decky\services`, else None.
+
+    ProgramData comes from the known-folder API, never from the user-controlled PROGRAMDATA env var.'''
+    root = os.path.join(program_data or known_program_data(), "decky")
     services = _norm(os.path.join(root, "services"))
     if _norm(sys.executable).startswith(services + os.sep):
         return root
@@ -69,14 +72,15 @@ def installed_root() -> str | None:
 
 def get_privileged_path() -> str:
     r'''Installed: the admin-only `%ProgramData%\decky`. Portable: same as unprivileged_path.'''
+    # Installed mode ignores PRIVILEGED_PATH: the elevated loader must not trust user-writable environment
+    root = installed_root()
+    if root != None:
+        return root
+
     path = os.getenv("PRIVILEGED_PATH")
     if path != None:
         os.makedirs(path, exist_ok=True)
         return path
-
-    root = installed_root()
-    if root != None:
-        return root
 
     return get_unprivileged_path()
 
