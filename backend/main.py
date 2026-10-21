@@ -26,6 +26,17 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["--plugin-host"] and len(sys.argv) == 3:
         from decky_loader.plugin.plugin_host import main as plugin_host_main
         plugin_host_main(sys.argv[2])
+    elif sys.argv[1:2] == ["--check-imports"] and len(sys.argv) > 2:
+        import importlib
+        missing: list[str] = []
+        for mod in sys.argv[2:]:
+            try:
+                importlib.import_module(mod)
+            except Exception:
+                missing.append(mod)
+        if missing:
+            print("missing: " + ", ".join(missing))
+        sys.exit(1 if missing else 0)
     else:
         print(f"Unknown arguments: {sys.argv[1:]}", file=sys.stderr)
         sys.exit(2)

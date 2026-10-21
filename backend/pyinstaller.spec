@@ -1,4 +1,6 @@
 import os
+import sys
+import importlib.util
 from PyInstaller.building.build_main import Analysis
 from PyInstaller.building.api import EXE, PYZ
 from PyInstaller.utils.hooks import copy_metadata
@@ -24,6 +26,19 @@ name = "PluginLoader"
 # if noconsole:
 #    name += "_noconsole"
 
+hiddenimports = ['logging.handlers', 'sqlite3', 'http.server', 'socketserver', 'configparser', 'decky_plugin', 'decky']
+if sys.platform == "win32":
+    # Plugins run inside this exe and there is usually no usable system python to fall back on,
+    # so bundle the whole stdlib (minus GUI/dev-only packages) plus common plugin dependencies.
+    skip = {"tkinter", "turtle", "turtledemo", "idlelib", "test", "ensurepip", "venv", "lib2to3", "pydoc_data"}
+    def _importable(name):
+        try:
+            return importlib.util.find_spec(name) is not None
+        except Exception:
+            return False
+    hiddenimports += sorted(n for n in sys.stdlib_module_names if n not in skip and _importable(n))
+    hiddenimports += ["psutil", "PIL", "pystray"]
+
 a = Analysis(
     ['main.py'],
     datas=[
@@ -31,7 +46,7 @@ a = Analysis(
         ('decky_loader/static', 'decky_loader/static'),
     ] + copy_metadata('decky_loader'),
     runtime_hooks=['build_config.py'],
-    hiddenimports=['logging.handlers', 'sqlite3', 'http.server', 'socketserver', 'configparser', 'decky_plugin', 'decky'],
+    hiddenimports=hiddenimports,
 )
 pyz = PYZ(a.pure, a.zipped_data)
 

@@ -24,6 +24,9 @@ certifi = "*"
 packaging = "^24"
 multidict = "^6.0.5"
 setproctitle = "^1.3.3"
+psutil = {version = "^7.2.2", markers = "sys_platform == 'win32'"}
+pystray = {version = "^0.19.5", markers = "sys_platform == 'win32'"}
+pillow = {version = "*", markers = "sys_platform == 'win32'"}
 
 [tool.poetry.group.dev.dependencies]
 pyinstaller = "^6.8.0"

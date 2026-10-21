@@ -84,6 +84,11 @@ jobs:
         echo Builds:
         ls ./dist
 
+    - name: Verify bundled modules for plugins 🔍
+      if: ${{ inputs.os == 'Windows' }}
+      shell: bash
+      run: ./backend/dist/PluginLoader.exe --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi
+
     - name: Upload package artifact ⬆️
       if: ${{ !env.ACT }}
       uses: actions/upload-artifact@v7

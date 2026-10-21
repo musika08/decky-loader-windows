@@ -3,6 +3,8 @@ import ssl
 import uuid
 import os
 import subprocess
+import shutil
+import sys
 from hashlib import sha256
 import importlib.metadata
 
@@ -90,9 +92,27 @@ def get_loader_version() -> str:
 
 user_agent = f"Decky/{get_loader_version()} (https://decky.xyz)"
 
+def parse_pythonpath_output(out: str, ours: tuple[int, int]) -> list[str]:
+    """First line is `major.minor`, the rest are sys.path entries. A system python of a different
+    version is ignored, since its stdlib and compiled modules would not load into ours."""
+    lines = [x.strip() for x in out.strip().splitlines()]
+    if not lines or lines[0] != f"{ours[0]}.{ours[1]}":
+        return []
+    return [x for x in lines[1:] if x]
+
 # returns the appropriate system python paths
 def get_system_pythonpaths() -> list[str]:
     try:
+        if localplatform.ON_WINDOWS:
+            exe = shutil.which("python")
+            # The Microsoft Store alias is a stub that opens the Store instead of running python
+            if not exe or "\\windowsapps\\" in exe.lower():
+                return []
+            proc = subprocess.run([exe, "-c", "import sys;print(f'{sys.version_info[0]}.{sys.version_info[1]}');print('\\n'.join(p for p in sys.path if p))"],
+                                  capture_output=True, timeout=10)
+            proc.check_returncode()
+            return parse_pythonpath_output(proc.stdout.decode(), (sys.version_info[0], sys.version_info[1]))
+
         is_linux_or_mac = localplatform.ON_LINUX or localplatform.ON_MAC
         # run as normal normal user if on linux to also include user python paths
         proc = subprocess.run(["python3" if is_linux_or_mac else "python", "-c", "import sys; print('\\n'.join(x for x in sys.path if x))"],
