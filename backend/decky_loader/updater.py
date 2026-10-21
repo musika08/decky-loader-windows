@@ -34,6 +34,19 @@ class TestingVersion(TypedDict):
     link: str
     head_sha: str
 
+def windows_update_blocker() -> str | None:
+    """Why the in-app updater must not update this Windows copy, or None if it may.
+
+    It only swaps a single `.new` exe in next to a portable onefile exe. Installed mode runs a onedir build from
+    Program Files, which is updated by running the new installer's `--install` instead."""
+    from .localplatform.localplatformwin import installed_root
+    from .localplatform.winsupervisor import is_onedir_build
+    if installed_root() is not None:
+        return "In-app updates are not supported in installed mode. Download the new installer zip and run PluginLoader.exe --install from it."
+    if is_onedir_build():
+        return "In-app updates are not supported for the onedir (installer) build. Use the installer zip, or the portable single-file exe."
+    return None
+
 class Updater:
     def __init__(self, context: PluginManager) -> None:
         self.context = context
@@ -41,7 +54,7 @@ class Updater:
         self.remoteVer: RemoteVer | None = None
         self.allRemoteVers: List[RemoteVer] = []
         self.localVer = helpers.get_loader_version()
-        self.isSupported: bool = ON_LINUX or (ON_WINDOWS and getenv("DECKY_SUPERVISED") == "1")
+        self.isSupported: bool = ON_LINUX or (ON_WINDOWS and getenv("DECKY_SUPERVISED") == "1" and windows_update_blocker() is None)
         self.repo = getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')
         self.git_branch = getenv('DECKY_BRANCH', 'dirty')
 
@@ -180,6 +193,12 @@ class Updater:
         return binary_name
 
     async def download_decky_binary(self, download_url: str, version: str, is_zip: bool = False, size_in_bytes: int | None = None):
+        if ON_WINDOWS:
+            # Never leave a `.new` next to an installed or onedir exe
+            blocked = windows_update_blocker()
+            if blocked is not None:
+                logger.error(blocked)
+                raise Exception(blocked)
         download_filename = self.get_local_binary_name()
         download_temp_filename = download_filename + ".new"
         download_temp_path = path.join(getcwd(), download_temp_filename)

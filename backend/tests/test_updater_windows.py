@@ -1,4 +1,5 @@
 import asyncio, io, os, sys, zipfile
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 import pytest
@@ -145,3 +146,52 @@ def test_spec_parses_noconsole_as_1_only():
         text = f.read()
     assert "noconsole = noconsole_str == '1'" in text
     assert "bool(noconsole_str)" not in text
+
+
+# Installed mode (onedir in Program Files) is updated by re-running the installer, never in-app
+
+def _installed_layout(tmp_path: Path, monkeypatch: Any) -> Path:
+    from decky_loader.localplatform import localplatformwin, wininstall
+    app = tmp_path / "Program Files" / "Decky Loader"
+    (app / "_internal").mkdir(parents=True)
+    running = app / "PluginLoader.exe"
+    running.write_bytes(b"old")
+    monkeypatch.setattr(sys, "executable", str(running))
+    monkeypatch.setattr(wininstall, "known_program_files", lambda: str(tmp_path / "Program Files"))
+    monkeypatch.setattr(localplatformwin, "known_program_data", lambda: str(tmp_path / "ProgramData"))
+    monkeypatch.chdir(tmp_path)
+    return running
+
+
+def test_not_supported_in_installed_mode(tmp_path: Path, monkeypatch: Any):
+    _installed_layout(tmp_path, monkeypatch)
+    monkeypatch.setenv("DECKY_SUPERVISED", "1")
+    assert _updater().isSupported is False
+
+
+def test_not_supported_for_a_onedir_build(tmp_path: Any, monkeypatch: Any):
+    running = _portable(tmp_path, monkeypatch)
+    (running.parent / "_internal").mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(running.parent / "_internal"), raising=False)
+    monkeypatch.setenv("DECKY_SUPERVISED", "1")
+    assert _updater().isSupported is False
+
+
+def test_portable_onefile_still_supported(tmp_path: Any, monkeypatch: Any):
+    running = _portable(tmp_path, monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "Temp" / "_MEI123"), raising=False)
+    monkeypatch.setenv("DECKY_SUPERVISED", "1")
+    assert _updater().isSupported is True
+    _run(PAYLOAD, is_zip=False)
+    assert (running.parent / "PluginLoader-win.exe.new").read_bytes() == PAYLOAD
+
+
+def test_installed_mode_never_writes_a_new_file(tmp_path: Path, monkeypatch: Any):
+    running = _installed_layout(tmp_path, monkeypatch)
+    with pytest.raises(Exception, match="not supported in installed mode"):
+        _run(PAYLOAD, is_zip=False)
+    assert sorted(os.listdir(running.parent)) == ["PluginLoader.exe", "_internal"]
+    assert running.read_bytes() == b"old"
+    assert not (tmp_path / ".loader.version").exists()
