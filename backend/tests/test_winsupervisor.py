@@ -1,4 +1,6 @@
 import os, subprocess, sys
+from pathlib import Path
+from typing import Any
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only module")
@@ -187,7 +189,7 @@ def test_supervisor_integration_real_spawn():
 # The loader child runs in a kill-on-close job owned by the supervisor
 
 def _pid_gone(pid: int, wait_ms: int = 5000) -> bool:
-    import _winapi
+    import _winapi # pyright: ignore [reportMissingImports]
     try:
         h = _winapi.OpenProcess(0x00100000, False, pid) # SYNCHRONIZE
     except OSError:
@@ -198,17 +200,16 @@ def _pid_gone(pid: int, wait_ms: int = 5000) -> bool:
         _winapi.CloseHandle(h)
 
 
-def _wait_for_file(path, seconds: float = 30):
+def _wait_for_file(path: Path, seconds: float = 30) -> str:
     import time
     deadline = time.monotonic() + seconds
-    while not os.path.exists(path) and time.monotonic() < deadline:
+    while not path.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     time.sleep(0.2)
-    with open(path) as f:
-        return f.read()
+    return path.read_text()
 
 
-def test_run_in_job_returns_exit_code_and_uses_cwd_and_env(tmp_path):
+def test_run_in_job_returns_exit_code_and_uses_cwd_and_env(tmp_path: Path):
     from decky_loader.localplatform import winprocess
     out = tmp_path / "out.txt"
     script = f"import os, sys; open({str(out)!r}, 'w').write(os.getcwd() + '|' + os.environ['X_PROBE']); sys.exit(42)"
@@ -217,7 +218,7 @@ def test_run_in_job_returns_exit_code_and_uses_cwd_and_env(tmp_path):
     assert out.read_text() == f"{tmp_path}|yes"
 
 
-def test_run_in_job_kills_leftover_descendants(tmp_path):
+def test_run_in_job_kills_leftover_descendants(tmp_path: Path):
     from decky_loader.localplatform import winprocess
     pid_file = tmp_path / "pid"
     script = ("import subprocess, sys; "
@@ -227,7 +228,7 @@ def test_run_in_job_kills_leftover_descendants(tmp_path):
     assert _pid_gone(int(pid_file.read_text()))
 
 
-def test_loader_dies_when_supervisor_is_killed(tmp_path):
+def test_loader_dies_when_supervisor_is_killed(tmp_path: Path):
     backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     pid_file = tmp_path / "pid"
     loader = f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
@@ -245,57 +246,61 @@ def test_loader_dies_when_supervisor_is_killed(tmp_path):
 
 
 def test_make_spawn_runs_the_loader_in_a_job():
-    calls: list = []
+    calls: list[tuple[list[str], dict[str, str] | None, str | None]] = []
 
-    def run(argv, env, cwd):
+    def run(argv: list[str], env: dict[str, str] | None, cwd: str | None) -> int:
         calls.append((argv, env, cwd))
         return 42
 
     assert ws.make_spawn(r"C:\d\PluginLoader.exe", run=run)(["a", "--loader"]) == 42
     argv, env, cwd = calls[0]
     assert argv == ["a", "--loader"]
-    assert env["DECKY_SUPERVISED"] == "1" and env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert env is not None and env["DECKY_SUPERVISED"] == "1" and env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
     assert cwd == (r"C:\d" if getattr(sys, "frozen", False) else None)
 
 
 # Relaunch after an update: through the scheduled task when installed, so the loader stays elevated and tracked
 
 class TaskRunner:
-    def __init__(self, result=None):
+    def __init__(self, failure: BaseException | None = None):
         self.calls: list[list[str]] = []
-        self.result = result
+        self.failure = failure
 
-    def __call__(self, argv, **kwargs):
+    def __call__(self, argv: list[str], **_kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
         self.calls.append(list(argv))
-        if isinstance(self.result, BaseException):
-            raise self.result
-        return subprocess.CompletedProcess(argv, self.result or 0)
+        if self.failure is not None:
+            raise self.failure
+        return subprocess.CompletedProcess(argv, 0)
 
 
 def test_relaunch_installed_uses_the_scheduled_task():
-    run, direct = TaskRunner(), []
+    run, direct = TaskRunner(), list[list[str]]()
     ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
     assert run.calls == [[r"C:\Sys32\schtasks.exe", "/Run", "/TN", "Decky Loader"]]
     assert direct == []
 
 
 @pytest.mark.parametrize("failure", [subprocess.CalledProcessError(1, "schtasks"), FileNotFoundError("schtasks")])
-def test_relaunch_installed_falls_back_to_direct_launch(failure):
-    run, direct = TaskRunner(failure), []
+def test_relaunch_installed_falls_back_to_direct_launch(failure: BaseException):
+    run, direct = TaskRunner(failure), list[list[str]]()
     ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
     assert len(run.calls) == 1
     assert direct == [["T.exe"]]
 
 
 def test_relaunch_portable_launches_directly():
-    run, direct = TaskRunner(), []
+    run, direct = TaskRunner(), list[list[str]]()
     ws.relaunch("T.exe", installed=lambda: False, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
     assert run.calls == [] and direct == [["T.exe"]]
 
 
-def test_finish_update_relaunches_through_relaunch(monkeypatch):
+def test_finish_update_relaunches_through_relaunch(monkeypatch: pytest.MonkeyPatch):
     seen: list[str] = []
-    monkeypatch.setattr(ws, "relaunch", lambda target, **kw: seen.append(target))
+
+    def fake_relaunch(target: str, **_kw: Any) -> None:
+        seen.append(target)
+
+    monkeypatch.setattr(ws, "relaunch", fake_relaunch)
     assert ws.finish_update("T.exe", 0, copy=lambda s, d: None, sleep=lambda _s: None) == 0
     assert seen == ["T.exe"]
 
@@ -312,39 +317,45 @@ class FakeKernel32:
         return 1 if self.ok else 0
 
 
-def test_attach_parent_console_rebinds_when_stdout_is_none(monkeypatch):
+def _no_std_streams(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys, "stdout", None)
     monkeypatch.setattr(sys, "stderr", None)
-    k, opened = FakeKernel32(True), []
 
-    def opener(path, mode):
+
+def test_attach_parent_console_rebinds_when_stdout_is_none(monkeypatch: pytest.MonkeyPatch):
+    _no_std_streams(monkeypatch)
+    k, opened = FakeKernel32(True), list[tuple[str, str]]()
+
+    def opener(path: str, mode: str) -> str:
         opened.append((path, mode))
         return f"stream{len(opened)}"
 
     assert ws.attach_parent_console(kernel32=k, opener=opener) is True
     assert k.calls == [-1]
     assert opened == [("CONOUT$", "w"), ("CONOUT$", "w")]
-    assert sys.stdout == "stream1" and sys.stderr == "stream2"
+    assert str(sys.stdout) == "stream1" and str(sys.stderr) == "stream2"
 
 
-def test_attach_parent_console_ignores_failure(monkeypatch):
-    monkeypatch.setattr(sys, "stdout", None)
-    monkeypatch.setattr(sys, "stderr", None)
-    k, opened = FakeKernel32(False), []
-    assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: opened.append(p)) is False
+def test_attach_parent_console_ignores_failure(monkeypatch: pytest.MonkeyPatch):
+    _no_std_streams(monkeypatch)
+    k, opened = FakeKernel32(False), list[str]()
+
+    def opener(path: str, mode: str) -> None:
+        opened.append(path)
+
+    assert ws.attach_parent_console(kernel32=k, opener=opener) is False
     assert k.calls == [-1] and opened == []
-    assert sys.stdout is None and sys.stderr is None
+    assert sys.stdout is None and sys.stderr is None # pyright: ignore [reportUnnecessaryComparison]
 
 
-def test_attach_parent_console_ignores_open_errors(monkeypatch):
-    monkeypatch.setattr(sys, "stdout", None)
-    monkeypatch.setattr(sys, "stderr", None)
+def test_attach_parent_console_ignores_open_errors(monkeypatch: pytest.MonkeyPatch):
+    _no_std_streams(monkeypatch)
 
-    def opener(p, m):
+    def opener(path: str, mode: str) -> None:
         raise OSError("no console")
 
     assert ws.attach_parent_console(kernel32=FakeKernel32(True), opener=opener) is False
-    assert sys.stdout is None
+    assert sys.stdout is None # pyright: ignore [reportUnnecessaryComparison]
 
 
 def test_attach_parent_console_leaves_a_console_build_alone():

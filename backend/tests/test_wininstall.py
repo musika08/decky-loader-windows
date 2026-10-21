@@ -1,5 +1,7 @@
 import datetime, os, shutil, subprocess, sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only module")
@@ -44,7 +46,7 @@ def test_task_xml_runs_exe_through_cmd_with_admin_only_temp():
         r'"C:\ProgramData\decky\services\PluginLoader.exe""')
 
 
-def test_task_arguments_survive_real_cmd_parsing(tmp_path):
+def test_task_arguments_survive_real_cmd_parsing(tmp_path: Path):
     # The exact arguments go through the real cmd.exe; a batch file stands in for the exe and reports TMP/TEMP
     exe_dir = tmp_path / "A&B (x86) ^x"
     exe_dir.mkdir()
@@ -58,7 +60,7 @@ def test_task_arguments_survive_real_cmd_parsing(tmp_path):
 
 
 @pytest.mark.parametrize("bad", [r'C:\a"b\PluginLoader.exe', r"C:\%USERPROFILE%\PluginLoader.exe"])
-def test_task_arguments_reject_unquotable_paths(bad):
+def test_task_arguments_reject_unquotable_paths(bad: str):
     with pytest.raises(ValueError):
         wi.task_arguments(bad, TMP)
     with pytest.raises(ValueError):
@@ -73,7 +75,7 @@ def test_task_xml_escapes_paths():
     assert root.findtext("t:Actions/t:Exec/t:WorkingDirectory", namespaces=NS) == r"C:\A&B"
 
 
-def test_system_directory_and_user_temp_ignore_env(monkeypatch):
+def test_system_directory_and_user_temp_ignore_env(monkeypatch: pytest.MonkeyPatch):
     sysdir, temp = wi.system_directory(), wi.user_temp_dir()
     monkeypatch.setenv("SystemRoot", r"C:\evil")
     monkeypatch.setenv("LOCALAPPDATA", r"C:\evil")
@@ -81,12 +83,12 @@ def test_system_directory_and_user_temp_ignore_env(monkeypatch):
     assert wi.user_temp_dir() == temp and temp.lower().endswith(r"\temp")
 
 
-def test_install_points_task_at_admin_only_temp(tmp_path):
+def test_install_points_task_at_admin_only_temp(tmp_path: Path):
     src_exe = _fake_env(tmp_path)
     xmls: list[str] = []
 
     class XmlRecorder(Recorder):
-        def __call__(self, argv, **kwargs):
+        def __call__(self, argv: list[str], **kwargs: Any) -> Any:
             if argv[1] == "/Create":
                 with open(argv[5], encoding="utf-16") as f:
                     xmls.append(f.read())
@@ -95,6 +97,7 @@ def test_install_points_task_at_admin_only_temp(tmp_path):
     assert _install(tmp_path, src_exe, run=XmlRecorder(), system_dir=lambda: r"C:\Sys32") == 0
     root = str(tmp_path / "ProgramData" / "decky")
     task = ET.fromstring(xmls[0].encode("utf-16"))
+    assert task is not None
     assert task.findtext("t:Actions/t:Exec/t:Command", namespaces=NS) == r"C:\Sys32\cmd.exe"
     assert task.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == wi.task_arguments(
         os.path.join(root, "services", "PluginLoader.exe"), os.path.join(root, "tmp"))
@@ -210,7 +213,7 @@ def test_install_command_sequence_has_no_icacls_and_no_migration(tmp_path, capsy
 
 def test_root_handle_held_open_until_install_finishes(tmp_path):
     src_exe = _fake_env(tmp_path)
-    events: list = []
+    events: list[tuple[str, str]] = []
     dirs = Dirs(events)
     root = str(tmp_path / "ProgramData" / "decky")
     _install(tmp_path, src_exe, dirs=dirs, run=Recorder(events))
@@ -648,7 +651,7 @@ EXE = r"C:\ProgramData\decky\services\PluginLoader.exe"
 
 
 def test_matching_pids_compares_full_image_paths_case_insensitively():
-    procs = [(10, EXE), (11, EXE.upper()), (12, r"C:\Users\me\Downloads\PluginLoader.exe"),
+    procs: list[tuple[int, str | None]] = [(10, EXE), (11, EXE.upper()), (12, r"C:\Users\me\Downloads\PluginLoader.exe"),
              (13, EXE + ".new"), (14, r"C:\ProgramData\decky\services\..\services\PluginLoader.exe"), (15, None)]
     assert wi.matching_pids(procs, EXE, own=set()) == [10, 11, 14]
 
@@ -659,7 +662,7 @@ def test_matching_pids_skips_this_process_and_its_parent():
 
 def test_terminate_image_kills_only_matching_processes():
     killed: list[int] = []
-    procs = [(100, EXE), (200, r"C:\Windows\explorer.exe"), (300, EXE), (os.getpid(), EXE)]
+    procs: list[tuple[int, str | None]] = [(100, EXE), (200, r"C:\Windows\explorer.exe"), (300, EXE), (os.getpid(), EXE)]
     got = wi.terminate_image(EXE, processes=lambda: procs, terminate=killed.append)
     assert got == killed == [100, 300]
 
@@ -667,7 +670,7 @@ def test_terminate_image_kills_only_matching_processes():
 def test_terminate_image_keeps_going_when_one_kill_fails():
     killed: list[int] = []
 
-    def terminate(pid):
+    def terminate(pid: int) -> None:
         if pid == 100:
             raise PermissionError("gone")
         killed.append(pid)
@@ -676,30 +679,30 @@ def test_terminate_image_keeps_going_when_one_kill_fails():
 
 
 def test_list_processes_sees_this_process():
-    me = [p for pid, p in wi.list_processes() if pid == os.getpid()]
+    me = [p for pid, p in wi.list_processes() if pid == os.getpid() and p is not None]
     assert me and os.path.isabs(me[0]) and os.path.basename(me[0]).lower().startswith("python")
 
 
-def test_install_stops_running_copies_after_ending_the_task(tmp_path):
+def test_install_stops_running_copies_after_ending_the_task(tmp_path: Path):
     src_exe = _fake_env(tmp_path)
-    events: list = []
-    rc = _install(tmp_path, src_exe, run=Recorder(events), kill_running=lambda exe: events.append(("kill", exe)) or [])
+    events: list[tuple[str, str]] = []
+    rc = _install(tmp_path, src_exe, run=Recorder(events), kill_running=lambda exe: events.append(("kill", exe)) or list[int]())
     assert rc == 0
     installed = str(tmp_path / "ProgramData" / "decky" / "services" / "PluginLoader.exe")
     assert events[:2] == [("run", "/End"), ("kill", installed)]
 
 
-def test_uninstall_stops_running_copies_after_ending_the_task(tmp_path):
-    events: list = []
+def test_uninstall_stops_running_copies_after_ending_the_task(tmp_path: Path):
+    events: list[tuple[str, str]] = []
     pd = tmp_path / "ProgramData"
     (pd / "decky" / "services").mkdir(parents=True)
     rc = wi.uninstall(is_admin=lambda: True, run=Recorder(events), program_data=str(pd), defer_delete=lambda p: True,
-                      kill_running=lambda exe: events.append(("kill", exe)) or [])
+                      kill_running=lambda exe: events.append(("kill", exe)) or list[int]())
     assert rc == 0
     assert events == [("run", "/End"), ("kill", str(pd / "decky" / "services" / "PluginLoader.exe")), ("run", "/Delete")]
 
 
-def test_install_deletes_stale_update_files(tmp_path):
+def test_install_deletes_stale_update_files(tmp_path: Path):
     src_exe = _fake_env(tmp_path)
     services = tmp_path / "ProgramData" / "decky" / "services"
     services.mkdir(parents=True)
@@ -711,7 +714,7 @@ def test_install_deletes_stale_update_files(tmp_path):
     assert sorted(os.listdir(services)) == ["PluginLoader.exe", "keep.txt"]
 
 
-def test_install_fails_when_a_stale_update_cannot_be_removed(tmp_path, capsys, monkeypatch):
+def test_install_fails_when_a_stale_update_cannot_be_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     src_exe = _fake_env(tmp_path)
     services = tmp_path / "ProgramData" / "decky" / "services"
     services.mkdir(parents=True)
@@ -720,7 +723,7 @@ def test_install_fails_when_a_stale_update_cannot_be_removed(tmp_path, capsys, m
     (services / "PluginLoader.exe.new").write_bytes(b"stale")
     rec = Recorder()
 
-    def remove(p):
+    def remove(p: str) -> None:
         raise PermissionError("locked")
 
     assert _install(tmp_path, src_exe, dirs=dirs, run=rec, remove=remove) == 1
