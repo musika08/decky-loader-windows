@@ -190,19 +190,46 @@ def _system_directory() -> str:
     from .wininstall import system_directory
     return system_directory()
 
+CREATE_NO_WINDOW = 0x08000000
+RELAUNCH_WAIT_SECONDS = 10.0
+RELAUNCH_POLL_SECONDS = 0.25
+
+def image_running(target: str) -> bool:
+    '''True if a process other than this one (and its bootloader parent) is running from `target`.'''
+    from .wininstall import list_processes, matching_pids
+    try:
+        return bool(matching_pids(list_processes(), target, own={os.getpid(), os.getppid()}))
+    except OSError:
+        logger.exception("Could not list running processes")
+        return False
+
 def relaunch(target: str, *, installed: Callable[[], bool] = _is_installed, run: Callable[..., Any] = subprocess.run,
-             direct: Callable[[list[str]], None] = launch_detached, system_dir: Callable[[], str] = _system_directory) -> None:
+             direct: Callable[[list[str]], None] = launch_detached, system_dir: Callable[[], str] = _system_directory,
+             running: Callable[[str], bool] = image_running, sleep: Callable[[float], None] = time.sleep,
+             clock: Callable[[], float] = time.monotonic) -> None:
     '''Start the loader again after an update.
 
     Installed: through the scheduled task, so it keeps the task's elevation, admin-only temp directory and tracking.
-    Portable, or if the task cannot be started: a direct detached launch.'''
+    The task can accept the request and still not start the exe, so wait up to RELAUNCH_WAIT_SECONDS for `target`
+    to show up as a process.
+    Portable, or if the task cannot be started or does not start `target`: a direct detached launch.'''
     if installed():
         from .wininstall import TASK_NAME
         try:
-            run([os.path.join(system_dir(), "schtasks.exe"), "/Run", "/TN", TASK_NAME], check=True, capture_output=True)
-            return
+            run([os.path.join(system_dir(), "schtasks.exe"), "/Run", "/TN", TASK_NAME], check=True, capture_output=True,
+                creationflags=CREATE_NO_WINDOW)
         except (OSError, subprocess.SubprocessError):
             logger.exception("Could not start the %s task, launching %s directly", TASK_NAME, target)
+        else:
+            deadline = clock() + RELAUNCH_WAIT_SECONDS
+            while True:
+                if running(target):
+                    return
+                if clock() >= deadline:
+                    break
+                sleep(RELAUNCH_POLL_SECONDS)
+            logger.error("The %s task did not start %s within %s seconds, launching it directly", TASK_NAME, target,
+                         RELAUNCH_WAIT_SECONDS)
     direct([target])
 
 def _launch_target(target: str) -> None:

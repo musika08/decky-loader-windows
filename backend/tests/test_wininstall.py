@@ -17,6 +17,7 @@ SID = "S-1-5-21-1-2-3-1001"
 WSCRIPT = r"C:\Windows\System32\wscript.exe"
 TMP = r"C:\ProgramData\decky\tmp"
 LAUNCHER = r"C:\ProgramData\decky\services\launch.js"
+SCHTASKS = r"C:\Sys32\schtasks.exe"
 
 
 def test_task_xml_runs_highest_at_user_logon():
@@ -274,7 +275,8 @@ def _install(tmp_path, src_exe, dirs=None, **over):
     dirs = dirs or Dirs()
     kw = dict(is_admin=lambda: True, run=Recorder(), shell_execute=lambda *a: None,
               exe=str(src_exe), program_data=str(tmp_path / "ProgramData"), sleep=lambda s: None,
-              open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create, kill_running=lambda exe: [])
+              open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create, kill_running=lambda exe: [],
+              system_dir=lambda: r"C:\Sys32")
     kw.update(over)
     return wi.install(SID, **kw)
 
@@ -296,11 +298,11 @@ def test_install_command_sequence_has_no_icacls_and_no_migration(tmp_path, capsy
     root = str(tmp_path / "ProgramData" / "decky")
     assert rc == 0
     assert not hasattr(wi, "acl_commands") and not hasattr(wi, "migrate_plugins") and not hasattr(wi, "profile_path_for_sid")
-    assert rec.runs[0] == ["schtasks", "/End", "/TN", "Decky Loader"]
-    assert rec.runs[1][:4] == ["schtasks", "/Create", "/TN", "Decky Loader"]
+    assert rec.runs[0] == [SCHTASKS, "/End", "/TN", "Decky Loader"]
+    assert rec.runs[1][:4] == [SCHTASKS, "/Create", "/TN", "Decky Loader"]
     assert rec.runs[1][4] == "/XML" and rec.runs[1][6:] == ["/F"]
     assert os.path.dirname(rec.runs[1][5]) == root  # task XML staged inside the protected root
-    assert rec.runs[2] == ["schtasks", "/Run", "/TN", "Decky Loader"]
+    assert rec.runs[2] == [SCHTASKS, "/Run", "/TN", "Decky Loader"]
     assert len(rec.runs) == 3
     assert dirs.created == [root, os.path.join(root, "services"), os.path.join(root, "plugins"), os.path.join(root, "tmp")]
     assert os.path.isfile(os.path.join(root, "services", "PluginLoader.exe"))
@@ -451,7 +453,7 @@ def test_copy_error_returns_1_with_message(tmp_path, capsys):
     rec = Recorder()
     assert _install(tmp_path, src_exe, run=rec, copyfile=broken) == 1
     assert "disk full" in capsys.readouterr().err
-    assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
+    assert not any(r[1:2] == ["/Create"] for r in rec.runs)
 
 
 def test_open_trusted_dir_checks_on_the_handle():
@@ -569,7 +571,7 @@ def test_install_replace_gives_up_after_ten_attempts(tmp_path, capsys):
     rc = _install(tmp_path, src_exe, run=rec, replace=locked, sleep=sleeps.append)
     assert rc == 1 and len(attempts) == 10 and len(sleeps) == 9
     assert "still in use" in capsys.readouterr().err
-    assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
+    assert not any(r[1:2] == ["/Create"] for r in rec.runs)
     assert not [p for p in os.listdir(tmp_path / "ProgramData" / "decky" / "services") if "installing" in p]
 
 
@@ -637,9 +639,9 @@ def test_uninstall_ends_then_deletes_task_and_only_services_dir(tmp_path):
     (pd / "plugins").mkdir()
     rec = Recorder()
     rc = wi.uninstall(is_admin=lambda: True, run=rec, kill_running=lambda exe: [], shell_execute=lambda *a: None,
-                      program_data=str(tmp_path / "ProgramData"), defer_delete=lambda p: True)
+                      program_data=str(tmp_path / "ProgramData"), defer_delete=lambda p: True, system_dir=lambda: r"C:\Sys32")
     assert rc == 0
-    assert rec.runs == [["schtasks", "/End", "/TN", "Decky Loader"], ["schtasks", "/Delete", "/TN", "Decky Loader", "/F"]]
+    assert rec.runs == [[SCHTASKS, "/End", "/TN", "Decky Loader"], [SCHTASKS, "/Delete", "/TN", "Decky Loader", "/F"]]
     assert not (pd / "services").exists()
     assert (pd / "plugins").exists()
 
@@ -826,7 +828,7 @@ def test_install_fails_when_a_stale_update_cannot_be_removed(tmp_path: Path, cap
 
     assert _install(tmp_path, src_exe, dirs=dirs, run=rec, remove=remove) == 1
     assert "PluginLoader.exe.new" in capsys.readouterr().err
-    assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
+    assert not any(r[1:2] == ["/Create"] for r in rec.runs)
 
 
 def test_terminate_pid_really_stops_a_process():
@@ -846,3 +848,45 @@ def test_parent_pid_lookup():
     snap = lambda: [(4, 0), (10, 4), (20, 10)]
     assert wi.parent_pid(20, snapshot=snap) == 10
     assert wi.parent_pid(99, snapshot=snap) is None
+
+
+def test_system_schtasks_is_real():
+    assert os.path.isfile(os.path.join(wi.system_directory(), "schtasks.exe"))
+
+
+def test_terminate_image_survives_a_toolhelp_failure(caplog: pytest.LogCaptureFixture):
+    def broken() -> list[tuple[int, str | None]]:
+        raise OSError("CreateToolhelp32Snapshot failed")
+
+    killed: list[int] = []
+    assert wi.terminate_image(EXE, processes=broken, terminate=killed.append) == []
+    assert killed == [] and "Could not list running processes" in caplog.text
+
+
+def test_terminate_image_spares_this_process_and_its_whole_parent_chain():
+    me = os.getpid()
+    tree = [(me, 50), (50, 40), (40, 30), (30, 0), (77, 30), (88, 77)]
+    procs: list[tuple[int, str | None]] = [(me, EXE), (50, EXE), (40, EXE), (30, EXE), (77, EXE), (88, EXE)]
+    killed: list[int] = []
+    assert wi.terminate_image(EXE, processes=lambda: procs, terminate=killed.append, snapshot=lambda: tree) == [77, 88]
+
+
+def test_terminate_image_still_spares_self_and_parent_when_the_tree_cannot_be_read(caplog: pytest.LogCaptureFixture):
+    def broken() -> list[tuple[int, int]]:
+        raise OSError("snapshot failed")
+
+    procs: list[tuple[int, str | None]] = [(os.getpid(), EXE), (os.getppid(), EXE), (77, EXE)]
+    killed: list[int] = []
+    assert wi.terminate_image(EXE, processes=lambda: procs, terminate=killed.append, snapshot=broken) == [77]
+    assert "Could not read the process tree" in caplog.text
+
+
+def test_own_ancestry_stops_at_cycles_and_unknown_parents():
+    assert wi.own_ancestry(5, [(5, 4), (4, 5)]) == {4, 5}
+    assert wi.own_ancestry(5, [(5, 4)]) == {4, 5}
+    assert wi.own_ancestry(5, []) == {5}
+
+
+def test_own_ancestry_from_a_real_snapshot():
+    chain = wi.own_ancestry(os.getpid(), wi.process_snapshot())
+    assert {os.getpid(), os.getppid()} <= chain

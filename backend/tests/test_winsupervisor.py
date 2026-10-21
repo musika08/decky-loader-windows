@@ -264,26 +264,85 @@ def test_make_spawn_runs_the_loader_in_a_job():
 class TaskRunner:
     def __init__(self, failure: BaseException | None = None):
         self.calls: list[list[str]] = []
+        self.kwargs: list[dict[str, Any]] = []
         self.failure = failure
 
-    def __call__(self, argv: list[str], **_kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
+    def __call__(self, argv: list[str], **kwargs: Any) -> "subprocess.CompletedProcess[bytes]":
         self.calls.append(list(argv))
+        self.kwargs.append(kwargs)
         if self.failure is not None:
             raise self.failure
         return subprocess.CompletedProcess(argv, 0)
 
 
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def sleep(self, s: float) -> None:
+        self.sleeps.append(s)
+        self.now += s
+
+
 def test_relaunch_installed_uses_the_scheduled_task():
-    run, direct = TaskRunner(), list[list[str]]()
-    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
+    run, direct, clk = TaskRunner(), list[list[str]](), FakeClock()
+    seen: list[str] = []
+
+    def running(target: str) -> bool:
+        seen.append(target)
+        return True
+
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32",
+                running=running, sleep=clk.sleep, clock=clk.clock)
     assert run.calls == [[r"C:\Sys32\schtasks.exe", "/Run", "/TN", "Decky Loader"]]
+    assert run.kwargs[0]["creationflags"] == 0x08000000 == subprocess.CREATE_NO_WINDOW
+    assert run.kwargs[0]["check"] is True
+    assert seen == ["T.exe"] and clk.sleeps == []
     assert direct == []
+
+
+def test_relaunch_waits_for_the_task_to_start_the_exe():
+    run, direct, clk = TaskRunner(), list[list[str]](), FakeClock()
+    answers = [False, False, False, True]
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32",
+                running=lambda t: answers.pop(0), sleep=clk.sleep, clock=clk.clock)
+    assert clk.sleeps == [0.25, 0.25, 0.25] and direct == []
+
+
+def test_relaunch_launches_directly_when_the_task_never_starts_the_exe(caplog: pytest.LogCaptureFixture):
+    run, direct, clk = TaskRunner(), list[list[str]](), FakeClock()
+    polls: list[float] = []
+
+    def running(target: str) -> bool:
+        polls.append(clk.now)
+        return False
+
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32",
+                running=running, sleep=clk.sleep, clock=clk.clock)
+    assert direct == [["T.exe"]]
+    assert polls[0] == 0.0 and polls[-1] == 10.0 and clk.now == 10.0
+    assert "did not start" in caplog.text
+
+
+def test_image_running_sees_a_real_process_from_that_image():
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert ws.image_running(sys.executable) is True
+        assert ws.image_running(sys.executable + ".missing") is False
+    finally:
+        p.kill()
+        p.wait(10)
 
 
 @pytest.mark.parametrize("failure", [subprocess.CalledProcessError(1, "schtasks"), FileNotFoundError("schtasks")])
 def test_relaunch_installed_falls_back_to_direct_launch(failure: BaseException):
     run, direct = TaskRunner(failure), list[list[str]]()
-    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32",
+                running=lambda t: pytest.fail("no polling after a failed schtasks"), sleep=lambda s: None)
     assert len(run.calls) == 1
     assert direct == [["T.exe"]]
 
@@ -440,3 +499,14 @@ def test_not_frozen_never_looks_up_the_grandparent(monkeypatch: pytest.MonkeyPat
 
     assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: None, ppid=lambda: 500, parent_of=lookup) is True
     assert looked_up == [] and k.calls == [-1]
+
+
+def test_finish_update_branch_never_attaches_a_console():
+    # Closing a console window must not kill the finisher mid-copy, so main.py gives that branch no console
+    import ast
+    main_py = Path(__file__).resolve().parent.parent / "main.py"
+    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    branches = [n for n in ast.walk(tree) if isinstance(n, ast.If) and "--finish-update" in ast.unparse(n.test)]
+    assert len(branches) == 1
+    calls = {ast.unparse(c.func) for b in branches[0].body for c in ast.walk(b) if isinstance(c, ast.Call)}
+    assert "cli_console" not in calls and "finish_update" in calls

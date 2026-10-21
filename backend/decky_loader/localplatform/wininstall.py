@@ -435,12 +435,35 @@ def terminate_pid(pid: int) -> None:
     finally:
         k.CloseHandle(h)
 
+def own_ancestry(pid: int, processes: list[tuple[int, int]]) -> set[int]:
+    '''`pid` and every ancestor of it that `processes` (pid, parent pid) still knows about.'''
+    parents = dict(processes)
+    chain = {pid}
+    while pid in parents and parents[pid] not in chain and parents[pid] != 0:
+        pid = parents[pid]
+        chain.add(pid)
+    return chain
+
 def terminate_image(exe: str, *, processes: Callable[[], list[tuple[int, str | None]]] = list_processes,
-                    terminate: Callable[[int], None] = terminate_pid) -> list[int]:
+                    terminate: Callable[[int], None] = terminate_pid,
+                    snapshot: Callable[[], list[tuple[int, int]]] = process_snapshot) -> list[int]:
     '''Kill every process running from `exe` (supervisor, loader, root plugin hosts), except this one and its
-    onefile bootloader parent. `schtasks /End` only ends the task's own process, not what it started.'''
+    parent chain (the onefile bootloader, and whatever started it). `schtasks /End` only ends the task's own
+    process, not what it started. Failing to list processes is logged and skipped rather than raised.'''
+    try:
+        running = processes()
+    except OSError as e:
+        logger.warning("Could not list running processes, so copies of %s were not stopped: %s", exe, e)
+        return []
+    me = os.getpid()
+    try:
+        own = own_ancestry(me, snapshot())
+    except OSError as e:
+        logger.warning("Could not read the process tree: %s", e)
+        own = set[int]()
+    own |= {me, os.getppid()}
     killed: list[int] = []
-    for pid in matching_pids(processes(), exe, own={os.getpid(), os.getppid()}):
+    for pid in matching_pids(running, exe, own=own):
         try:
             terminate(pid)
             killed.append(pid)
@@ -535,6 +558,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
     tmp_dir = os.path.join(root, "tmp")
     installed_exe = os.path.join(services, EXE_NAME)
     launcher = os.path.join(services, LAUNCHER_NAME)
+    system = system_dir()
+    schtasks = os.path.join(system, "schtasks.exe")
     try:
         script = launcher_script(installed_exe, tmp_dir)
         task_arguments(launcher)
@@ -544,7 +569,7 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
 
     # Stop a running elevated loader first, it locks the installed exe. Ending the task only ends its first
     # process, so also stop everything else still running from the installed exe.
-    run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
+    run([schtasks, "/End", "/TN", TASK_NAME], check=False)
     kill_running(installed_exe)
 
     root_handle: Any = None
@@ -593,8 +618,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
         try:
             with os.fdopen(fd, "w", encoding="utf-16") as f: # utf-16 writes a BOM
-                f.write(build_task_xml(launcher, services, sid, os.path.join(system_dir(), "wscript.exe")))
-            run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
+                f.write(build_task_xml(launcher, services, sid, os.path.join(system, "wscript.exe")))
+            run([schtasks, "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
         finally:
             try:
                 os.remove(xml_path)
@@ -602,7 +627,7 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
                 pass
             except OSError:
                 logger.exception("Could not remove task file %s", xml_path)
-        run(["schtasks", "/Run", "/TN", TASK_NAME], check=True)
+        run([schtasks, "/Run", "/TN", TASK_NAME], check=True)
     finally:
         if root_handle is not None:
             close_dir(root_handle)
@@ -614,14 +639,16 @@ def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any
               shell_execute: Callable[..., int] = _shell_execute, exe: str | None = None,
               program_data: str | None = None, rmtree: Callable[..., Any] = shutil.rmtree,
               defer_delete: Callable[[str], bool] = move_on_reboot,
-              kill_running: Callable[[str], list[int]] = terminate_image) -> int:
+              kill_running: Callable[[str], list[int]] = terminate_image,
+              system_dir: Callable[[], str] = system_directory) -> int:
     if not is_admin():
         return _elevate("--uninstall", shell_execute, exe or sys.executable)
 
     services = os.path.join(program_data or known_program_data(), "decky", "services")
-    run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
+    schtasks = os.path.join(system_dir(), "schtasks.exe")
+    run([schtasks, "/End", "/TN", TASK_NAME], check=False)
     kill_running(os.path.join(services, EXE_NAME))
-    run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], check=False)
+    run([schtasks, "/Delete", "/TN", TASK_NAME, "/F"], check=False)
 
     failed: list[str] = []
 

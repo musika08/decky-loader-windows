@@ -12,7 +12,7 @@ if __name__ == "__main__":
         from decky_loader.main import main
         main()
     elif sys.argv[1:2] == ["--finish-update"] and len(sys.argv) == 4:
-        cli_console()
+        # No cli_console(): closing a console window must not kill the finisher mid-copy
         from decky_loader.localplatform.winsupervisor import finish_update
         sys.exit(finish_update(sys.argv[2], int(sys.argv[3])))
     elif len(sys.argv) == 1:
