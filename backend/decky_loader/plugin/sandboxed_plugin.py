@@ -10,7 +10,7 @@ from signal import SIGINT, SIGTERM
 from setproctitle import setproctitle, setthreadtitle
 
 from .messages import SocketResponseDict, SocketMessageType
-from ..localplatform.localsocket import LocalSocket
+from ..localplatform.localsocket import UnixSocket
 from ..localplatform.localplatform import setgid, setuid, get_username, get_home_path, ON_LINUX
 from ..enums import UserType
 from .. import helpers
@@ -52,7 +52,7 @@ class SandboxedPlugin:
 
         return self.name
 
-    def initialize(self, socket: LocalSocket):
+    def initialize(self, socket: UnixSocket):
         self._socket = socket
 
         try:

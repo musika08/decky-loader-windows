@@ -1,7 +1,7 @@
 from asyncio import CancelledError, Task, create_task, sleep, wait
 from json import dumps, load, loads
 from logging import getLogger
-from os import path
+from os import environ, path
 from multiprocessing import Process
 from time import time
 from traceback import format_exc
@@ -9,11 +9,14 @@ from traceback import format_exc
 from .sandboxed_plugin import SandboxedPlugin
 from .messages import MethodCallRequest, SocketMessageType
 from ..enums import PluginLoadType, UserType
-from ..localplatform.localplatform import file_owner, chown, chmod, get_chown_plugin_path
-from ..localplatform.localsocket import LocalSocket
+from ..localplatform.localplatform import file_owner, chown, chmod, get_chown_plugin_path, ON_WINDOWS
+from ..localplatform.localsocket import LocalSocket, PortSocket
 from ..helpers import get_homebrew_path, mkdir_as_user
 
-from typing import Any, Callable, Coroutine, Dict, List
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List
+
+if TYPE_CHECKING:
+    from ..localplatform.winprocess import PluginProcess
 
 EmittedEventCallbackType = Callable[[str, Any], Coroutine[Any, Any, Any]]
 
@@ -59,7 +62,7 @@ class PluginWrapper:
                 chmod(plugin_json_path, 755, False)
 
         self.sandboxed_plugin = SandboxedPlugin(self.name, self.passive, self.flags, self.file, self.plugin_directory, self.plugin_path, self.version, self.author, self.api_version)
-        self.proc: Process | None = None
+        self.proc: "Process | PluginProcess | None" = None
         self._socket = LocalSocket()
         self._listener_task: Task[Any]
         self._method_call_requests: Dict[str, MethodCallRequest] = {}
@@ -139,10 +142,32 @@ class PluginWrapper:
     def start(self):
         if self.passive:
             return self
-        self.proc = Process(target=self.sandboxed_plugin.initialize, args=[self._socket])
-        self.proc.start()
+        if ON_WINDOWS:
+            self.proc = self._start_windows()
+        else:
+            self.proc = Process(target=self.sandboxed_plugin.initialize, args=[self._socket])
+            self.proc.start()
         self._listener_task = create_task(self._response_listener())
         return self
+
+    def _start_windows(self) -> "PluginProcess":
+        '''Start the plugin host as its own program: elevated for root plugins, restricted otherwise.'''
+        from ..localplatform import winprocess
+        from ..localplatform.winsupervisor import self_command
+        from .plugin_host import TOKEN_ENV, encode_params
+
+        sock = self._socket
+        assert isinstance(sock, PortSocket)
+        elevated = "root" in self.flags
+        if elevated and not winprocess.is_elevated():
+            self.log.warning(f"Plugin {self.get_display_name()} requests root, but the loader is unelevated. Starting it with the loader's privileges.")
+        env = dict(environ)
+        env[TOKEN_ENV] = sock.token
+        # The child must own its PyInstaller extraction directory, since it may outlive this loader
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        proc = winprocess.PluginProcess(self_command() + ["--plugin-host", encode_params(self.sandboxed_plugin, sock.port)], env, elevated)
+        proc.start()
+        return proc
 
     async def stop(self, uninstall: bool = False):
         try:

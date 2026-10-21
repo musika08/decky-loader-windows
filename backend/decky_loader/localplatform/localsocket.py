@@ -1,10 +1,11 @@
-import asyncio, time
+import asyncio, hmac, secrets, time
 from typing import Any, Callable, Coroutine
 import random
 
 from .localplatform import ON_WINDOWS
 
 BUFFER_LIMIT = 2 ** 20  # 1 MiB
+AUTH_TIMEOUT = 5.0  # seconds a PortSocket client gets to send its token line
 
 class UnixSocket:
     def __init__(self):
@@ -126,15 +127,19 @@ class UnixSocket:
             asyncio.create_task(self.on_new_message(line)).add_done_callback(_)
             
 class PortSocket (UnixSocket):
-    def __init__(self):
+    def __init__(self, port: int | None = None, token: str | None = None):
         '''
         on_new_message takes 1 string argument.
         It's return value gets used, if not None, to write data to the socket.
         Method should be async
+
+        Any local process can reach a TCP port, so the client must send `token` as its first line.
+        The server drops connections that do not, before any message is handled.
         '''
         super().__init__()
         self.host = "127.0.0.1"
-        self.port = random.sample(range(40000, 60000), 1)[0]
+        self.port = port if port is not None else random.sample(range(40000, 60000), 1)[0]
+        self.token = token if token is not None else secrets.token_hex(16)
     
     async def setup_server(self, on_new_message: Callable[[str], Coroutine[Any, Any, Any]]):
         try:
@@ -149,7 +154,10 @@ class PortSocket (UnixSocket):
             retries = 0
             while retries < 10:
                 try:
-                    self.reader, self.writer = await asyncio.open_connection(host=self.host, port=self.port, limit=BUFFER_LIMIT)
+                    reader, writer = await asyncio.open_connection(host=self.host, port=self.port, limit=BUFFER_LIMIT)
+                    writer.write(self._token_line())
+                    await writer.drain()
+                    self.reader, self.writer = reader, writer
                     return True
                 except:
                     await asyncio.sleep(2)
@@ -157,6 +165,22 @@ class PortSocket (UnixSocket):
             return False
         else:
             return True
+
+    def _token_line(self) -> bytes:
+        return (self.token + "\n").encode("utf-8")
+
+    async def _listen_for_method_call(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+        try:
+            line = await asyncio.wait_for(reader.readline(), AUTH_TIMEOUT)
+        except asyncio.CancelledError:
+            writer.close()
+            raise
+        except Exception: # timeout, oversized line, reset connection
+            line = b""
+        if not hmac.compare_digest(line, self._token_line()):
+            writer.close()
+            return
+        await super()._listen_for_method_call(reader, writer)
 
 if ON_WINDOWS:
     class LocalSocket (PortSocket):  # type: ignore
