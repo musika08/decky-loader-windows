@@ -393,3 +393,40 @@ def test_plugin_host_end_to_end_restricted(child_dir: Path, monkeypatch: pytest.
         proc.kill()
         _wait_dead(proc, 10)
         proc.close()
+
+
+def test_plugin_stop_runs_unload_end_to_end(child_dir: Path, monkeypatch: pytest.MonkeyPatch):
+    plugins = child_dir / "plugins"
+    pdir = plugins / "Unloader"
+    pdir.mkdir(parents=True)
+    marker = child_dir / "unloaded"
+    (pdir / "plugin.json").write_text(json.dumps({"name": "Unloader", "author": "me", "flags": [], "api_version": 1}))
+    (pdir / "main.py").write_text(
+        "class Plugin:\n"
+        "    async def ping(self):\n"
+        "        return 1\n"
+        "    async def _unload(self):\n"
+        f"        open({str(marker)!r}, 'w').close()\n")
+    home = child_dir / "home"
+    monkeypatch.setattr(plugin_mod, "get_homebrew_path", lambda: str(home))
+    monkeypatch.setenv("UNPRIVILEGED_PATH", str(home))
+
+    async def noop(*_: Any) -> None:
+        pass
+
+    async def run() -> tuple[float, int | None]:
+        w = plugin_mod.PluginWrapper(str(pdir / "main.py"), "Unloader", str(plugins), noop)
+        w.start()
+        proc = w.proc
+        assert proc is not None
+        # Wait until the host is up and answering, so the stop line goes over a live connection
+        assert await asyncio.wait_for(w.execute_method("ping"), 30) is not None
+        pid = proc.pid # pyright: ignore [reportAttributeAccessIssue]
+        t0 = time.monotonic()
+        await w.stop()
+        return time.monotonic() - t0, pid
+
+    elapsed, pid = asyncio.run(run())
+    assert marker.exists(), "_unload did not run"
+    assert elapsed < 6
+    assert pid is not None and _pid_gone(pid, 6000)

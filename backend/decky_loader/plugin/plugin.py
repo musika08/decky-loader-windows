@@ -1,4 +1,4 @@
-from asyncio import CancelledError, Task, create_task, sleep, wait
+from asyncio import CancelledError, Task, create_task, sleep, wait, wait_for
 from json import dumps, load, loads
 from logging import getLogger
 from os import environ, path
@@ -191,12 +191,18 @@ class PluginWrapper:
                     create_task(self._socket.write_single_line(dumps({ "uninstall": uninstall }, ensure_ascii=False)))
                 ], timeout=1)
 
-            self.terminate() # the plugin process will handle SIGTERM and shut down cleanly without a socket message
+            if ON_WINDOWS:
+                await self._request_stop() # no SIGTERM on Windows: ask over the socket, kill_if_still_running is the backstop
+            else:
+                self.terminate() # the plugin process will handle SIGTERM and shut down cleanly without a socket message
 
             if hasattr(self, "_listener_task"):
                 self._listener_task.cancel()
             
             await self.kill_if_still_running()
+
+            if ON_WINDOWS and self.proc:
+                self.proc.close() # the process is gone; release the job now rather than at garbage collection
 
             if pending:
                 for pending_task in pending:
@@ -205,6 +211,12 @@ class PluginWrapper:
             self.log.info(f"Plugin {self.get_display_name()} has been stopped in {time() - start_time:.1f}s")
         except Exception as e:
             self.log.error(f"Error during shutdown for plugin {self.get_display_name()}: {str(e)}\n{format_exc()}")
+
+    async def _request_stop(self):
+        try:
+            await wait_for(self._socket.write_single_line(dumps({ "stop": True }, ensure_ascii=False)), timeout=2)
+        except Exception as e:
+            self.log.warning(f"Could not send the stop request to {self.get_display_name()}: {e!r}")
 
     async def kill_if_still_running(self):
         start_time = time()

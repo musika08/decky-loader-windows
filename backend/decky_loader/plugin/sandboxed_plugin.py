@@ -196,6 +196,11 @@ class SandboxedPlugin:
             self.uninstalling = data.get("uninstall")
             return
 
+        if data.get("stop"):
+            # Windows has no SIGTERM, so the loader asks for a clean shutdown over the socket
+            ensure_future(self.shutdown())
+            return
+
         d: SocketResponseDict = {"type": SocketMessageType.RESPONSE, "res": None, "success": True, "id": data["id"]}
         try:
             if data.get("legacy"):
