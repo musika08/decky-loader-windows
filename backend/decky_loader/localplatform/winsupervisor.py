@@ -19,24 +19,43 @@ PARENT_WAIT_MS = 30000
 COPY_ATTEMPTS = 30
 CLEANUP_SECONDS = 60
 
-# The PyInstaller bootloader reuses its parent's extraction directory unless told otherwise.
+# A onefile PyInstaller bootloader reuses its parent's extraction directory unless told otherwise.
 # Every process we start must own its directory, since the starter exits (or is replaced) before it does.
+# A onedir build extracts nothing and runs the same way with or without it.
 _FRESH_ENV = {"PYINSTALLER_RESET_ENVIRONMENT": "1"}
 
 ATTACH_PARENT_PROCESS = -1
+
+# PyInstaller's default onedir contents directory (EXE(contents_directory=...), "_internal" since PyInstaller 6)
+ONEDIR_CONTENTS = "_internal"
+
+def is_onedir_build() -> bool:
+    r'''True for a PyInstaller onedir build: frozen, with `sys._MEIPASS` being the `_internal` folder next to the exe.
+
+    A onefile build points `sys._MEIPASS` at its extraction directory in %TEMP% instead.'''
+    if not getattr(sys, "frozen", False):
+        return False
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not isinstance(meipass, str) or not meipass:
+        return False
+    def norm(p: str) -> str:
+        return os.path.normcase(os.path.realpath(p))
+    return norm(meipass) == norm(os.path.join(os.path.dirname(sys.executable), ONEDIR_CONTENTS))
 
 def _parent_pid(pid: int) -> int | None:
     from .wininstall import parent_pid
     return parent_pid(pid)
 
 def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any] = open,
-                          ppid: Callable[[], int] = os.getppid, parent_of: Callable[[int], int | None] = _parent_pid) -> bool:
+                          ppid: Callable[[], int] = os.getppid, parent_of: Callable[[int], int | None] = _parent_pid,
+                          onedir: Callable[[], bool] = is_onedir_build) -> bool:
     '''In a windowed (-noconsole) build sys.stdout/sys.stderr are None, so CLI modes would print nothing.
     Attach to the console of whoever started us and write there. If there is none, output goes nowhere.
 
     In a onefile build our code runs in the bootloader's child, and a windowed bootloader has no console, so the
-    console to attach to is the bootloader's parent's (the terminal the user typed into). Fall back to our direct
-    parent's console when that fails or we are not frozen.'''
+    console to attach to is the bootloader's parent's (the terminal the user typed into). A onedir build has no
+    bootloader process, so there the terminal is our direct parent. Fall back to our direct parent's console when
+    that fails or we are not a onefile build.'''
     if sys.stdout is not None:
         return False
     try:
@@ -44,7 +63,7 @@ def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any
             import ctypes
             kernel32 = ctypes.windll.kernel32 # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
         attached = False
-        if getattr(sys, "frozen", False):
+        if getattr(sys, "frozen", False) and not onedir():
             try:
                 launcher = parent_of(ppid())
             except OSError:

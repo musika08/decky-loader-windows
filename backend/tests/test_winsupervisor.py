@@ -669,3 +669,64 @@ def test_real_lock_refused_for_a_mutex_this_user_cannot_open():
     finally:
         _close(held)
     assert proc.returncode == 11, proc.stderr
+
+
+# Onedir detection (installed mode installs only a onedir build)
+
+def _frozen_as(monkeypatch: pytest.MonkeyPatch, exe: Path, meipass: Path | None) -> None:
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe))
+    if meipass is None:
+        monkeypatch.delattr(sys, "_MEIPASS", raising=False)
+    else:
+        monkeypatch.setattr(sys, "_MEIPASS", str(meipass), raising=False)
+
+
+def test_onedir_build_is_meipass_internal_next_to_the_exe(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    exe = tmp_path / "Decky Loader" / "PluginLoader.exe"
+    (exe.parent / "_internal").mkdir(parents=True)
+    _frozen_as(monkeypatch, exe, exe.parent / "_internal")
+    assert ws.is_onedir_build() is True
+    # Case and separators do not matter
+    _frozen_as(monkeypatch, exe, Path(str(exe.parent / "_INTERNAL").upper().replace("\\", "/")))
+    assert ws.is_onedir_build() is True
+
+
+def test_onefile_build_is_not_onedir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    exe = tmp_path / "portable" / "PluginLoader.exe"
+    _frozen_as(monkeypatch, exe, tmp_path / "Temp" / "_MEI12345")
+    assert ws.is_onedir_build() is False
+    _frozen_as(monkeypatch, exe, exe.parent / "other")
+    assert ws.is_onedir_build() is False
+    _frozen_as(monkeypatch, exe, None)
+    assert ws.is_onedir_build() is False
+
+
+def test_not_frozen_is_not_onedir(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "_internal"), raising=False)
+    assert ws.is_onedir_build() is False
+
+
+def test_onedir_attaches_to_the_direct_parent_without_a_grandparent_lookup(monkeypatch: pytest.MonkeyPatch):
+    # No bootloader process in onedir: the terminal the user typed into is our direct parent
+    _no_std_streams(monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    k, looked_up = ScriptedKernel32({900: True, -1: True}), list[int]()
+
+    def lookup(pid: int) -> int | None:
+        looked_up.append(pid)
+        return 900
+
+    ok = ws.attach_parent_console(kernel32=k, opener=lambda p, m: f"{p}:{m}", ppid=lambda: 500, parent_of=lookup,
+                                  onedir=lambda: True)
+    assert ok is True and looked_up == [] and k.calls == [-1]
+
+
+def test_spec_builds_onedir_only_when_asked():
+    spec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyinstaller.spec")
+    with open(spec, encoding="utf-8") as f:
+        text = f.read()
+    assert "onedir = os.getenv('DECKY_ONEDIR', '0') == '1'" in text
+    assert "exclude_binaries=True" in text and "COLLECT(" in text

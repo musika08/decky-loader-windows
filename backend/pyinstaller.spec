@@ -2,11 +2,13 @@ import os
 import sys
 import importlib.util
 from PyInstaller.building.build_main import Analysis
-from PyInstaller.building.api import EXE, PYZ
+from PyInstaller.building.api import COLLECT, EXE, PYZ
 from PyInstaller.utils.hooks import copy_metadata
 
 noconsole_str = os.getenv('DECKY_NOCONSOLE', '0')
 noconsole = noconsole_str == '1'
+# Onedir (PluginLoader.exe plus its _internal folder) is what Windows installed mode installs. Onefile stays the default.
+onedir = os.getenv('DECKY_ONEDIR', '0') == '1'
 repo = os.getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')
 branch = os.getenv('DECKY_BRANCH', 'main')
 with open('build_config.py', 'w') as f:
@@ -50,13 +52,31 @@ a = Analysis(
 )
 pyz = PYZ(a.pure, a.zipped_data)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    name=name,
-    upx=True,
-    console=not noconsole,
-)
+if onedir:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name=name,
+        upx=True,
+        console=not noconsole,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        name=name,
+        upx=True,
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        name=name,
+        upx=True,
+        console=not noconsole,
+    )
