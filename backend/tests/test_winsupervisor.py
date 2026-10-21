@@ -57,7 +57,9 @@ def test_backoff_is_capped():
     assert ws.next_backoff(30.0, 1.0) == 30.0
 
 
-def test_restart_with_pending_update_hands_off(tmp_path):
+@pytest.mark.parametrize("frozen", [True, False])
+def test_restart_with_pending_update_hands_off(tmp_path, monkeypatch, frozen):
+    monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     exe = tmp_path / "PluginLoader.exe"
     new = tmp_path / "PluginLoader.exe.new"
     exe.write_bytes(b"old")
@@ -65,7 +67,56 @@ def test_restart_with_pending_update_hands_off(tmp_path):
     rc, spawn, _, detached = run([42], str(exe))
     assert rc == 0
     assert len(spawn.calls) == 1
-    assert detached == [[str(new), "--finish-update", str(exe), str(os.getpid())]]
+    waited = os.getppid() if frozen else os.getpid()
+    assert detached == [[str(new), "--finish-update", str(exe), str(waited)]]
+
+
+def test_failed_handoff_discards_new_and_keeps_supervising(tmp_path):
+    exe = tmp_path / "PluginLoader.exe"
+    new = tmp_path / "PluginLoader.exe.new"
+    exe.write_bytes(b"old")
+    new.write_bytes(b"not an exe")
+    spawn = Spawner([42, 43])
+
+    def boom(_argv: list[str]) -> None:
+        raise OSError("not a valid exe")
+
+    rc = ws.run_supervisor(spawn, lambda _s: None, str(exe), boom)
+    assert rc == 0
+    assert len(spawn.calls) == 2
+    assert not new.exists()
+
+
+def test_identical_new_is_not_pending(tmp_path):
+    exe = tmp_path / "PluginLoader.exe"
+    new = tmp_path / "PluginLoader.exe.new"
+    exe.write_bytes(b"same bytes")
+    new.write_bytes(b"same bytes")
+    assert ws.pending_update_path(str(exe)) is None
+    new.write_bytes(b"same bytez")
+    assert ws.pending_update_path(str(exe)) == str(new)
+
+
+def test_cleanup_deletes_identical_new_once_lock_releases(tmp_path):
+    exe = tmp_path / "PluginLoader.exe"
+    new = tmp_path / "PluginLoader.exe.new"
+    exe.write_bytes(b"same")
+    new.write_bytes(b"same")
+    attempts: list[str] = []
+    sleeps: list[float] = []
+
+    def remove(p: str) -> None:
+        attempts.append(p)
+        if len(attempts) < 4:
+            raise PermissionError()  # still locked by the finisher
+        os.remove(p)
+
+    t = ws.cleanup_stale_update(str(exe), remove=remove, sleep=sleeps.append)
+    assert t is not None
+    t.join(5)
+    assert len(attempts) == 4
+    assert len(sleeps) == 3
+    assert not new.exists()
 
 
 def test_pending_update_path(tmp_path):
@@ -76,15 +127,6 @@ def test_pending_update_path(tmp_path):
     assert ws.pending_update_path(str(exe)) is None
     new.write_bytes(b"x")
     assert ws.pending_update_path(str(exe)) == str(new)
-
-
-def test_cleanup_stale_update(tmp_path):
-    exe = tmp_path / "PluginLoader.exe"
-    new = tmp_path / "PluginLoader.exe.new"
-    new.write_bytes(b"x")
-    ws.cleanup_stale_update(str(exe))
-    assert not new.exists()
-    ws.cleanup_stale_update(str(exe))  # missing file is fine
 
 
 def test_finish_update_retries_locked_target():
@@ -104,7 +146,7 @@ def test_finish_update_retries_locked_target():
     assert launched == ["T.exe"]
 
 
-def test_finish_update_gives_up_after_five_failures():
+def test_finish_update_gives_up_but_relaunches_old_version():
     calls: list[int] = []
 
     def copy(src: str, dst: str) -> None:
@@ -114,8 +156,8 @@ def test_finish_update_gives_up_after_five_failures():
     launched: list[str] = []
     rc = ws.finish_update("T.exe", 0, copy=copy, launch=launched.append, sleep=lambda _s: None)
     assert rc == 1
-    assert len(calls) == 5
-    assert launched == []
+    assert len(calls) == 30
+    assert launched == ["T.exe"]
 
 
 def test_finish_update_waits_for_dead_pid():

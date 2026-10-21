@@ -2,8 +2,10 @@
 
 The supervisor runs the loader as a child process (`--loader`). The child reports what it wants through its exit code.
 '''
-import os, shutil, subprocess, sys, time
+import hashlib, logging, os, shutil, subprocess, sys, threading, time
 from typing import Callable
+
+logger = logging.getLogger("winsupervisor")
 
 EXIT_RESTART: int = 42
 EXIT_STOP: int = 43
@@ -14,7 +16,8 @@ HEALTHY_RUN_SECONDS = 60.0
 
 SYNCHRONIZE = 0x00100000
 PARENT_WAIT_MS = 30000
-COPY_ATTEMPTS = 5
+COPY_ATTEMPTS = 30
+CLEANUP_SECONDS = 60
 
 # The PyInstaller bootloader reuses its parent's extraction directory unless told otherwise.
 # Every process we start must own its directory, since the starter exits (or is replaced) before it does.
@@ -32,24 +35,52 @@ def next_backoff(prev: float, ran_for: float) -> float:
         return BACKOFF_START
     return min(prev * 2, BACKOFF_MAX)
 
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _identical(a: str, b: str) -> bool:
+    try:
+        return os.path.getsize(a) == os.path.getsize(b) and _sha256(a) == _sha256(b)
+    except OSError:
+        return False
+
 def pending_update_path(exe: str) -> str | None:
     new = exe + ".new"
     try:
-        if os.path.getsize(new) > 0:
+        if os.path.getsize(new) > 0 and not _identical(new, exe):
             return new
     except OSError:
         pass
     return None
 
-def cleanup_stale_update(exe: str) -> None:
-    '''Best effort removal of a leftover `<exe>.new` from a finished update.'''
+def cleanup_stale_update(exe: str, remove: Callable[[str], None] = os.remove, sleep: Callable[[float], None] = time.sleep) -> threading.Thread | None:
+    '''Remove a leftover `<exe>.new` from a finished update.
+
+    The finisher may still be running from that file, so deletion is retried in a background thread.
+    '''
     new = exe + ".new"
-    if os.path.normcase(os.path.abspath(new)) == os.path.normcase(os.path.abspath(sys.executable)):
-        return
-    try:
-        os.remove(new)
-    except OSError:
-        pass
+    if not os.path.exists(new) or os.path.normcase(os.path.abspath(new)) == os.path.normcase(os.path.abspath(sys.executable)):
+        return None
+    if pending_update_path(exe) is not None:
+        return None # A genuinely different pending update, keep it
+
+    def work() -> None:
+        for _ in range(CLEANUP_SECONDS):
+            try:
+                remove(new)
+                return
+            except FileNotFoundError:
+                return
+            except OSError:
+                sleep(1.0)
+
+    thread = threading.Thread(target=work, daemon=True)
+    thread.start()
+    return thread
 
 def make_spawn(exe: str) -> Callable[[list[str]], int]:
     '''Blocking spawn of the loader child; returns its exit code.'''
@@ -80,8 +111,18 @@ def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], N
             new = pending_update_path(exe)
             if new is not None:
                 # The finisher outlives us, so it must not be a child we wait on.
-                launch_detached([new, "--finish-update", exe, str(os.getpid())])
-                return 0
+                # Under a onefile build our own pid is the child; the bootloader parent is what holds the image lock.
+                waiting_on = os.getppid() if getattr(sys, "frozen", False) else os.getpid()
+                try:
+                    launch_detached([new, "--finish-update", exe, str(waiting_on)])
+                    return 0
+                except OSError:
+                    logger.exception("Could not start the update finisher, discarding the pending update")
+                    try:
+                        os.remove(new)
+                    except OSError:
+                        pass
+                    continue
             continue
 
         backoff = next_backoff(backoff, ran_for)
@@ -112,6 +153,8 @@ def finish_update(target: str, parent_pid: int, copy: Callable[[str, str], objec
             break
         except OSError:
             if attempt == COPY_ATTEMPTS - 1:
+                # Bring the old version back rather than leaving no loader running
+                launch(target)
                 return 1
             sleep(1.0)
 

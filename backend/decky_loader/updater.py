@@ -181,7 +181,8 @@ class Updater:
 
     async def download_decky_binary(self, download_url: str, version: str, is_zip: bool = False, size_in_bytes: int | None = None):
         download_filename = self.get_local_binary_name()
-        download_temp_filename = download_filename + ".new"
+        # On Windows ".new" means "complete, ready to swap in", so stream into a separate name first
+        download_temp_filename = download_filename + (".download" if ON_WINDOWS else ".new")
 
         if size_in_bytes == None:
             size_in_bytes = 35000000 # 35MiB, a reasonable overestimate (30.00 MiB as of 2026/10/05)
@@ -222,14 +223,17 @@ class Updater:
                 process = await create_subprocess_exec("chcon", "-t", "bin_t", path.join(getcwd(), download_filename))
                 logger.info(f"Setting the executable flag with chcon returned {await process.wait()}")
 
-        if ON_WINDOWS and is_zip:
+        if ON_WINDOWS:
             # The running exe is locked, so only leave the new file next to it; the supervisor swaps it in on restart.
-            new_path = path.join(getcwd(), download_temp_filename)
-            zip_path = new_path + ".zip"
-            replace(new_path, zip_path)
-            with zipfile.ZipFile(zip_path, 'r') as file, file.open(download_filename) as src, open(new_path, "wb") as dst:
-                shutil.copyfileobj(src, dst)
-            remove(zip_path)
+            downloaded = path.join(getcwd(), download_temp_filename)
+            new_path = path.join(getcwd(), download_filename + ".new")
+            if is_zip:
+                extracted = downloaded + ".exe"
+                with zipfile.ZipFile(downloaded, 'r') as file, file.open(download_filename) as src, open(extracted, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                remove(downloaded)
+                downloaded = extracted
+            replace(downloaded, new_path)
 
         logger.info("Updated loader installation.")
         await self.context.ws.emit("updater/finish_download")

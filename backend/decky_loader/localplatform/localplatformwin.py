@@ -1,6 +1,6 @@
 from ..enums import UserType
 import os
-from aiohttp.web_runner import GracefulExit
+from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
 
 _exit_code: int | None = None

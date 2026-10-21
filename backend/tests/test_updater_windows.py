@@ -77,7 +77,7 @@ def test_windows_update_extracts_zip_member(tmp_path: Any, monkeypatch: Any):
         z.writestr("PluginLoader.exe", PAYLOAD)
     _run(buf.getvalue(), is_zip=True)
     assert (tmp_path / "PluginLoader.exe.new").read_bytes() == PAYLOAD
-    assert not os.path.exists(tmp_path / "PluginLoader.exe.new.zip")
+    assert sorted(os.listdir(tmp_path)) == [".loader.version", "PluginLoader.exe", "PluginLoader.exe.new"]  # no leftover temp files
     assert running.read_bytes() == b"old"
 
 
@@ -86,3 +86,33 @@ def test_is_supported_only_when_supervised(monkeypatch: Any):
     assert _updater().isSupported is False
     monkeypatch.setenv("DECKY_SUPERVISED", "1")
     assert _updater().isSupported is True
+
+
+def test_dropped_connection_leaves_no_new_file(tmp_path: Any, monkeypatch: Any):
+    from aiohttp import web, ClientError
+
+    monkeypatch.chdir(tmp_path)
+
+    async def handler(req: Any) -> Any:
+        resp = web.StreamResponse(headers={"Content-Length": str(len(PAYLOAD))})
+        await resp.prepare(req)
+        await resp.write(PAYLOAD[:100])
+        req.transport.close()  # drop mid-body
+        return resp
+
+    async def go():
+        app = web.Application()
+        app.router.add_get("/PluginLoader.exe", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]  # pyright: ignore
+        try:
+            with pytest.raises(ClientError):
+                await _download(f"http://127.0.0.1:{port}/PluginLoader.exe", False)()
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(go())
+    assert not (tmp_path / "PluginLoader.exe.new").exists()
