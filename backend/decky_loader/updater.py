@@ -1,7 +1,7 @@
 from __future__ import annotations
 from asyncio import sleep
 from logging import getLogger
-from os import getcwd, getenv, path, remove, mkdir
+from os import getcwd, getenv, path, remove, mkdir, replace
 from typing import TYPE_CHECKING, List, TypedDict
 if TYPE_CHECKING:
     from .main import PluginManager
@@ -41,7 +41,7 @@ class Updater:
         self.remoteVer: RemoteVer | None = None
         self.allRemoteVers: List[RemoteVer] = []
         self.localVer = helpers.get_loader_version()
-        self.isSupported: bool = ON_LINUX
+        self.isSupported: bool = ON_LINUX or (ON_WINDOWS and getenv("DECKY_SUPERVISED") == "1")
         self.repo = getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')
         self.git_branch = getenv('DECKY_BRANCH', 'dirty')
 
@@ -221,6 +221,15 @@ class Updater:
                 from asyncio.subprocess import create_subprocess_exec
                 process = await create_subprocess_exec("chcon", "-t", "bin_t", path.join(getcwd(), download_filename))
                 logger.info(f"Setting the executable flag with chcon returned {await process.wait()}")
+
+        if ON_WINDOWS and is_zip:
+            # The running exe is locked, so only leave the new file next to it; the supervisor swaps it in on restart.
+            new_path = path.join(getcwd(), download_temp_filename)
+            zip_path = new_path + ".zip"
+            replace(new_path, zip_path)
+            with zipfile.ZipFile(zip_path, 'r') as file, file.open(download_filename) as src, open(new_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+            remove(zip_path)
 
         logger.info("Updated loader installation.")
         await self.context.ws.emit("updater/finish_download")

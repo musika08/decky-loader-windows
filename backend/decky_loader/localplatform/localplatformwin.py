@@ -1,5 +1,18 @@
 from ..enums import UserType
-import os, sys
+import os
+from aiohttp.web_runner import GracefulExit
+from .winsupervisor import EXIT_RESTART, EXIT_STOP
+
+_exit_code: int | None = None
+
+def request_exit(code: int) -> None:
+    '''Ask the loader to shut down cleanly (aiohttp runs on_shutdown) and exit with `code` for the supervisor.'''
+    global _exit_code
+    _exit_code = code
+    raise GracefulExit()
+
+def requested_exit_code() -> int | None:
+    return _exit_code
 
 def chown(path : str,  user : UserType = UserType.HOST_USER, recursive : bool = True) -> bool:
     return True # Stubbed
@@ -23,6 +36,9 @@ async def service_active(service_name : str) -> bool:
     return True # Stubbed
 
 async def service_stop(service_name : str) -> bool:
+    if service_name == "plugin_loader":
+        request_exit(EXIT_STOP)
+
     return True # Stubbed
 
 async def service_start(service_name : str) -> bool:
@@ -30,7 +46,7 @@ async def service_start(service_name : str) -> bool:
 
 async def service_restart(service_name : str, block : bool = True) -> bool:
     if service_name == "plugin_loader":
-        sys.exit(42)
+        request_exit(EXIT_RESTART)
 
     return True # Stubbed
 

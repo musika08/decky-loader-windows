@@ -280,3 +280,6 @@ def main():
     loop = new_event_loop()
     set_event_loop(loop)
     PluginManager(loop).run()
+    if ON_WINDOWS:
+        from .localplatform.localplatformwin import requested_exit_code
+        sys.exit(requested_exit_code() or 0)
