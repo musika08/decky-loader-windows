@@ -74,11 +74,26 @@ def build_task_xml(exe: str, workdir: str, user_sid: str) -> str:
 
 # Applied at directory creation, so there is no window where the directory is writable by anyone else.
 # Owner and group: Administrators. Protected DACL: SYSTEM full, Administrators full, Users read/execute.
+# Applied at directory creation, so there is no window where the directory is writable by anyone else.
+# Owner and group: Administrators. Protected DACL: SYSTEM full, Administrators full, Users read/execute.
 SECURE_SDDL = "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 
+FILE_ATTRIBUTE_DIRECTORY = 0x10
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 SE_DACL_PROTECTED = 0x1000
 TRUSTED_OWNERS = (_SID_ADMINS, _SID_SYSTEM)
+
+READ_CONTROL = 0x00020000
+FILE_READ_ATTRIBUTES = 0x80
+# Handles that only ask for attribute/security access are ignored by the share-mode check, so without a
+# data access right (list directory) the missing FILE_SHARE_DELETE would not actually block a rename.
+FILE_LIST_DIRECTORY = 0x1
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2 # Deliberately no FILE_SHARE_DELETE: nobody can rename or delete a directory we hold open
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 def is_reparse_point(path: str) -> bool:
     '''Junctions and symlinks. Never follows the link.'''
@@ -87,26 +102,60 @@ def is_reparse_point(path: str) -> bool:
     except OSError:
         return False
 
-def _owner_and_control(path: str) -> tuple[str, int]:
-    '''(owner SID string, security descriptor control flags) of a path.'''
+def _kernel32() -> Any:
     from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+    k.CreateFileW.restype = ctypes.c_void_p
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    k.CloseHandle.restype = wintypes.BOOL
+    k.LocalFree.argtypes = [ctypes.c_void_p]
+    k.LocalFree.restype = ctypes.c_void_p
+    return k
+
+def open_dir(path: str) -> int:
+    '''Open a directory handle without following a final reparse point and without share-delete.'''
+    k = _kernel32()
+    handle = k.CreateFileW(path, READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY, FILE_SHARE_READ | FILE_SHARE_WRITE, None,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
+    if handle is None or handle == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    return handle
+
+def close_handle(handle: int) -> None:
+    _kernel32().CloseHandle(handle)
+
+def query_dir(handle: int) -> tuple[int, str, int]:
+    '''(file attributes, owner SID string, security descriptor control flags), all read from the one handle.'''
+    from ctypes import wintypes
+    class FILETIME(ctypes.Structure):
+        _fields_ = [("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD)]
+    class BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
+        _fields_ = [("dwFileAttributes", wintypes.DWORD), ("ftCreationTime", FILETIME), ("ftLastAccessTime", FILETIME),
+                    ("ftLastWriteTime", FILETIME), ("dwVolumeSerialNumber", wintypes.DWORD), ("nFileSizeHigh", wintypes.DWORD),
+                    ("nFileSizeLow", wintypes.DWORD), ("nNumberOfLinks", wintypes.DWORD), ("nFileIndexHigh", wintypes.DWORD),
+                    ("nFileIndexLow", wintypes.DWORD)]
+    k = _kernel32()
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel.LocalFree.restype = ctypes.c_void_p
-    advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPCWSTR, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
-                                             ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
-                                             ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
-    advapi.GetNamedSecurityInfoW.restype = wintypes.DWORD
+    k.GetFileInformationByHandle.argtypes = [ctypes.c_void_p, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
+    k.GetFileInformationByHandle.restype = wintypes.BOOL
+    advapi.GetSecurityInfo.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+                                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p)]
+    advapi.GetSecurityInfo.restype = wintypes.DWORD
     advapi.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
     advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
     advapi.GetSecurityDescriptorControl.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD)]
     advapi.GetSecurityDescriptorControl.restype = wintypes.BOOL
 
+    info = BY_HANDLE_FILE_INFORMATION()
+    if not k.GetFileInformationByHandle(handle, ctypes.byref(info)):
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+
     SE_FILE_OBJECT, OWNER_INFO, DACL_INFO = 1, 1, 4
     owner, dacl, sd = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
-    rc = advapi.GetNamedSecurityInfoW(path, SE_FILE_OBJECT, OWNER_INFO | DACL_INFO, ctypes.byref(owner), None,
-                                      ctypes.byref(dacl), None, ctypes.byref(sd))
+    rc = advapi.GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_INFO | DACL_INFO, ctypes.byref(owner), None,
+                                ctypes.byref(dacl), None, ctypes.byref(sd))
     if rc != 0:
         raise ctypes.WinError(rc) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
     try:
@@ -116,24 +165,34 @@ def _owner_and_control(path: str) -> tuple[str, int]:
         try:
             owner_sid = ctypes.wstring_at(sid_str.value or 0)
         finally:
-            kernel.LocalFree(sid_str)
+            k.LocalFree(sid_str)
         control, revision = wintypes.WORD(), wintypes.DWORD()
         if not advapi.GetSecurityDescriptorControl(sd, ctypes.byref(control), ctypes.byref(revision)):
             raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
-        return owner_sid, int(control.value)
+        return int(info.dwFileAttributes), owner_sid, int(control.value)
     finally:
-        kernel.LocalFree(sd)
+        k.LocalFree(sd)
 
-def is_trusted_dir(path: str, *, reparse: Callable[[str], bool] = is_reparse_point,
-                   owner_and_control: Callable[[str], tuple[str, int]] = _owner_and_control) -> bool:
-    '''Exists, is a real directory (not a link), owned by Administrators or SYSTEM, with a protected DACL.'''
-    if not os.path.lexists(path) or reparse(path) or not os.path.isdir(path):
-        return False
+def open_trusted_dir(path: str, *, opener: Callable[[str], Any] = open_dir,
+                     query: Callable[[Any], tuple[int, str, int]] = query_dir,
+                     closer: Callable[[Any], None] = close_handle) -> Any | None:
+    '''Open `path` and validate that same handle: a real directory (not a link), owned by Administrators or
+    SYSTEM, with a protected DACL. Returns the open handle if trusted, else closes it and returns None.
+    Everything is checked on the handle, so the path cannot be swapped between the check and later use.'''
     try:
-        owner, control = owner_and_control(path)
+        handle = opener(path)
     except OSError:
-        return False
-    return owner in TRUSTED_OWNERS and bool(control & SE_DACL_PROTECTED)
+        return None
+    try:
+        attrs, owner, control = query(handle)
+        trusted = (bool(attrs & FILE_ATTRIBUTE_DIRECTORY) and not attrs & FILE_ATTRIBUTE_REPARSE_POINT
+                   and owner in TRUSTED_OWNERS and bool(control & SE_DACL_PROTECTED))
+    except OSError:
+        trusted = False
+    if not trusted:
+        closer(handle)
+        return None
+    return handle
 
 def create_secure_dir(path: str, sddl: str = SECURE_SDDL) -> None:
     '''CreateDirectoryW with the descriptor attached, so the directory never exists with a weaker one.'''
@@ -161,30 +220,30 @@ def create_secure_dir(path: str, sddl: str = SECURE_SDDL) -> None:
     finally:
         kernel.LocalFree(sd)
 
-def ensure_trusted_dir(path: str, *, remove_links: bool, is_trusted: Callable[[str], bool] = is_trusted_dir,
+def ensure_trusted_dir(path: str, *, remove_links: bool, open_trusted: Callable[[str], Any] = open_trusted_dir,
                        create_dir: Callable[[str], None] = create_secure_dir, reparse: Callable[[str], bool] = is_reparse_point,
                        rename: Callable[[str, str], None] = os.rename, rmdir: Callable[[str], None] = os.rmdir,
-                       now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc)) -> None:
-    '''Leave `path` as a trusted directory: reuse it if it already is, otherwise move it aside (or drop a link) and recreate it.'''
+                       now: Callable[[], datetime.datetime] = lambda: datetime.datetime.now(datetime.timezone.utc)) -> Any:
+    '''Return an open, validated handle to `path` as a trusted directory.
+
+    Reuse it if it already is one; otherwise move it aside (or drop a link) and create it fresh. A freshly created
+    directory is re-opened and validated like any other, and a creation race (already exists) fails closed.'''
     if os.path.lexists(path):
-        if is_trusted(path):
-            return
+        handle = open_trusted(path)
+        if handle is not None:
+            return handle
         if remove_links and reparse(path):
             rmdir(path) # Removes only the link, never the target
         else:
             aside = f"{path}.untrusted-{now().strftime('%Y%m%d%H%M%S')}"
             rename(path, aside) # Renames only the link for a junction
             print(f"{path} was not owned and protected by administrators; moved it to {aside}", file=sys.stderr)
-    create_dir(path)
+    create_dir(path) # Raises if it already exists
+    handle = open_trusted(path)
+    if handle is None:
+        raise OSError(f"{path} is not a trusted directory right after creation")
+    return handle
 
-def _skip_links(directory: str, names: list[str]) -> list[str]:
-    return [n for n in names if is_reparse_point(os.path.join(directory, n))]
-
-def migrate_plugins(src: str, dst: str, reparse: Callable[[str], bool] = is_reparse_point) -> None:
-    '''Copy plugins as admin without ever following a user-created link out of the source tree.'''
-    if not os.path.isdir(src) or reparse(src) or os.listdir(dst):
-        return
-    shutil.copytree(src, dst, ignore=_skip_links, dirs_exist_ok=True)
 _FOLDERID_PROGRAMDATA = "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}"
 
 def known_program_data() -> str:
@@ -207,15 +266,6 @@ def user_in_administrators(run: Callable[..., Any] = subprocess.run) -> bool:
     '''True if the current token lists BUILTIN\\Administrators (deny-only counts: an unelevated admin has it that way).'''
     out = run(["whoami", "/groups", "/fo", "csv", "/nh"], capture_output=True, text=True, check=True).stdout
     return any(_SID_ADMINS in row for row in csv.reader(io.StringIO(out.strip())))
-
-def profile_path_for_sid(sid: str) -> str | None:
-    import winreg # pyright: ignore [reportMissingImports]
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList" + "\\" + sid) as key: # pyright: ignore [reportUnknownMemberType]
-            value, _ = winreg.QueryValueEx(key, "ProfileImagePath") # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
-            return os.path.expandvars(str(value)) # pyright: ignore [reportUnknownArgumentType]
-    except OSError:
-        return None
 
 MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
 
@@ -242,13 +292,15 @@ def _shell_execute(*args: Any) -> int:
 def _same_file(a: str, b: str) -> bool:
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
+NOT_MIGRATED_NOTICE = r"Plugins in %USERPROFILE%\homebrew\plugins are not migrated. Reinstall them from the Decky store."
+
 def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,
             shell_execute: Callable[..., int] = _shell_execute, current_sid: Callable[[], str] = current_user_sid,
             is_admin_member: Callable[[], bool] = user_in_administrators,
-            profile_for_sid: Callable[[str], str | None] = profile_path_for_sid,
             exe: str | None = None, program_data: str | None = None,
             copyfile: Callable[[str, str], object] = shutil.copyfile, replace: Callable[[str, str], None] = os.replace,
-            sleep: Callable[[float], None] = time.sleep, is_trusted: Callable[[str], bool] = is_trusted_dir,
+            sleep: Callable[[float], None] = time.sleep, open_trusted: Callable[[str], Any] = open_trusted_dir,
+            close_dir: Callable[[Any], None] = close_handle,
             create_dir: Callable[[str], None] = create_secure_dir, rename: Callable[[str, str], None] = os.rename,
             rmdir: Callable[[str], None] = os.rmdir, reparse: Callable[[str], bool] = is_reparse_point) -> int:
     exe = exe or sys.executable
@@ -269,53 +321,65 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
     # Stop a running elevated loader first, it locks the installed exe
     run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
 
-    # Every directory is created with the protected descriptor attached, and anything pre-existing that is not
-    # already admin-owned and protected is moved aside rather than trusted.
+    root_handle: Any = None
     try:
-        kw: dict[str, Any] = dict(is_trusted=is_trusted, create_dir=create_dir, reparse=reparse, rename=rename, rmdir=rmdir)
-        ensure_trusted_dir(root, remove_links=False, **kw)
-        ensure_trusted_dir(services, remove_links=True, **kw)
-        ensure_trusted_dir(plugins_dst, remove_links=True, **kw)
-    except OSError as e:
-        print(f"Could not prepare {root}: {e}", file=sys.stderr)
-        return 1
-
-    if not (os.path.exists(installed_exe) and _same_file(exe, installed_exe)):
-        # Write a brand new file inside the protected directory, then swap it in. An existing exe is never opened for writing.
-        staged = f"{installed_exe}.installing-{secrets.token_hex(8)}"
+        # Every directory is created with the protected descriptor attached, and anything pre-existing that is not
+        # already admin-owned and protected is moved aside rather than trusted. The root handle stays open (no
+        # share-delete) for the rest of the install, so the validated directory cannot be swapped out from under us.
+        kw: dict[str, Any] = dict(open_trusted=open_trusted, create_dir=create_dir, reparse=reparse, rename=rename, rmdir=rmdir)
         try:
-            copyfile(exe, staged)
-            for attempt in range(COPY_ATTEMPTS):
+            root_handle = ensure_trusted_dir(root, remove_links=False, **kw)
+            for sub in (services, plugins_dst):
+                close_dir(ensure_trusted_dir(sub, remove_links=True, **kw))
+        except OSError as e:
+            print(f"Could not prepare {root}: {e}", file=sys.stderr)
+            return 1
+
+        if not (os.path.exists(installed_exe) and _same_file(exe, installed_exe)):
+            # Write a brand new file inside the protected directory, then swap it in. An existing exe is never opened for writing.
+            staged = f"{installed_exe}.installing-{secrets.token_hex(8)}"
+            try:
                 try:
-                    replace(staged, installed_exe)
-                    break
-                except PermissionError:
-                    if attempt == COPY_ATTEMPTS - 1:
-                        print(f"Could not replace {installed_exe}: it is still in use. Close Decky Loader and try again.", file=sys.stderr)
-                        return 1
-                    sleep(1.0)
+                    copyfile(exe, staged)
+                except OSError as e:
+                    print(f"Could not copy {exe} to {staged}: {e}", file=sys.stderr)
+                    return 1
+                for attempt in range(COPY_ATTEMPTS):
+                    try:
+                        replace(staged, installed_exe)
+                        break
+                    except PermissionError:
+                        if attempt == COPY_ATTEMPTS - 1:
+                            print(f"Could not replace {installed_exe}: it is still in use. Close Decky Loader and try again.", file=sys.stderr)
+                            return 1
+                        sleep(1.0)
+            finally:
+                try:
+                    os.remove(staged)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    logger.exception("Could not remove staged file %s", staged)
+
+        # The task XML lives in the protected root, not a user-writable temp directory
+        fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-16") as f: # utf-16 writes a BOM
+                f.write(build_task_xml(installed_exe, services, sid))
+            run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
         finally:
             try:
-                os.remove(staged)
-            except OSError:
+                os.remove(xml_path)
+            except FileNotFoundError:
                 pass
-
-    profile = profile_for_sid(sid)
-    if profile is not None:
-        migrate_plugins(os.path.join(profile, "homebrew", "plugins"), plugins_dst, reparse)
-
-    # The task XML lives in the protected root, not a user-writable temp directory
-    fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-16") as f: # utf-16 writes a BOM
-            f.write(build_task_xml(installed_exe, services, sid))
-        run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
+            except OSError:
+                logger.exception("Could not remove task file %s", xml_path)
+        run(["schtasks", "/Run", "/TN", TASK_NAME], check=True)
     finally:
-        try:
-            os.remove(xml_path)
-        except OSError:
-            pass
-    run(["schtasks", "/Run", "/TN", TASK_NAME], check=True)
+        if root_handle is not None:
+            close_dir(root_handle)
+
+    print(NOT_MIGRATED_NOTICE)
     return 0
 
 def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,

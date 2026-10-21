@@ -50,66 +50,89 @@ def test_current_user_sid_parsing_with_injected_runner():
 
 
 def _fake_env(tmp_path):
-    profile = tmp_path / "profile"
-    (profile / "homebrew" / "plugins" / "p1").mkdir(parents=True)
-    (profile / "homebrew" / "plugins" / "p1" / "plugin.json").write_text("{}")
     src_exe = tmp_path / "src" / "PluginLoader.exe"
     src_exe.parent.mkdir()
     src_exe.write_bytes(b"exe")
     (tmp_path / "ProgramData").mkdir()
-    return profile, src_exe
+    return src_exe
 
 
 class Recorder:
-    def __init__(self):
+    def __init__(self, events=None):
         self.runs: list[list[str]] = []
+        self.events = events
 
     def __call__(self, argv, **kwargs):
         self.runs.append(list(argv))
+        if self.events is not None:
+            self.events.append(("run", argv[1] if len(argv) > 1 else ""))
         return subprocess.CompletedProcess(argv, 0)
 
 
+DIR_ATTR = 0x10
+REPARSE_ATTR = 0x400
+
+
 class Dirs:
-    '''Stands in for the ACL checks and CreateDirectoryW: directories it created count as trusted.'''
-    def __init__(self):
+    '''Stands in for the handle-based ACL checks and CreateDirectoryW. Directories it created count as trusted;
+    a path is a "link" if it really is a reparse point on disk.'''
+    def __init__(self, events=None):
         self.trusted: set[str] = set()
         self.created: list[str] = []
+        self.opened: list[str] = []
+        self.closed: list[str] = []
+        self.events = events
 
-    def is_trusted(self, p):
-        return p in self.trusted
+    def open(self, p):
+        if not os.path.lexists(p):
+            raise FileNotFoundError(p)
+        self.opened.append(p)
+        return p
+
+    def query(self, h):
+        attrs = DIR_ATTR | (REPARSE_ATTR if wi.is_reparse_point(h) else 0)
+        return attrs, ("S-1-5-32-544" if h in self.trusted else "S-1-5-21-1-2-3-1001"), 0x1000
+
+    def close(self, h):
+        self.closed.append(h)
+        if self.events is not None:
+            self.events.append(("close", h))
 
     def create(self, p):
         os.mkdir(p)
         self.created.append(p)
         self.trusted.add(p)
 
+    def open_trusted(self, p):
+        return wi.open_trusted_dir(p, opener=self.open, query=self.query, closer=self.close)
 
-def _install(tmp_path, src_exe, profile, dirs=None, **over):
+
+def _install(tmp_path, src_exe, dirs=None, **over):
     dirs = dirs or Dirs()
     kw = dict(is_admin=lambda: True, run=Recorder(), shell_execute=lambda *a: None,
-              exe=str(src_exe), program_data=str(tmp_path / "ProgramData"),
-              profile_for_sid=lambda sid: str(profile), sleep=lambda s: None,
-              is_trusted=dirs.is_trusted, create_dir=dirs.create)
+              exe=str(src_exe), program_data=str(tmp_path / "ProgramData"), sleep=lambda s: None,
+              open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create)
     kw.update(over)
     return wi.install(SID, **kw)
 
 
 def _junction(link, target):
-    subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], check=True, capture_output=True)
+    import _winapi
+    _winapi.CreateJunction(str(target), str(link))
 
 
 def test_secure_sddl_verbatim():
     assert wi.SECURE_SDDL == "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 
 
-def test_install_command_sequence_has_no_icacls(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+def test_install_command_sequence_has_no_icacls_and_no_migration(tmp_path, capsys):
+    src_exe = _fake_env(tmp_path)
     rec, dirs = Recorder(), Dirs()
-    rc = _install(tmp_path, src_exe, profile, dirs=dirs, run=rec)
+    rc = _install(tmp_path, src_exe, dirs=dirs, run=rec)
 
     root = str(tmp_path / "ProgramData" / "decky")
     assert rc == 0
-    assert not hasattr(wi, "acl_commands") and not hasattr(wi, "acl_setup_commands")
+    assert not hasattr(wi, "acl_commands") and not hasattr(wi, "migrate_plugins") and not hasattr(wi, "profile_path_for_sid")
     assert rec.runs[0] == ["schtasks", "/End", "/TN", "Decky Loader"]
     assert rec.runs[1][:4] == ["schtasks", "/Create", "/TN", "Decky Loader"]
     assert rec.runs[1][4] == "/XML" and rec.runs[1][6:] == ["/F"]
@@ -118,19 +141,37 @@ def test_install_command_sequence_has_no_icacls(tmp_path):
     assert len(rec.runs) == 3
     assert dirs.created == [root, os.path.join(root, "services"), os.path.join(root, "plugins")]
     assert os.path.isfile(os.path.join(root, "services", "PluginLoader.exe"))
-    assert os.path.isfile(os.path.join(root, "plugins", "p1", "plugin.json"))
+    assert os.listdir(os.path.join(root, "plugins")) == []
+    assert "are not migrated" in capsys.readouterr().out
+
+
+def test_root_handle_held_open_until_install_finishes(tmp_path):
+    src_exe = _fake_env(tmp_path)
+    events: list = []
+    dirs = Dirs(events)
+    root = str(tmp_path / "ProgramData" / "decky")
+    _install(tmp_path, src_exe, dirs=dirs, run=Recorder(events))
+    closes = [i for i, e in enumerate(events) if e == ("close", root)]
+    runs = [i for i, e in enumerate(events) if e[0] == "run"]
+    assert len(closes) == 1 and closes[0] > runs[-1]  # closed once, only after the last schtasks call
+
+
+def test_root_handle_closed_when_install_fails(tmp_path):
+    src_exe = _fake_env(tmp_path)
+    dirs = Dirs()
+    rc = _install(tmp_path, src_exe, dirs=dirs, replace=lambda a, b: (_ for _ in ()).throw(PermissionError("x")))
+    assert rc == 1
+    assert str(tmp_path / "ProgramData" / "decky") in dirs.closed
 
 
 def test_untrusted_root_is_renamed_aside_and_recreated(tmp_path, capsys):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     root = tmp_path / "ProgramData" / "decky"
     root.mkdir()
     (root / "evil.txt").write_text("x")
     dirs = Dirs()
     when = datetime.datetime(2026, 1, 2, 3, 4, 5, tzinfo=datetime.timezone.utc)
-    rc = _install(tmp_path, src_exe, profile, dirs=dirs)
-    assert rc == 0
-    # default clock used above; also check the explicit-clock helper directly
+    assert _install(tmp_path, src_exe, dirs=dirs) == 0
     assert dirs.created[0] == str(root)
     asides = [p for p in os.listdir(tmp_path / "ProgramData") if p.startswith("decky.untrusted-")]
     assert len(asides) == 1
@@ -140,38 +181,40 @@ def test_untrusted_root_is_renamed_aside_and_recreated(tmp_path, capsys):
 
     target = tmp_path / "p2"
     target.mkdir()
-    wi.ensure_trusted_dir(str(target), remove_links=False, is_trusted=lambda p: False, create_dir=os.mkdir, now=lambda: when)
+    wi.ensure_trusted_dir(str(target), remove_links=False, open_trusted=dirs.open_trusted, create_dir=dirs.create, now=lambda: when)
     assert (tmp_path / "p2.untrusted-20260102030405").is_dir() and target.is_dir()
 
 
 def test_trusted_existing_root_is_reused(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     root = tmp_path / "ProgramData" / "decky"
     root.mkdir()
     (root / "keep.txt").write_text("x")
     dirs = Dirs()
     dirs.trusted.add(str(root))
-    assert _install(tmp_path, src_exe, profile, dirs=dirs) == 0
+    assert _install(tmp_path, src_exe, dirs=dirs) == 0
     assert str(root) not in dirs.created
     assert (root / "keep.txt").is_file()
     assert not [p for p in os.listdir(tmp_path / "ProgramData") if "untrusted" in p]
 
 
 def test_junction_root_is_renamed_as_link_only(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     (elsewhere / "victim.txt").write_text("v")
     root = tmp_path / "ProgramData" / "decky"
     _junction(root, elsewhere)
     dirs = Dirs()
-    assert _install(tmp_path, src_exe, profile, dirs=dirs, is_trusted=lambda p: False if p == str(root) else dirs.is_trusted(p)) == 0
+    dirs.trusted.add(str(root))  # even a junction that points at a "trusted" dir must be rejected via its reparse bit
+    assert _install(tmp_path, src_exe, dirs=dirs) == 0
     assert (elsewhere / "victim.txt").read_text() == "v"
+    assert not (elsewhere / "PluginLoader.exe").exists()
     assert not wi.is_reparse_point(str(root)) and root.is_dir()
 
 
 def test_junction_at_services_is_removed_as_link_and_recreated(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     root = tmp_path / "ProgramData" / "decky"
     root.mkdir()
     elsewhere = tmp_path / "elsewhere"
@@ -180,16 +223,38 @@ def test_junction_at_services_is_removed_as_link_and_recreated(tmp_path):
     services = root / "services"
     _junction(services, elsewhere)
     dirs = Dirs()
-    dirs.trusted.add(str(root))
-    assert _install(tmp_path, src_exe, profile, dirs=dirs) == 0
+    dirs.trusted.update([str(root), str(services)])
+    assert _install(tmp_path, src_exe, dirs=dirs) == 0
     assert (elsewhere / "victim.txt").read_text() == "v"   # target untouched
     assert not (elsewhere / "PluginLoader.exe").exists()    # exe did not land in the target
     assert not wi.is_reparse_point(str(services)) and (services / "PluginLoader.exe").is_file()
     assert str(services) in dirs.created
 
 
+def test_creation_race_fails_closed(tmp_path, capsys):
+    src_exe = _fake_env(tmp_path)
+
+    def racing_create(p):
+        raise FileExistsError(p)
+
+    rc = _install(tmp_path, src_exe, create_dir=racing_create)
+    assert rc == 1 and "Could not prepare" in capsys.readouterr().err
+
+
+def test_freshly_created_dir_is_revalidated(tmp_path, capsys):
+    src_exe = _fake_env(tmp_path)
+    dirs = Dirs()
+
+    def create_untrusted(p):
+        os.mkdir(p)  # created, but not owned/protected as required
+        dirs.created.append(p)
+
+    rc = _install(tmp_path, src_exe, dirs=dirs, create_dir=create_untrusted)
+    assert rc == 1 and "right after creation" in capsys.readouterr().err
+
+
 def test_exe_is_staged_then_replaced_never_opened_in_place(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     root = tmp_path / "ProgramData" / "decky"
     installed = root / "services" / "PluginLoader.exe"
     dirs = Dirs()
@@ -206,7 +271,7 @@ def test_exe_is_staged_then_replaced_never_opened_in_place(tmp_path):
         replaces.append((src, dst))
         os.replace(src, dst)
 
-    assert _install(tmp_path, src_exe, profile, dirs=dirs, copyfile=copyfile, replace=replace) == 0
+    assert _install(tmp_path, src_exe, dirs=dirs, copyfile=copyfile, replace=replace) == 0
     assert copies and all(c != str(installed) for c in copies)
     assert copies[0].startswith(str(installed) + ".installing-")
     assert replaces == [(copies[0], str(installed))]
@@ -214,91 +279,93 @@ def test_exe_is_staged_then_replaced_never_opened_in_place(tmp_path):
     assert not os.path.exists(copies[0])
 
 
-def test_install_does_not_overwrite_existing_plugins(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
-    root = tmp_path / "ProgramData" / "decky"
-    (root / "plugins" / "mine").mkdir(parents=True)
-    dirs = Dirs()
-    dirs.trusted.update([str(root), str(root / "plugins")])
-    _install(tmp_path, src_exe, profile, dirs=dirs)
-    assert not (root / "plugins" / "p1").exists()
+def test_copy_error_returns_1_with_message(tmp_path, capsys):
+    src_exe = _fake_env(tmp_path)
+
+    def broken(src, dst):
+        raise OSError("disk full")
+
+    rec = Recorder()
+    assert _install(tmp_path, src_exe, run=rec, copyfile=broken) == 1
+    assert "disk full" in capsys.readouterr().err
+    assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
 
 
-def test_install_migrates_plugins_from_target_sid_profile(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
-    asked: list[str] = []
+def test_open_trusted_dir_checks_on_the_handle():
+    closed: list = []
+    ok = ("S-1-5-32-544", 0x1000)
 
-    def lookup(sid):
-        asked.append(sid)
-        return str(profile)
+    def check(attrs, owner, control):
+        return wi.open_trusted_dir("p", opener=lambda p: "H", query=lambda h: (attrs, owner, control), closer=closed.append)
 
-    _install(tmp_path, src_exe, profile, profile_for_sid=lookup)
-    assert asked == [SID]
-    assert (tmp_path / "ProgramData" / "decky" / "plugins" / "p1" / "plugin.json").is_file()
-
-
-def test_install_skips_migration_without_profile(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
-    assert _install(tmp_path, src_exe, profile, profile_for_sid=lambda s: None) == 0
-    assert os.listdir(tmp_path / "ProgramData" / "decky" / "plugins") == []
-
-
-def test_migration_skips_junctions_inside_plugins(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
-    secret = tmp_path / "secret"
-    secret.mkdir()
-    (secret / "passwords.txt").write_text("s")
-    _junction(profile / "homebrew" / "plugins" / "link", secret)
-    assert _install(tmp_path, src_exe, profile) == 0
-    plugins = tmp_path / "ProgramData" / "decky" / "plugins"
-    assert (plugins / "p1" / "plugin.json").is_file()
-    assert not (plugins / "link").exists()
-    assert (secret / "passwords.txt").is_file()
+    assert check(0x10, *ok) == "H"
+    assert check(0x10, "S-1-5-18", 0x9000) == "H"
+    assert closed == []
+    assert check(0x10, "S-1-5-21-9", 0x1000) is None         # foreign owner
+    assert check(0x10, "S-1-5-32-544", 0x0004) is None       # unprotected DACL
+    assert check(0x10 | 0x400, *ok) is None                  # reparse point
+    assert check(0x20, *ok) is None                          # not a directory
+    assert closed == ["H"] * 4
+    assert wi.open_trusted_dir("p", opener=lambda p: (_ for _ in ()).throw(FileNotFoundError()), closer=closed.append) is None
 
 
-def test_migration_skips_junctioned_plugins_root(tmp_path):
-    secret = tmp_path / "secret"
-    secret.mkdir()
-    (secret / "passwords.txt").write_text("s")
-    src = tmp_path / "homebrew_plugins"
-    _junction(src, secret)
-    dst = tmp_path / "dst"
-    dst.mkdir()
-    wi.migrate_plugins(str(src), str(dst))
-    assert os.listdir(dst) == []
+def test_real_handle_reports_directory_and_junction(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    _junction(link, real)
+
+    h = wi.open_dir(str(real))
+    try:
+        attrs, owner, control = wi.query_dir(h)
+    finally:
+        wi.close_handle(h)
+    assert attrs & wi.FILE_ATTRIBUTE_DIRECTORY and not attrs & wi.FILE_ATTRIBUTE_REPARSE_POINT
+    assert owner.startswith("S-1-")
+
+    h = wi.open_dir(str(link))
+    try:
+        attrs, _, _ = wi.query_dir(h)
+    finally:
+        wi.close_handle(h)
+    assert attrs & wi.FILE_ATTRIBUTE_REPARSE_POINT        # reported via the handle path, not followed
+    assert wi.open_trusted_dir(str(link)) is None
 
 
-def test_is_trusted_dir_checks(tmp_path):
-    d = str(tmp_path)
-    good = lambda p: ("S-1-5-32-544", 0x1000)
-    assert wi.is_trusted_dir(d, owner_and_control=good) is True
-    assert wi.is_trusted_dir(d, owner_and_control=lambda p: ("S-1-5-18", 0x9000)) is True
-    assert wi.is_trusted_dir(d, owner_and_control=lambda p: (SID, 0x1000)) is False       # foreign owner
-    assert wi.is_trusted_dir(d, owner_and_control=lambda p: ("S-1-5-32-544", 0x0004)) is False  # unprotected DACL
-    assert wi.is_trusted_dir(d, reparse=lambda p: True, owner_and_control=good) is False   # link
-    assert wi.is_trusted_dir(str(tmp_path / "missing"), owner_and_control=good) is False
+def test_open_dir_has_no_share_delete(tmp_path):
+    d = tmp_path / "held"
+    d.mkdir()
+    h = wi.open_dir(str(d))
+    try:
+        with pytest.raises(OSError):
+            os.rename(d, tmp_path / "moved")
+        with pytest.raises(OSError):
+            os.rmdir(d)
+    finally:
+        wi.close_handle(h)
+    os.rename(d, tmp_path / "moved")
 
 
 def test_create_secure_dir_real_protected_dacl(tmp_path):
     # Owner Administrators can only be set by an elevated token, so the integration check uses the same
-    # descriptor without the owner/group clause and asserts the protection bit.
+    # descriptor without the owner/group clause and asserts the protection bit through the handle path.
     sddl = wi.SECURE_SDDL.split("D:", 1)[1]
     d = str(tmp_path / "secured")
     wi.create_secure_dir(d, "D:" + sddl)
-    owner, control = wi._owner_and_control(d)
+    h = wi.open_dir(d)
+    try:
+        _, owner, control = wi.query_dir(h)
+    finally:
+        wi.close_handle(h)
     assert control & wi.SE_DACL_PROTECTED
-    assert wi.is_trusted_dir(d, owner_and_control=lambda p: ("S-1-5-32-544", control)) is True
-    assert wi.is_trusted_dir(d) == (owner in wi.TRUSTED_OWNERS)
-
-
-def test_profile_path_for_sid_reads_registry_for_real_sid():
-    sid = wi.current_user_sid()
-    path = wi.profile_path_for_sid(sid)
-    assert path is not None and os.path.isdir(path)
+    handle = wi.open_trusted_dir(d)
+    assert (handle is not None) == (owner in wi.TRUSTED_OWNERS)
+    if handle is not None:
+        wi.close_handle(handle)
 
 
 def test_install_same_file_skips_copy(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    _fake_env(tmp_path)
     root = tmp_path / "ProgramData" / "decky"
     installed = root / "services" / "PluginLoader.exe"
     installed.parent.mkdir(parents=True)
@@ -306,12 +373,12 @@ def test_install_same_file_skips_copy(tmp_path):
     dirs = Dirs()
     dirs.trusted.update([str(root), str(root / "services")])
     copies: list = []
-    rc = _install(tmp_path, installed, profile, dirs=dirs, copyfile=lambda a, b: copies.append((a, b)))
+    rc = _install(tmp_path, installed, dirs=dirs, copyfile=lambda a, b: copies.append((a, b)))
     assert rc == 0 and copies == []
 
 
 def test_install_replace_retries_on_permission_error(tmp_path):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     attempts: list = []
     sleeps: list = []
 
@@ -321,12 +388,12 @@ def test_install_replace_retries_on_permission_error(tmp_path):
             raise PermissionError("locked")
         os.replace(src, dst)
 
-    rc = _install(tmp_path, src_exe, profile, replace=flaky, sleep=sleeps.append)
+    rc = _install(tmp_path, src_exe, replace=flaky, sleep=sleeps.append)
     assert rc == 0 and len(attempts) == 4 and sleeps == [1.0, 1.0, 1.0]
 
 
 def test_install_replace_gives_up_after_ten_attempts(tmp_path, capsys):
-    profile, src_exe = _fake_env(tmp_path)
+    src_exe = _fake_env(tmp_path)
     rec = Recorder()
     attempts: list = []
     sleeps: list = []
@@ -335,7 +402,7 @@ def test_install_replace_gives_up_after_ten_attempts(tmp_path, capsys):
         attempts.append(1)
         raise PermissionError("locked")
 
-    rc = _install(tmp_path, src_exe, profile, run=rec, replace=locked, sleep=sleeps.append)
+    rc = _install(tmp_path, src_exe, run=rec, replace=locked, sleep=sleeps.append)
     assert rc == 1 and len(attempts) == 10 and len(sleeps) == 9
     assert "still in use" in capsys.readouterr().err
     assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
