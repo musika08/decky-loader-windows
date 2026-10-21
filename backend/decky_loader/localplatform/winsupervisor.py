@@ -25,16 +25,33 @@ _FRESH_ENV = {"PYINSTALLER_RESET_ENVIRONMENT": "1"}
 
 ATTACH_PARENT_PROCESS = -1
 
-def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any] = open) -> bool:
+def _parent_pid(pid: int) -> int | None:
+    from .wininstall import parent_pid
+    return parent_pid(pid)
+
+def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any] = open,
+                          ppid: Callable[[], int] = os.getppid, parent_of: Callable[[int], int | None] = _parent_pid) -> bool:
     '''In a windowed (-noconsole) build sys.stdout/sys.stderr are None, so CLI modes would print nothing.
-    Attach to the console of whoever started us and write there. If there is none, output goes nowhere.'''
+    Attach to the console of whoever started us and write there. If there is none, output goes nowhere.
+
+    In a onefile build our code runs in the bootloader's child, and a windowed bootloader has no console, so the
+    console to attach to is the bootloader's parent's (the terminal the user typed into). Fall back to our direct
+    parent's console when that fails or we are not frozen.'''
     if sys.stdout is not None:
         return False
     try:
         if kernel32 is None:
             import ctypes
             kernel32 = ctypes.windll.kernel32 # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
-        if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+        attached = False
+        if getattr(sys, "frozen", False):
+            try:
+                launcher = parent_of(ppid())
+            except OSError:
+                launcher = None
+            if launcher:
+                attached = bool(kernel32.AttachConsole(launcher))
+        if not attached and not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
             return False
         out, err = opener("CONOUT$", "w"), opener("CONOUT$", "w")
     except OSError:

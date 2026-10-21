@@ -836,3 +836,13 @@ def test_terminate_pid_really_stops_a_process():
         assert p.wait(10) == 1
     finally:
         p.kill()
+
+
+def test_parent_pid_from_a_real_snapshot():
+    assert wi.parent_pid(os.getpid()) == os.getppid()
+
+
+def test_parent_pid_lookup():
+    snap = lambda: [(4, 0), (10, 4), (20, 10)]
+    assert wi.parent_pid(20, snapshot=snap) == 10
+    assert wi.parent_pid(99, snapshot=snap) is None

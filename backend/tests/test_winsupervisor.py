@@ -1,6 +1,6 @@
 import os, subprocess, sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 import pytest
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only module")
@@ -363,3 +363,80 @@ def test_attach_parent_console_leaves_a_console_build_alone():
     out = sys.stdout
     assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: None) is False
     assert k.calls == [] and sys.stdout is out
+
+
+# Onefile builds: our code runs in the bootloader's child, so the user's terminal is the bootloader's parent
+
+class ScriptedKernel32:
+    def __init__(self, results: dict[int, bool]):
+        self.results = results
+        self.calls: list[int] = []
+
+    def AttachConsole(self, pid: int) -> int:
+        self.calls.append(pid)
+        return 1 if self.results.get(pid, False) else 0
+
+
+def _frozen_attach(monkeypatch: pytest.MonkeyPatch, k: ScriptedKernel32, parent_of: Callable[[int], int | None]) -> tuple[bool, list[int]]:
+    _no_std_streams(monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    looked_up: list[int] = []
+
+    def lookup(pid: int) -> int | None:
+        looked_up.append(pid)
+        return parent_of(pid)
+
+    ok = ws.attach_parent_console(kernel32=k, opener=lambda p, m: f"{p}:{m}", ppid=lambda: 500, parent_of=lookup)
+    return ok, looked_up
+
+
+def test_frozen_attaches_to_the_bootloaders_parent_first(monkeypatch: pytest.MonkeyPatch):
+    k = ScriptedKernel32({900: True, -1: True})
+    ok, looked_up = _frozen_attach(monkeypatch, k, lambda pid: 900)
+    assert ok is True and looked_up == [500] and k.calls == [900]
+    assert str(sys.stdout) == "CONOUT$:w"
+
+
+def test_frozen_falls_back_to_the_direct_parent(monkeypatch: pytest.MonkeyPatch):
+    k = ScriptedKernel32({900: False, -1: True})
+    ok, _ = _frozen_attach(monkeypatch, k, lambda pid: 900)
+    assert ok is True and k.calls == [900, -1]
+
+
+def _gone(pid: int) -> int | None:
+    return None
+
+
+def _idle(pid: int) -> int | None:
+    return 0
+
+
+def _snapshot_fails(pid: int) -> int | None:
+    raise OSError("snapshot")
+
+
+@pytest.mark.parametrize("parent_of", [_gone, _idle, _snapshot_fails])
+def test_frozen_without_a_known_grandparent_uses_the_direct_parent(monkeypatch: pytest.MonkeyPatch, parent_of: Callable[[int], int | None]):
+    k = ScriptedKernel32({-1: True})
+    ok, _ = _frozen_attach(monkeypatch, k, parent_of)
+    assert ok is True and k.calls == [-1]
+
+
+def test_frozen_with_no_console_anywhere_prints_nowhere(monkeypatch: pytest.MonkeyPatch):
+    k = ScriptedKernel32({})
+    ok, _ = _frozen_attach(monkeypatch, k, lambda pid: 900)
+    assert ok is False and k.calls == [900, -1]
+    assert sys.stdout is None # pyright: ignore [reportUnnecessaryComparison]
+
+
+def test_not_frozen_never_looks_up_the_grandparent(monkeypatch: pytest.MonkeyPatch):
+    _no_std_streams(monkeypatch)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    k, looked_up = ScriptedKernel32({-1: True}), list[int]()
+
+    def lookup(pid: int) -> int | None:
+        looked_up.append(pid)
+        return 900
+
+    assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: None, ppid=lambda: 500, parent_of=lookup) is True
+    assert looked_up == [] and k.calls == [-1]

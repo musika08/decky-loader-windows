@@ -346,8 +346,8 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 SYNCHRONIZE = 0x00100000
 TERMINATE_WAIT_MS = 5000
 
-def list_processes() -> list[tuple[int, str | None]]:
-    '''(pid, full image path) for every process; the path is None where it cannot be queried.'''
+def process_snapshot() -> list[tuple[int, int]]:
+    '''(pid, parent pid) for every process, from one Toolhelp snapshot. Raises OSError if the snapshot fails.'''
     from ctypes import wintypes
     class PROCESSENTRY32W(ctypes.Structure):
         _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
@@ -361,27 +361,40 @@ def list_processes() -> list[tuple[int, str | None]]:
     k.Process32FirstW.restype = wintypes.BOOL
     k.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
     k.Process32NextW.restype = wintypes.BOOL
-    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    k.OpenProcess.restype = ctypes.c_void_p
-    k.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
-    k.QueryFullProcessImageNameW.restype = wintypes.BOOL
 
     snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if snap is None or snap == INVALID_HANDLE_VALUE:
         raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
-    pids: list[int] = []
+    out: list[tuple[int, int]] = []
     try:
         entry = PROCESSENTRY32W()
         entry.dwSize = ctypes.sizeof(entry)
         ok = k.Process32FirstW(snap, ctypes.byref(entry))
         while ok:
-            pids.append(int(entry.th32ProcessID))
+            out.append((int(entry.th32ProcessID), int(entry.th32ParentProcessID)))
             ok = k.Process32NextW(snap, ctypes.byref(entry))
     finally:
         k.CloseHandle(snap)
+    return out
+
+def parent_pid(pid: int, snapshot: Callable[[], list[tuple[int, int]]] = process_snapshot) -> int | None:
+    '''The parent pid Toolhelp records for `pid`, or None if `pid` is not running.'''
+    for p, parent in snapshot():
+        if p == pid:
+            return parent
+    return None
+
+def list_processes() -> list[tuple[int, str | None]]:
+    '''(pid, full image path) for every process; the path is None where it cannot be queried.'''
+    from ctypes import wintypes
+    k = _kernel32()
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    k.QueryFullProcessImageNameW.restype = wintypes.BOOL
 
     out: list[tuple[int, str | None]] = []
-    for pid in pids:
+    for pid, _parent in process_snapshot():
         image: str | None = None
         h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
         if h:
