@@ -510,3 +510,162 @@ def test_finish_update_branch_never_attaches_a_console():
     assert len(branches) == 1
     calls = {ast.unparse(c.func) for b in branches[0].body for c in ast.walk(b) if isinstance(c, ast.Call)}
     assert "cli_console" not in calls and "finish_update" in calls
+
+
+# Single-instance supervisor lock
+
+class FakeMutexKernel32:
+    def __init__(self, handle: int | None, error: int):
+        self.handle, self.error = handle, error
+        self.calls: list[tuple[Any, bool, str]] = []
+
+    def CreateMutexW(self, attrs: Any, initial_owner: bool, name: str) -> int | None:
+        self.calls.append((attrs, initial_owner, name))
+        return self.handle
+
+
+def _lock(k: FakeMutexKernel32) -> tuple[bool, list[str]]:
+    order: list[str] = []
+    def clear() -> None:
+        order.append("clear")
+    def last() -> int:
+        order.append("get")
+        return k.error
+    return ws.acquire_supervisor_lock(kernel32=k, last_error=last, clear_last_error=clear), order
+
+
+def test_supervisor_lock_acquired_when_the_mutex_is_new(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ws, "_supervisor_lock", None)
+    k = FakeMutexKernel32(1234, 0)
+    ok, order = _lock(k)
+    assert ok is True
+    # Not inheritable (no SECURITY_ATTRIBUTES), not owned, the fixed session-local name
+    assert k.calls == [(None, False, r"Local\DeckyLoader-Supervisor")]
+    assert order == ["clear", "get"]
+    assert ws._supervisor_lock == 1234 # pyright: ignore [reportPrivateUsage]
+
+
+def test_supervisor_lock_refused_when_another_supervisor_holds_it(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    monkeypatch.setattr(ws, "_supervisor_lock", None)
+    ok, _ = _lock(FakeMutexKernel32(1234, ws.ERROR_ALREADY_EXISTS))
+    assert ok is False
+    assert ws._supervisor_lock is None # pyright: ignore [reportPrivateUsage]
+    assert [r.getMessage() for r in caplog.records] == ["Another Decky Loader supervisor is already running in this session, exiting"]
+
+
+def test_supervisor_lock_refused_when_the_mutex_exists_but_cannot_be_opened(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ws, "_supervisor_lock", None)
+    ok, _ = _lock(FakeMutexKernel32(None, ws.ERROR_ACCESS_DENIED))
+    assert ok is False
+
+
+def test_supervisor_lock_failure_still_starts_decky(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ws, "_supervisor_lock", None)
+    ok, _ = _lock(FakeMutexKernel32(None, 87))
+    assert ok is True
+    assert ws._supervisor_lock is None # pyright: ignore [reportPrivateUsage]
+
+
+def test_supervisor_branch_takes_the_lock_before_anything_else():
+    import ast
+    main_py = Path(__file__).resolve().parent.parent / "main.py"
+    tree = ast.parse(main_py.read_text(encoding="utf-8"))
+    branches = [n for n in ast.walk(tree) if isinstance(n, ast.If) and ast.unparse(n.test) == "len(sys.argv) == 1"]
+    assert len(branches) == 1
+    # Only this branch's own body, in source order (ast.walk is breadth-first)
+    nodes = [c for stmt in branches[0].body for c in ast.walk(stmt) if isinstance(c, ast.Call)]
+    calls = [ast.unparse(c.func) for c in sorted(nodes, key=lambda c: (c.lineno, c.col_offset))]
+    first = calls.index("winsupervisor.acquire_supervisor_lock")
+    assert first < calls.index("winsupervisor.cleanup_stale_update") and first < calls.index("winsupervisor.run_supervisor")
+
+
+_BACKEND = Path(__file__).resolve().parent.parent
+
+# Runs the real main.py supervisor branch with everything after the lock replaced by a tripwire
+_RUN_MAIN = r'''
+import os, runpy, sys
+sys.path.insert(0, sys.argv[1])
+from decky_loader.localplatform import winsupervisor as ws
+marker = sys.argv[2]
+def tripwire(*a, **k):
+    open(marker, "w").write("spawned")
+    raise SystemExit(99)
+ws.cleanup_stale_update = tripwire
+ws.make_spawn = tripwire
+ws.run_supervisor = tripwire
+main_py = os.path.join(sys.argv[1], "main.py")
+sys.argv = [main_py]
+runpy.run_path(main_py, run_name="__main__")
+'''
+
+def _create_mutex(name: str, sddl: str | None = None) -> int:
+    import ctypes
+    from ctypes import wintypes
+    class SECURITY_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p), ("bInheritHandle", wintypes.BOOL)]
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateMutexW.restype = ctypes.c_void_p
+    sa: Any = None
+    if sddl is not None:
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = wintypes.BOOL
+        sd = ctypes.c_void_p()
+        assert advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None)
+        sa = ctypes.byref(SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False))
+    handle = k.CreateMutexW(sa, False, name)
+    assert handle, ctypes.get_last_error()
+    return handle
+
+
+def _close(handle: int) -> None:
+    import _winapi # pyright: ignore [reportMissingImports]
+    _winapi.CloseHandle(handle)
+
+
+def _lock_in_subprocess(name: str) -> subprocess.CompletedProcess[str]:
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from decky_loader.localplatform import winsupervisor as ws; "
+            "sys.exit(10 if ws.acquire_supervisor_lock(name=sys.argv[2]) else 11)")
+    return subprocess.run([sys.executable, "-c", code, str(_BACKEND), name], capture_output=True, text=True, timeout=60)
+
+
+def test_real_second_supervisor_exits_without_spawning(tmp_path: Path):
+    import time
+    held = _create_mutex(ws.SUPERVISOR_MUTEX)
+    marker = tmp_path / "spawned"
+    try:
+        started = time.monotonic()
+        proc = subprocess.run([sys.executable, "-c", _RUN_MAIN, str(_BACKEND), str(marker)], capture_output=True,
+                              text=True, timeout=60)
+        elapsed = time.monotonic() - started
+    finally:
+        _close(held)
+    assert proc.returncode == 0, proc.stderr
+    assert not marker.exists()
+    assert elapsed < 20
+    assert "Another Decky Loader supervisor is already running in this session" in proc.stderr
+
+
+def test_real_lock_is_taken_when_free_and_released_when_the_holder_exits():
+    import secrets
+    name = "Local\\DeckyLoader-Test-" + secrets.token_hex(8)
+    assert _lock_in_subprocess(name).returncode == 10
+    # The first holder has exited, so the lock is free again
+    assert _lock_in_subprocess(name).returncode == 10
+    held = _create_mutex(name)
+    try:
+        assert _lock_in_subprocess(name).returncode == 11
+    finally:
+        _close(held)
+
+
+def test_real_lock_refused_for_a_mutex_this_user_cannot_open():
+    import secrets
+    name = "Local\\DeckyLoader-Test-" + secrets.token_hex(8)
+    held = _create_mutex(name, sddl="D:") # Empty DACL: nobody, us included, gets MUTEX_ALL_ACCESS
+    try:
+        proc = _lock_in_subprocess(name)
+    finally:
+        _close(held)
+    assert proc.returncode == 11, proc.stderr

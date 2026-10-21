@@ -138,6 +138,55 @@ def launch_detached(argv: list[str]) -> None:
     subprocess.Popen(argv, creationflags=flags, close_fds=True, cwd=os.path.dirname(argv[0]) or None,
                      env={**os.environ, **_FRESH_ENV})
 
+SUPERVISOR_MUTEX = "Local\\DeckyLoader-Supervisor"
+ERROR_ACCESS_DENIED = 5
+ERROR_ALREADY_EXISTS = 183
+
+# Never closed: the system closes it when this process exits, which is what releases the lock.
+_supervisor_lock: Any = None
+
+def _mutex_kernel32() -> Any:
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateMutexW.restype = ctypes.c_void_p
+    return k
+
+def _last_error() -> int:
+    import ctypes
+    return ctypes.get_last_error()
+
+def _clear_last_error() -> None:
+    import ctypes
+    ctypes.set_last_error(0)
+
+def acquire_supervisor_lock(kernel32: Any = None, last_error: Callable[[], int] = _last_error,
+                            clear_last_error: Callable[[], None] = _clear_last_error,
+                            name: str = SUPERVISOR_MUTEX) -> bool:
+    '''Make this the only supervisor in the session. False means another one already holds the lock.
+
+    The mutex handle is not inheritable (no SECURITY_ATTRIBUTES), so the loader and the update finisher never hold
+    it; it is released exactly when this process exits. If the mutex cannot be created for any other reason, the
+    supervisor starts anyway rather than leaving Decky stopped.'''
+    global _supervisor_lock
+    k = kernel32 if kernel32 is not None else _mutex_kernel32()
+    clear_last_error()
+    handle = k.CreateMutexW(None, False, name)
+    err = last_error()
+    if handle and err == ERROR_ALREADY_EXISTS:
+        logger.warning("Another Decky Loader supervisor is already running in this session, exiting")
+        return False
+    if not handle:
+        if err == ERROR_ACCESS_DENIED:
+            # It exists, but was created by a process we cannot open (e.g. the elevated installed supervisor)
+            logger.warning("Another Decky Loader supervisor is already running in this session, exiting")
+            return False
+        logger.warning("Could not create the %s mutex (error %s), starting without the single-instance check", name, err)
+        return True
+    _supervisor_lock = handle
+    return True
+
 def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], None], exe: str,
                    launch_detached: Callable[[list[str]], None], clock: Callable[[], float] = time.monotonic) -> int:
     backoff = 0.0
