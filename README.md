@@ -92,11 +92,12 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 **Requirements**
 
 - A Windows account with administrator rights. Installed mode registers an elevated task, so it cannot be set up from a standard account.
+- Windows Script Host enabled, which is the default. Installed mode starts Decky at logon through `wscript.exe`.
 - Steam's remote debugging enabled. Decky connects to Steam's debugger at `http://localhost:8080`, so it must be reachable there. See [the Decky wiki](https://wiki.deckbrew.xyz) for how to enable it.
 
 **Install**
 
-1. Download the build for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window. Use a `-noconsole` variant for installed mode: the console build opens a window at every logon, and closing that window stops Decky.
+1. Download the build for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window. Either works for installed mode, which starts Decky at logon without a window.
 1. If you were running a portable copy of Decky, close it first. Both use port 1337, so the installed copy cannot start while it runs.
 1. Run the file you downloaded with `--install`, for example `PluginLoader-win.exe --install`, from any terminal. Windows will ask for administrator approval if needed. This copies Decky to `%ProgramData%\decky\services\PluginLoader.exe` and registers a scheduled task named `Decky Loader`, which starts Decky at every logon and starts it right away.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
