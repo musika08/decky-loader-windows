@@ -2,7 +2,7 @@ from ..enums import UserType
 import os, sys
 from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
-from .wininstall import known_program_data
+from .wininstall import EXE_NAME, known_program_data, program_dir
 
 _exit_code: int | None = None
 
@@ -60,14 +60,12 @@ def get_username() -> str:
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
-def installed_root(program_data: str | None = None) -> str | None:
-    r'''`%ProgramData%\decky` when running from `%ProgramData%\decky\services`, else None.
+def installed_root(program_data: str | None = None, program_files: str | None = None) -> str | None:
+    r'''`%ProgramData%\decky` when running as the installed `%ProgramFiles%\Decky Loader\PluginLoader.exe`, else None.
 
-    ProgramData comes from the known-folder API, never from the user-controlled PROGRAMDATA env var.'''
-    root = os.path.join(program_data or known_program_data(), "decky")
-    services = _norm(os.path.join(root, "services"))
-    if _norm(sys.executable).startswith(services + os.sep):
-        return root
+    Both folders come from the known-folder API, never from the user-controlled PROGRAMDATA/ProgramFiles env vars.'''
+    if _norm(sys.executable) == _norm(os.path.join(program_dir(program_files), EXE_NAME)):
+        return os.path.join(program_data or known_program_data(), "decky")
     return None
 
 def get_privileged_path() -> str:

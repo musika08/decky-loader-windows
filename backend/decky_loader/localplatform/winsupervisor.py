@@ -223,7 +223,8 @@ def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], N
             if new is not None:
                 # The finisher outlives us, so it must not be a child we wait on.
                 # Under a onefile build our own pid is the child; the bootloader parent is what holds the image lock.
-                waiting_on = os.getppid() if getattr(sys, "frozen", False) else os.getpid()
+                # A onedir build has no bootloader process.
+                waiting_on = os.getppid() if getattr(sys, "frozen", False) and not is_onedir_build() else os.getpid()
                 try:
                     launch_detached([new, "--finish-update", exe, str(waiting_on)])
                     return 0
@@ -277,7 +278,7 @@ def relaunch(target: str, *, installed: Callable[[], bool] = _is_installed, run:
              clock: Callable[[], float] = time.monotonic) -> None:
     '''Start the loader again after an update.
 
-    Installed: through the scheduled task, so it keeps the task's elevation, admin-only temp directory and tracking.
+    Installed: through the scheduled task, so it keeps the task's elevation and tracking.
     The task can accept the request and still not start the exe, so wait up to RELAUNCH_WAIT_SECONDS for `target`
     to show up as a process.
     Portable, or if the task cannot be started or does not start `target`: a direct detached launch.'''

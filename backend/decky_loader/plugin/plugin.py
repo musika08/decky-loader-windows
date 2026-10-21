@@ -171,12 +171,9 @@ class PluginWrapper:
             self.log.warning(f"Plugin {self.get_display_name()} requests root, but the loader is unelevated. Starting it with the loader's privileges.")
         env = dict(environ)
         env[TOKEN_ENV] = sock.token
-        # The child must own its PyInstaller extraction directory, since it may outlive this loader
+        # A onefile child must own its PyInstaller extraction directory, since it may outlive this loader.
+        # A onedir build extracts nothing and ignores it.
         env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
-        if not elevated and winprocess.is_elevated():
-            # A restricted host cannot write the admin-only temp directory the elevated loader extracts into
-            from ..localplatform.wininstall import user_temp_dir
-            env["TMP"] = env["TEMP"] = user_temp_dir()
         proc = winprocess.PluginProcess(self_command() + ["--plugin-host", encode_params(self.sandboxed_plugin, sock.port)], env, elevated)
         proc.start()
         return proc
