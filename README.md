@@ -85,21 +85,21 @@ We are sorry to see you go! If you are considering uninstalling because you are 
 
 - There is also a fast uninstall for those who can use Konsole. Run `curl -L https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh | sh` and type your password when prompted.
 
-### 🪟 Windows
+## 🪟 Windows Installation
 
 Decky Loader also runs on Windows, next to the Steam client. It is not installed through the Steam Deck installer.
 
 **Requirements**
 
 - A Windows account with administrator rights. Installed mode registers an elevated task, so it cannot be set up from a standard account.
-- Steam's remote debugging port enabled. Decky talks to the Steam client through `http://localhost:8080`; if Steam is not listening there, Decky keeps waiting and nothing appears in Steam.
+- Steam's remote debugging enabled. Decky connects to Steam's debugger at `http://localhost:8080`, so it must be reachable there. See [the Decky wiki](https://wiki.deckbrew.xyz) for how to enable it.
 
 **Install**
 
-1. Download `PluginLoader-win.exe` (or `PluginLoader-win-noconsole.exe` if you do not want a console window) from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases). Decky itself is never installed from its store.
-1. Run `PluginLoader.exe --install` once from a normal (non-admin) terminal, and approve the Windows administrator prompt. This copies Decky to `%ProgramData%\decky\services` and registers a scheduled task named `Decky Loader`, which starts Decky at every logon and starts it right away.
+1. Download the build for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window.
+1. Run the file you downloaded with `--install`, for example `PluginLoader-win.exe --install`, from any terminal. Windows will ask for administrator approval if needed. This copies Decky to `%ProgramData%\decky\services\PluginLoader.exe` and registers a scheduled task named `Decky Loader`, which starts Decky at every logon and starts it right away.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
-1. Install plugins from Decky's built-in store, as described under Plugins below.
+1. Install plugins from Decky's built-in store.
 
 **Upgrading from an older portable Windows build**
 
@@ -107,7 +107,7 @@ Plugins in `%USERPROFILE%\homebrew\plugins` are not moved to the new install. Re
 
 **Uninstall**
 
-Run `PluginLoader.exe --uninstall` and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramData%\decky\services`.
+Run the installed copy: `"%ProgramData%\decky\services\PluginLoader.exe" --uninstall`, and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramData%\decky\services`.
 
 **Portable mode**
 
