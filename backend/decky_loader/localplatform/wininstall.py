@@ -30,8 +30,18 @@ def current_user_sid(run: Callable[..., Any] = subprocess.run) -> str:
     row = next(csv.reader(io.StringIO(out.strip())))
     return row[1]
 
-def build_task_xml(exe: str, workdir: str, user_sid: str) -> str:
-    sid, exe, workdir = escape(user_sid), escape(exe), escape(workdir)
+def task_arguments(exe: str, tmp_dir: str) -> str:
+    '''cmd.exe arguments that point TMP/TEMP at the admin-only `tmp_dir`, then run `exe` and wait for it.
+
+    The onefile bootloader extracts into TMP before any of our code runs, so this is the only place to set it.
+    `/d` skips AutoRun, `/v:off` disables delayed expansion, and `/s` makes cmd strip exactly the outer quotes.'''
+    for p in (exe, tmp_dir):
+        if '"' in p or "%" in p:
+            raise ValueError(f"unsupported character in path: {p}")
+    return f'/d /v:off /s /c "set "TMP={tmp_dir}"&& set "TEMP={tmp_dir}"&& "{exe}""'
+
+def build_task_xml(exe: str, workdir: str, user_sid: str, tmp_dir: str, cmd_exe: str) -> str:
+    sid, workdir, command, arguments = escape(user_sid), escape(workdir), escape(cmd_exe), escape(task_arguments(exe, tmp_dir))
     return f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -65,7 +75,8 @@ def build_task_xml(exe: str, workdir: str, user_sid: str) -> str:
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{exe}</Command>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
       <WorkingDirectory>{workdir}</WorkingDirectory>
     </Exec>
   </Actions>
@@ -245,14 +256,30 @@ def ensure_trusted_dir(path: str, *, remove_links: bool, open_trusted: Callable[
     return handle
 
 _FOLDERID_PROGRAMDATA = "{62AB5D82-FDC1-4DC3-A9DD-070D1D495D97}"
+_FOLDERID_LOCALAPPDATA = "{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}"
 
 def known_program_data() -> str:
     '''ProgramData from the shell known-folder API. The PROGRAMDATA env var is user-controlled and must not be trusted here.'''
+    return known_folder(_FOLDERID_PROGRAMDATA)
+
+def user_temp_dir() -> str:
+    r'''The user's own temp directory, `%LOCALAPPDATA%\Temp`, for processes that cannot write the admin-only one.'''
+    return os.path.join(known_folder(_FOLDERID_LOCALAPPDATA), "Temp")
+
+def system_directory() -> str:
+    r'''`%SystemRoot%\System32`, resolved by the OS rather than read from the environment.'''
+    buf = ctypes.create_unicode_buffer(260)
+    n = int(ctypes.windll.kernel32.GetSystemDirectoryW(buf, len(buf))) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownArgumentType]
+    if n == 0 or n >= len(buf):
+        raise OSError("GetSystemDirectoryW failed")
+    return buf.value
+
+def known_folder(folder_id: str) -> str:
     from ctypes import wintypes
     class GUID(ctypes.Structure):
         _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
     guid = GUID()
-    ctypes.oledll.ole32.CLSIDFromString(_FOLDERID_PROGRAMDATA, ctypes.byref(guid)) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    ctypes.oledll.ole32.CLSIDFromString(folder_id, ctypes.byref(guid)) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
     out = ctypes.c_wchar_p()
     hr = ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(out)) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
     try:
@@ -302,7 +329,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             sleep: Callable[[float], None] = time.sleep, open_trusted: Callable[[str], Any] = open_trusted_dir,
             close_dir: Callable[[Any], None] = close_handle,
             create_dir: Callable[[str], None] = create_secure_dir, rename: Callable[[str, str], None] = os.rename,
-            rmdir: Callable[[str], None] = os.rmdir, reparse: Callable[[str], bool] = is_reparse_point) -> int:
+            rmdir: Callable[[str], None] = os.rmdir, reparse: Callable[[str], bool] = is_reparse_point,
+            system_dir: Callable[[], str] = system_directory) -> int:
     exe = exe or sys.executable
     if not is_admin():
         if not is_admin_member():
@@ -316,6 +344,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
     root = os.path.join(program_data or known_program_data(), "decky")
     services = os.path.join(root, "services")
     plugins_dst = os.path.join(root, "plugins")
+    # Elevated onefile processes extract here instead of the user-writable %TEMP%
+    tmp_dir = os.path.join(root, "tmp")
     installed_exe = os.path.join(services, EXE_NAME)
 
     # Stop a running elevated loader first, it locks the installed exe
@@ -329,7 +359,7 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         kw: dict[str, Any] = dict(open_trusted=open_trusted, create_dir=create_dir, reparse=reparse, rename=rename, rmdir=rmdir)
         try:
             root_handle = ensure_trusted_dir(root, remove_links=False, **kw)
-            for sub in (services, plugins_dst):
+            for sub in (services, plugins_dst, tmp_dir):
                 close_dir(ensure_trusted_dir(sub, remove_links=True, **kw))
         except OSError as e:
             print(f"Could not prepare {root}: {e}", file=sys.stderr)
@@ -365,7 +395,7 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
         try:
             with os.fdopen(fd, "w", encoding="utf-16") as f: # utf-16 writes a BOM
-                f.write(build_task_xml(installed_exe, services, sid))
+                f.write(build_task_xml(installed_exe, services, sid, tmp_dir, os.path.join(system_dir(), "cmd.exe")))
             run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
         finally:
             try:

@@ -12,8 +12,12 @@ NS = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
 SID = "S-1-5-21-1-2-3-1001"
 
 
+CMD = r"C:\Windows\System32\cmd.exe"
+TMP = r"C:\ProgramData\decky\tmp"
+
+
 def test_task_xml_runs_highest_at_user_logon():
-    xml = wi.build_task_xml(r"C:\ProgramData\decky\services\PluginLoader.exe", r"C:\ProgramData\decky\services", SID)
+    xml = wi.build_task_xml(r"C:\ProgramData\decky\services\PluginLoader.exe", r"C:\ProgramData\decky\services", SID, TMP, CMD)
     root = ET.fromstring(xml)
 
     def text(path: str) -> str | None:
@@ -23,7 +27,6 @@ def test_task_xml_runs_highest_at_user_logon():
     assert text("t:Triggers/t:LogonTrigger/t:UserId") == SID
     assert text("t:Principals/t:Principal/t:UserId") == SID
     assert text("t:Principals/t:Principal/t:LogonType") == "InteractiveToken"
-    assert text("t:Actions/t:Exec/t:Command") == r"C:\ProgramData\decky\services\PluginLoader.exe"
     assert text("t:Actions/t:Exec/t:WorkingDirectory") == r"C:\ProgramData\decky\services"
     assert text("t:Settings/t:ExecutionTimeLimit") == "PT0S"
     assert text("t:Settings/t:MultipleInstancesPolicy") == "IgnoreNew"
@@ -32,10 +35,70 @@ def test_task_xml_runs_highest_at_user_logon():
     assert root.get("version") == "1.2"
 
 
-def test_task_xml_escapes_paths():
-    xml = wi.build_task_xml(r"C:\A&B\PluginLoader.exe", r"C:\A&B", SID)
+def test_task_xml_runs_exe_through_cmd_with_admin_only_temp():
+    xml = wi.build_task_xml(r"C:\ProgramData\decky\services\PluginLoader.exe", r"C:\ProgramData\decky\services", SID, TMP, CMD)
     root = ET.fromstring(xml)
-    assert root.findtext("t:Actions/t:Exec/t:Command", namespaces=NS) == r"C:\A&B\PluginLoader.exe"
+    assert root.findtext("t:Actions/t:Exec/t:Command", namespaces=NS) == r"C:\Windows\System32\cmd.exe"
+    assert root.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == (
+        r'/d /v:off /s /c "set "TMP=C:\ProgramData\decky\tmp"&& set "TEMP=C:\ProgramData\decky\tmp"&& '
+        r'"C:\ProgramData\decky\services\PluginLoader.exe""')
+
+
+def test_task_arguments_survive_real_cmd_parsing(tmp_path):
+    # The exact arguments go through the real cmd.exe; a batch file stands in for the exe and reports TMP/TEMP
+    exe_dir = tmp_path / "A&B (x86) ^x"
+    exe_dir.mkdir()
+    probe = exe_dir / "probe.cmd"
+    probe.write_text("@set TMP\r\n@set TEMP\r\n")
+    tmp_dir = str(tmp_path / "t&mp dir")
+    args = wi.task_arguments(str(probe), tmp_dir)
+    cmd = os.path.join(wi.system_directory(), "cmd.exe")
+    out = subprocess.run(f'"{cmd}" {args}', capture_output=True, text=True, timeout=30)
+    assert out.stdout.splitlines() == [f"TMP={tmp_dir}", f"TEMP={tmp_dir}"], out.stderr
+
+
+@pytest.mark.parametrize("bad", [r'C:\a"b\PluginLoader.exe', r"C:\%USERPROFILE%\PluginLoader.exe"])
+def test_task_arguments_reject_unquotable_paths(bad):
+    with pytest.raises(ValueError):
+        wi.task_arguments(bad, TMP)
+    with pytest.raises(ValueError):
+        wi.task_arguments(r"C:\x\PluginLoader.exe", bad)
+
+
+def test_task_xml_escapes_paths():
+    xml = wi.build_task_xml(r"C:\A&B\PluginLoader.exe", r"C:\A&B", SID, r"C:\A&B\tmp", CMD)
+    root = ET.fromstring(xml)
+    assert root.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == (
+        r'/d /v:off /s /c "set "TMP=C:\A&B\tmp"&& set "TEMP=C:\A&B\tmp"&& "C:\A&B\PluginLoader.exe""')
+    assert root.findtext("t:Actions/t:Exec/t:WorkingDirectory", namespaces=NS) == r"C:\A&B"
+
+
+def test_system_directory_and_user_temp_ignore_env(monkeypatch):
+    sysdir, temp = wi.system_directory(), wi.user_temp_dir()
+    monkeypatch.setenv("SystemRoot", r"C:\evil")
+    monkeypatch.setenv("LOCALAPPDATA", r"C:\evil")
+    assert wi.system_directory() == sysdir and os.path.isfile(os.path.join(sysdir, "cmd.exe"))
+    assert wi.user_temp_dir() == temp and temp.lower().endswith(r"\temp")
+
+
+def test_install_points_task_at_admin_only_temp(tmp_path):
+    src_exe = _fake_env(tmp_path)
+    xmls: list[str] = []
+
+    class XmlRecorder(Recorder):
+        def __call__(self, argv, **kwargs):
+            if argv[1] == "/Create":
+                with open(argv[5], encoding="utf-16") as f:
+                    xmls.append(f.read())
+            return super().__call__(argv, **kwargs)
+
+    assert _install(tmp_path, src_exe, run=XmlRecorder(), system_dir=lambda: r"C:\Sys32") == 0
+    root = str(tmp_path / "ProgramData" / "decky")
+    task = ET.fromstring(xmls[0].encode("utf-16"))
+    assert task.findtext("t:Actions/t:Exec/t:Command", namespaces=NS) == r"C:\Sys32\cmd.exe"
+    assert task.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == wi.task_arguments(
+        os.path.join(root, "services", "PluginLoader.exe"), os.path.join(root, "tmp"))
+    assert os.path.isdir(os.path.join(root, "tmp"))
 
 
 def test_current_user_sid_parses_whoami():
@@ -139,7 +202,7 @@ def test_install_command_sequence_has_no_icacls_and_no_migration(tmp_path, capsy
     assert os.path.dirname(rec.runs[1][5]) == root  # task XML staged inside the protected root
     assert rec.runs[2] == ["schtasks", "/Run", "/TN", "Decky Loader"]
     assert len(rec.runs) == 3
-    assert dirs.created == [root, os.path.join(root, "services"), os.path.join(root, "plugins")]
+    assert dirs.created == [root, os.path.join(root, "services"), os.path.join(root, "plugins"), os.path.join(root, "tmp")]
     assert os.path.isfile(os.path.join(root, "services", "PluginLoader.exe"))
     assert os.listdir(os.path.join(root, "plugins")) == []
     assert "are not migrated" in capsys.readouterr().out
