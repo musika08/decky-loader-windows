@@ -93,6 +93,33 @@ jobs:
       shell: bash
       run: ./backend/dist/PluginLoader.exe --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi
 
+    # Installed mode installs a onedir build (PluginLoader.exe plus _internal), windowed like the README advises.
+    # Built once per architecture, in the noconsole job.
+    - name: Build Windows installer (onedir) 🛠️
+      if: ${{ inputs.os == 'Windows' && inputs.noconsole == true }}
+      working-directory: ./backend
+      run: |
+        DECKY_REPO="${{ github.repository }}" DECKY_BRANCH="${{ github.event.number && format('PR{0}/{1}', github.event.number, github.head_ref) || github.ref_name }}" DECKY_NOCONSOLE=1 DECKY_ONEDIR=1 pyinstaller pyinstaller.spec --distpath dist-installer --workpath build-installer
+        echo Installer build:
+        ls ./dist-installer/PluginLoader
+
+    - name: Verify bundled modules for plugins (installer) 🔍
+      if: ${{ inputs.os == 'Windows' && inputs.noconsole == true }}
+      shell: bash
+      run: ./backend/dist-installer/PluginLoader/PluginLoader.exe --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi
+
+    - name: Zip Windows installer 📦
+      if: ${{ inputs.os == 'Windows' && inputs.noconsole == true }}
+      shell: pwsh
+      run: Compress-Archive -Path ./backend/dist-installer/PluginLoader -DestinationPath ./backend/dist-installer/${{ inputs.arch == 'arm64' && 'PluginLoader-win-arm64-installer' || 'PluginLoader-win-installer' }}.zip
+
+    - name: Upload installer artifact ⬆️
+      if: ${{ inputs.os == 'Windows' && inputs.noconsole == true && !env.ACT }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.arch == 'arm64' && 'PluginLoader-win-arm64-installer' || 'PluginLoader-win-installer' }}
+        path: ./backend/dist-installer/${{ inputs.arch == 'arm64' && 'PluginLoader-win-arm64-installer' || 'PluginLoader-win-installer' }}.zip
+
     - name: Upload package artifact ⬆️
       if: ${{ !env.ACT }}
       uses: actions/upload-artifact@v7
