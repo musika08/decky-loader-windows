@@ -113,6 +113,11 @@ class PluginManager:
 
         # should never happen
         if (self.webhelper_crash_count > 4):
+            if ON_WINDOWS:
+                # Closing Big Picture a few times in a row looks the same. Stopping would keep Decky down until the
+                # next logon (the supervisor does not restart a stopped loader), so keep running and keep reinjecting.
+                logger.warning("Steam restarted repeatedly; keeping Decky running")
+                return
             await self.updater.do_shutdown()
             # Give up
             exit(0)
@@ -250,7 +255,8 @@ class PluginManager:
                 await sleep(1) # To give CEF enough time to close down the websocket
                 return # We'll catch the next tab in the main loop
             await tab.evaluate_js(create_inject_script("index.js" if self.webhelper_crash_count < 3 else "fallback.js"), False, False, False)
-            if self.webhelper_crash_count > 2:
+            # On Windows only an explicit shutdown from the UI may stop the loader; see handle_crash
+            if self.webhelper_crash_count > 2 and not ON_WINDOWS:
                 self.reinject = False
                 await sleep(1)
                 await self.updater.do_shutdown()

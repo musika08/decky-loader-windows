@@ -101,6 +101,10 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
 1. Install plugins from Decky's built-in store.
 
+**Restarting**
+
+Restarting Steam or closing Big Picture does not stop Decky. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
+
 **Upgrading from an older portable Windows build**
 
 Plugins in `%USERPROFILE%\homebrew\plugins` are not moved to the new install. Reinstall them from Decky's store. Your settings and data in `%USERPROFILE%\homebrew` are kept.
