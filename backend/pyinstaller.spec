@@ -6,7 +6,7 @@ from PyInstaller.building.api import EXE, PYZ
 from PyInstaller.utils.hooks import copy_metadata
 
 noconsole_str = os.getenv('DECKY_NOCONSOLE', '0')
-noconsole = bool(noconsole_str)
+noconsole = noconsole_str == '1'
 repo = os.getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')
 branch = os.getenv('DECKY_BRANCH', 'main')
 with open('build_config.py', 'w') as f:

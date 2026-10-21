@@ -298,3 +298,57 @@ def test_finish_update_relaunches_through_relaunch(monkeypatch):
     monkeypatch.setattr(ws, "relaunch", lambda target, **kw: seen.append(target))
     assert ws.finish_update("T.exe", 0, copy=lambda s, d: None, sleep=lambda _s: None) == 0
     assert seen == ["T.exe"]
+
+
+# Windowed (-noconsole) builds: CLI modes attach to the parent console so their output is visible
+
+class FakeKernel32:
+    def __init__(self, ok: bool):
+        self.ok = ok
+        self.calls: list[int] = []
+
+    def AttachConsole(self, pid: int) -> int:
+        self.calls.append(pid)
+        return 1 if self.ok else 0
+
+
+def test_attach_parent_console_rebinds_when_stdout_is_none(monkeypatch):
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    k, opened = FakeKernel32(True), []
+
+    def opener(path, mode):
+        opened.append((path, mode))
+        return f"stream{len(opened)}"
+
+    assert ws.attach_parent_console(kernel32=k, opener=opener) is True
+    assert k.calls == [-1]
+    assert opened == [("CONOUT$", "w"), ("CONOUT$", "w")]
+    assert sys.stdout == "stream1" and sys.stderr == "stream2"
+
+
+def test_attach_parent_console_ignores_failure(monkeypatch):
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+    k, opened = FakeKernel32(False), []
+    assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: opened.append(p)) is False
+    assert k.calls == [-1] and opened == []
+    assert sys.stdout is None and sys.stderr is None
+
+
+def test_attach_parent_console_ignores_open_errors(monkeypatch):
+    monkeypatch.setattr(sys, "stdout", None)
+    monkeypatch.setattr(sys, "stderr", None)
+
+    def opener(p, m):
+        raise OSError("no console")
+
+    assert ws.attach_parent_console(kernel32=FakeKernel32(True), opener=opener) is False
+    assert sys.stdout is None
+
+
+def test_attach_parent_console_leaves_a_console_build_alone():
+    k = FakeKernel32(True)
+    out = sys.stdout
+    assert ws.attach_parent_console(kernel32=k, opener=lambda p, m: None) is False
+    assert k.calls == [] and sys.stdout is out

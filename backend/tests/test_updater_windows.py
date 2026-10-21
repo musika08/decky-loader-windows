@@ -131,3 +131,17 @@ def test_dropped_connection_leaves_no_new_file(tmp_path: Any, monkeypatch: Any):
 
     asyncio.run(go())
     assert not (running.parent / "PluginLoader-win.exe.new").exists()
+
+
+@pytest.mark.parametrize("value,noconsole", [("0", False), ("1", True), ("", False)])
+def test_noconsole_asset_only_when_flag_is_1(monkeypatch: Any, value: str, noconsole: bool):
+    monkeypatch.setenv("DECKY_NOCONSOLE", value)
+    assert _updater().get_remote_binary_name().endswith("-noconsole.exe") is noconsole
+
+
+def test_spec_parses_noconsole_as_1_only():
+    spec = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pyinstaller.spec")
+    with open(spec, encoding="utf-8") as f:
+        text = f.read()
+    assert "noconsole = noconsole_str == '1'" in text
+    assert "bool(noconsole_str)" not in text

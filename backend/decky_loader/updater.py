@@ -161,7 +161,7 @@ class Updater:
             binary_name += "-win"
             if ON_ARM64:
                 binary_name += "-arm64"
-            if bool(getenv("DECKY_NOCONSOLE", "0")):
+            if getenv("DECKY_NOCONSOLE", "0") == "1":
                 binary_name += "-noconsole"
             if with_extension:
                 binary_name += ".exe"

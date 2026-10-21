@@ -23,6 +23,25 @@ CLEANUP_SECONDS = 60
 # Every process we start must own its directory, since the starter exits (or is replaced) before it does.
 _FRESH_ENV = {"PYINSTALLER_RESET_ENVIRONMENT": "1"}
 
+ATTACH_PARENT_PROCESS = -1
+
+def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any] = open) -> bool:
+    '''In a windowed (-noconsole) build sys.stdout/sys.stderr are None, so CLI modes would print nothing.
+    Attach to the console of whoever started us and write there. If there is none, output goes nowhere.'''
+    if sys.stdout is not None:
+        return False
+    try:
+        if kernel32 is None:
+            import ctypes
+            kernel32 = ctypes.windll.kernel32 # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+        if not kernel32.AttachConsole(ATTACH_PARENT_PROCESS):
+            return False
+        out, err = opener("CONOUT$", "w"), opener("CONOUT$", "w")
+    except OSError:
+        return False
+    sys.stdout, sys.stderr = out, err
+    return True
+
 def self_command() -> list[str]:
     '''Command that starts another copy of this program, without mode flags.'''
     if getattr(sys, "frozen", False):
