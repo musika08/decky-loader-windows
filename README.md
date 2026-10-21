@@ -92,14 +92,14 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 **Requirements**
 
 - A Windows account with administrator rights. Installed mode registers an elevated task, so it cannot be set up from a standard account.
-- Windows Script Host enabled, which is the default. Installed mode starts Decky at logon through `wscript.exe`.
 - Steam's remote debugging enabled. Decky connects to Steam's debugger at `http://localhost:8080`, so it must be reachable there. See [the Decky wiki](https://wiki.deckbrew.xyz) for how to enable it.
 
 **Install**
 
-1. Download the build for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window. Either works for installed mode, which starts Decky at logon without a window.
+1. Download the installer zip for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win-installer.zip` (x86_64) or `PluginLoader-win-arm64-installer.zip` (ARM). The single-file `.exe` builds are for portable mode and cannot be installed.
+1. Extract the zip. It contains a `PluginLoader` folder with `PluginLoader.exe` and an `_internal` folder next to it.
 1. If you were running a portable copy of Decky, close it first. Both use port 1337, so the installed copy cannot start while it runs.
-1. Run the file you downloaded with `--install`, for example `PluginLoader-win.exe --install`, from any terminal. Windows will ask for administrator approval if needed. This copies Decky to `%ProgramData%\decky\services\PluginLoader.exe` and registers a scheduled task named `Decky Loader`, which starts Decky at every logon and starts it right away.
+1. From any terminal, run `PluginLoader.exe --install` from the extracted folder. Windows will ask for administrator approval if needed. This copies `PluginLoader.exe` and its `_internal` folder to `%ProgramFiles%\Decky Loader` and registers a scheduled task named `Decky Loader`, which starts `%ProgramFiles%\Decky Loader\PluginLoader.exe` directly at every logon, without a window, and starts it right away. You can delete the extracted folder afterwards.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
 1. Install plugins from Decky's built-in store.
 
@@ -107,17 +107,27 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 
 Restarting Steam or closing Big Picture does not stop Decky. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
 
-**Upgrading from an older portable Windows build**
+**Where things live**
 
-Plugins in `%USERPROFILE%\homebrew\plugins` are not moved to the new install. Reinstall them from Decky's store. Plugin settings and data in `%USERPROFILE%\homebrew` are kept. Decky's own settings (plugin order, update branch and similar) live in `%ProgramData%\decky\settings` in installed mode, so they do not carry over from portable mode.
+The program is in `%ProgramFiles%\Decky Loader`. Plugins and Decky's settings are in `%ProgramData%\decky` (`plugins` and `settings`), which only administrators can change.
+
+**Updating**
+
+Decky's built-in updater is not available in installed mode. To update, download the new installer zip, extract it, and run `PluginLoader.exe --install` from it again. This stops the running Decky, replaces `%ProgramFiles%\Decky Loader`, and starts the new version. Plugins and settings are kept.
+
+**Upgrading from an older Windows build**
+
+Installs made by older builds kept the program in `%ProgramData%\decky\services` and started it through `wscript.exe`. Running `--install` from the new installer zip replaces that: it removes `%ProgramData%\decky\services` and `%ProgramData%\decky\tmp`, and keeps your plugins and settings.
+
+Plugins in `%USERPROFILE%\homebrew\plugins` from portable mode are not moved to the install. Reinstall them from Decky's store. Plugin settings and data in `%USERPROFILE%\homebrew` are kept. Decky's own settings (plugin order, update branch and similar) live in `%ProgramData%\decky\settings` in installed mode, so they do not carry over from portable mode.
 
 **Uninstall**
 
-Run the installed copy: `"%ProgramData%\decky\services\PluginLoader.exe" --uninstall`, and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramData%\decky\services`.
+Run the installed copy: `"%ProgramFiles%\Decky Loader\PluginLoader.exe" --uninstall`, and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramFiles%\Decky Loader` (and any `%ProgramData%\decky\services` or `tmp` left by an older build). Files that are still in use are deleted at the next restart. Plugins and settings in `%ProgramData%\decky` are left in place.
 
 **Portable mode**
 
-Running the exe without `--install` still works. Plugins that need the `root` flag then run without administrator rights, so some of them will not work fully. Installed mode is recommended.
+Portable mode is the single-file exe: `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window. Run it without any arguments. Plugins that need the `root` flag then run without administrator rights, so some of them will not work fully, and Decky's built-in updater can update it in place. Installed mode is recommended.
 
 **Security notes**
 
