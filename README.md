@@ -113,6 +113,10 @@ Run the installed copy: `"%ProgramData%\decky\services\PluginLoader.exe" --unins
 
 Running the exe without `--install` still works. Plugins that need the `root` flag then run without administrator rights, so some of them will not work fully. Installed mode is recommended.
 
+**Security notes**
+
+In installed mode, Decky runs with administrator rights. Like Decky on Linux, which runs as root, it accepts commands from local programs on `127.0.0.1`. This means software already running on your PC can use Decky to install plugins that run with administrator rights. If you do not want that, use portable mode instead.
+
 **Known limits**
 
 Plugins that depend on Linux-specific features (Proton, flatpak, SteamOS-only tools) do not apply on Windows.
