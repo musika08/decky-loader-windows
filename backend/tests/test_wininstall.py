@@ -174,7 +174,7 @@ def _install(tmp_path, src_exe, dirs=None, **over):
     dirs = dirs or Dirs()
     kw = dict(is_admin=lambda: True, run=Recorder(), shell_execute=lambda *a: None,
               exe=str(src_exe), program_data=str(tmp_path / "ProgramData"), sleep=lambda s: None,
-              open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create)
+              open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create, kill_running=lambda exe: [])
     kw.update(over)
     return wi.install(SID, **kw)
 
@@ -535,7 +535,7 @@ def test_uninstall_ends_then_deletes_task_and_only_services_dir(tmp_path):
     (pd / "services" / "PluginLoader.exe").write_bytes(b"x")
     (pd / "plugins").mkdir()
     rec = Recorder()
-    rc = wi.uninstall(is_admin=lambda: True, run=rec, shell_execute=lambda *a: None,
+    rc = wi.uninstall(is_admin=lambda: True, run=rec, kill_running=lambda exe: [], shell_execute=lambda *a: None,
                       program_data=str(tmp_path / "ProgramData"), defer_delete=lambda p: True)
     assert rc == 0
     assert rec.runs == [["schtasks", "/End", "/TN", "Decky Loader"], ["schtasks", "/Delete", "/TN", "Decky Loader", "/F"]]
@@ -547,7 +547,7 @@ def test_uninstall_defers_locked_files_to_reboot(tmp_path):
     pd = tmp_path / "ProgramData"
     (pd / "decky" / "services").mkdir(parents=True)
     deferred: list[str] = []
-    rc = wi.uninstall(is_admin=lambda: True, run=Recorder(), program_data=str(pd),
+    rc = wi.uninstall(is_admin=lambda: True, run=Recorder(), kill_running=lambda exe: [], program_data=str(pd),
                       rmtree=_fake_rmtree(["a.exe", "b.dll"]), defer_delete=lambda p: deferred.append(p) or True)
     assert rc == 0 and deferred == ["a.exe", "b.dll"]
 
@@ -555,7 +555,7 @@ def test_uninstall_defers_locked_files_to_reboot(tmp_path):
 def test_uninstall_fails_when_deferral_fails(tmp_path, capsys):
     pd = tmp_path / "ProgramData"
     (pd / "decky" / "services").mkdir(parents=True)
-    rc = wi.uninstall(is_admin=lambda: True, run=Recorder(), program_data=str(pd),
+    rc = wi.uninstall(is_admin=lambda: True, run=Recorder(), kill_running=lambda exe: [], program_data=str(pd),
                       rmtree=_fake_rmtree(["a.exe"]), defer_delete=lambda p: False)
     assert rc == 1
     assert "a.exe" in capsys.readouterr().err
@@ -640,3 +640,98 @@ def test_installed_root_ignores_spoofed_programdata_env(monkeypatch, tmp_path):
     monkeypatch.setenv("PROGRAMDATA", str(fake))
     monkeypatch.setattr(sys, "executable", str(fake / "decky" / "services" / "PluginLoader.exe"))
     assert lpw.installed_root() is None
+
+
+# Stopping every running copy of the installed exe
+
+EXE = r"C:\ProgramData\decky\services\PluginLoader.exe"
+
+
+def test_matching_pids_compares_full_image_paths_case_insensitively():
+    procs = [(10, EXE), (11, EXE.upper()), (12, r"C:\Users\me\Downloads\PluginLoader.exe"),
+             (13, EXE + ".new"), (14, r"C:\ProgramData\decky\services\..\services\PluginLoader.exe"), (15, None)]
+    assert wi.matching_pids(procs, EXE, own=set()) == [10, 11, 14]
+
+
+def test_matching_pids_skips_this_process_and_its_parent():
+    assert wi.matching_pids([(1, EXE), (2, EXE), (3, EXE)], EXE, own={1, 2}) == [3]
+
+
+def test_terminate_image_kills_only_matching_processes():
+    killed: list[int] = []
+    procs = [(100, EXE), (200, r"C:\Windows\explorer.exe"), (300, EXE), (os.getpid(), EXE)]
+    got = wi.terminate_image(EXE, processes=lambda: procs, terminate=killed.append)
+    assert got == killed == [100, 300]
+
+
+def test_terminate_image_keeps_going_when_one_kill_fails():
+    killed: list[int] = []
+
+    def terminate(pid):
+        if pid == 100:
+            raise PermissionError("gone")
+        killed.append(pid)
+
+    assert wi.terminate_image(EXE, processes=lambda: [(100, EXE), (300, EXE)], terminate=terminate) == [300]
+
+
+def test_list_processes_sees_this_process():
+    me = [p for pid, p in wi.list_processes() if pid == os.getpid()]
+    assert me and os.path.isabs(me[0]) and os.path.basename(me[0]).lower().startswith("python")
+
+
+def test_install_stops_running_copies_after_ending_the_task(tmp_path):
+    src_exe = _fake_env(tmp_path)
+    events: list = []
+    rc = _install(tmp_path, src_exe, run=Recorder(events), kill_running=lambda exe: events.append(("kill", exe)) or [])
+    assert rc == 0
+    installed = str(tmp_path / "ProgramData" / "decky" / "services" / "PluginLoader.exe")
+    assert events[:2] == [("run", "/End"), ("kill", installed)]
+
+
+def test_uninstall_stops_running_copies_after_ending_the_task(tmp_path):
+    events: list = []
+    pd = tmp_path / "ProgramData"
+    (pd / "decky" / "services").mkdir(parents=True)
+    rc = wi.uninstall(is_admin=lambda: True, run=Recorder(events), program_data=str(pd), defer_delete=lambda p: True,
+                      kill_running=lambda exe: events.append(("kill", exe)) or [])
+    assert rc == 0
+    assert events == [("run", "/End"), ("kill", str(pd / "decky" / "services" / "PluginLoader.exe")), ("run", "/Delete")]
+
+
+def test_install_deletes_stale_update_files(tmp_path):
+    src_exe = _fake_env(tmp_path)
+    services = tmp_path / "ProgramData" / "decky" / "services"
+    services.mkdir(parents=True)
+    dirs = Dirs()
+    dirs.trusted.update([str(services.parent), str(services)])
+    for name in ("PluginLoader.exe.new", "PluginLoader.exe.download", "PluginLoader.exe.download.exe", "keep.txt"):
+        (services / name).write_bytes(b"stale")
+    assert _install(tmp_path, src_exe, dirs=dirs) == 0
+    assert sorted(os.listdir(services)) == ["PluginLoader.exe", "keep.txt"]
+
+
+def test_install_fails_when_a_stale_update_cannot_be_removed(tmp_path, capsys, monkeypatch):
+    src_exe = _fake_env(tmp_path)
+    services = tmp_path / "ProgramData" / "decky" / "services"
+    services.mkdir(parents=True)
+    dirs = Dirs()
+    dirs.trusted.update([str(services.parent), str(services)])
+    (services / "PluginLoader.exe.new").write_bytes(b"stale")
+    rec = Recorder()
+
+    def remove(p):
+        raise PermissionError("locked")
+
+    assert _install(tmp_path, src_exe, dirs=dirs, run=rec, remove=remove) == 1
+    assert "PluginLoader.exe.new" in capsys.readouterr().err
+    assert not any(r[:2] == ["schtasks", "/Create"] for r in rec.runs)
+
+
+def test_terminate_pid_really_stops_a_process():
+    p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        wi.terminate_pid(p.pid)
+        assert p.wait(10) == 1
+    finally:
+        p.kill()

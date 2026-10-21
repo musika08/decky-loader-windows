@@ -3,7 +3,7 @@
 The supervisor runs the loader as a child process (`--loader`). The child reports what it wants through its exit code.
 '''
 import hashlib, logging, os, shutil, subprocess, sys, threading, time
-from typing import Callable
+from typing import Any, Callable
 
 logger = logging.getLogger("winsupervisor")
 
@@ -82,12 +82,19 @@ def cleanup_stale_update(exe: str, remove: Callable[[str], None] = os.remove, sl
     thread.start()
     return thread
 
-def make_spawn(exe: str) -> Callable[[list[str]], int]:
-    '''Blocking spawn of the loader child; returns its exit code.'''
+def _run_in_job(argv: list[str], env: dict[str, str] | None, cwd: str | None) -> int:
+    from .winprocess import run_in_job
+    return run_in_job(argv, env, cwd)
+
+def make_spawn(exe: str, run: Callable[[list[str], dict[str, str] | None, str | None], int] = _run_in_job) -> Callable[[list[str]], int]:
+    '''Blocking spawn of the loader child; returns its exit code.
+
+    The child runs in a kill-on-close job held by this process, so if the supervisor dies or is ended, the loader and
+    its plugin hosts go with it.'''
     def spawn(argv: list[str]) -> int:
         env = {**os.environ, "DECKY_SUPERVISED": "1", **_FRESH_ENV}
         cwd = os.path.dirname(exe) if getattr(sys, "frozen", False) else None
-        return subprocess.run(argv, cwd=cwd, env=env).returncode
+        return run(argv, env, cwd)
     return spawn
 
 def launch_detached(argv: list[str]) -> None:
@@ -139,8 +146,31 @@ def _wait_for_pid(pid: int) -> None:
     finally:
         _winapi.CloseHandle(handle)
 
+def _is_installed() -> bool:
+    from .localplatformwin import installed_root
+    return installed_root() is not None
+
+def _system_directory() -> str:
+    from .wininstall import system_directory
+    return system_directory()
+
+def relaunch(target: str, *, installed: Callable[[], bool] = _is_installed, run: Callable[..., Any] = subprocess.run,
+             direct: Callable[[list[str]], None] = launch_detached, system_dir: Callable[[], str] = _system_directory) -> None:
+    '''Start the loader again after an update.
+
+    Installed: through the scheduled task, so it keeps the task's elevation, admin-only temp directory and tracking.
+    Portable, or if the task cannot be started: a direct detached launch.'''
+    if installed():
+        from .wininstall import TASK_NAME
+        try:
+            run([os.path.join(system_dir(), "schtasks.exe"), "/Run", "/TN", TASK_NAME], check=True, capture_output=True)
+            return
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("Could not start the %s task, launching %s directly", TASK_NAME, target)
+    direct([target])
+
 def _launch_target(target: str) -> None:
-    launch_detached([target])
+    relaunch(target)
 
 def finish_update(target: str, parent_pid: int, copy: Callable[[str, str], object] = shutil.copyfile,
                   launch: Callable[[str], None] = _launch_target, sleep: Callable[[float], None] = time.sleep) -> int:

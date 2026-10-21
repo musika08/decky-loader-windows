@@ -182,3 +182,119 @@ def test_supervisor_integration_real_spawn():
     rc = ws.run_supervisor(spawn, lambda _s: None, "C:/nonexistent/PluginLoader.exe", lambda _a: None)
     assert rc == 0
     assert spawned == [42, 43]
+
+
+# The loader child runs in a kill-on-close job owned by the supervisor
+
+def _pid_gone(pid: int, wait_ms: int = 5000) -> bool:
+    import _winapi
+    try:
+        h = _winapi.OpenProcess(0x00100000, False, pid) # SYNCHRONIZE
+    except OSError:
+        return True
+    try:
+        return _winapi.WaitForSingleObject(h, wait_ms) == 0
+    finally:
+        _winapi.CloseHandle(h)
+
+
+def _wait_for_file(path, seconds: float = 30):
+    import time
+    deadline = time.monotonic() + seconds
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    time.sleep(0.2)
+    with open(path) as f:
+        return f.read()
+
+
+def test_run_in_job_returns_exit_code_and_uses_cwd_and_env(tmp_path):
+    from decky_loader.localplatform import winprocess
+    out = tmp_path / "out.txt"
+    script = f"import os, sys; open({str(out)!r}, 'w').write(os.getcwd() + '|' + os.environ['X_PROBE']); sys.exit(42)"
+    rc = winprocess.run_in_job([sys.executable, "-c", script], {**os.environ, "X_PROBE": "yes"}, str(tmp_path))
+    assert rc == 42
+    assert out.read_text() == f"{tmp_path}|yes"
+
+
+def test_run_in_job_kills_leftover_descendants(tmp_path):
+    from decky_loader.localplatform import winprocess
+    pid_file = tmp_path / "pid"
+    script = ("import subprocess, sys; "
+              "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+              f"open({str(pid_file)!r}, 'w').write(str(p.pid)); sys.exit(3)")
+    assert winprocess.run_in_job([sys.executable, "-c", script], dict(os.environ), None) == 3
+    assert _pid_gone(int(pid_file.read_text()))
+
+
+def test_loader_dies_when_supervisor_is_killed(tmp_path):
+    backend = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pid_file = tmp_path / "pid"
+    loader = f"import os, time; open({str(pid_file)!r}, 'w').write(str(os.getpid())); time.sleep(60)"
+    supervisor = ("import sys; from decky_loader.localplatform import winprocess; "
+                  f"winprocess.run_in_job([sys.executable, '-c', {loader!r}], None, None)")
+    sup = subprocess.Popen([sys.executable, "-c", supervisor], env={**os.environ, "PYTHONPATH": backend})
+    try:
+        loader_pid = int(_wait_for_file(pid_file))
+        assert not _pid_gone(loader_pid, 0)
+        sup.kill()
+        sup.wait(10)
+        assert _pid_gone(loader_pid)
+    finally:
+        sup.kill()
+
+
+def test_make_spawn_runs_the_loader_in_a_job():
+    calls: list = []
+
+    def run(argv, env, cwd):
+        calls.append((argv, env, cwd))
+        return 42
+
+    assert ws.make_spawn(r"C:\d\PluginLoader.exe", run=run)(["a", "--loader"]) == 42
+    argv, env, cwd = calls[0]
+    assert argv == ["a", "--loader"]
+    assert env["DECKY_SUPERVISED"] == "1" and env["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert cwd == (r"C:\d" if getattr(sys, "frozen", False) else None)
+
+
+# Relaunch after an update: through the scheduled task when installed, so the loader stays elevated and tracked
+
+class TaskRunner:
+    def __init__(self, result=None):
+        self.calls: list[list[str]] = []
+        self.result = result
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if isinstance(self.result, BaseException):
+            raise self.result
+        return subprocess.CompletedProcess(argv, self.result or 0)
+
+
+def test_relaunch_installed_uses_the_scheduled_task():
+    run, direct = TaskRunner(), []
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
+    assert run.calls == [[r"C:\Sys32\schtasks.exe", "/Run", "/TN", "Decky Loader"]]
+    assert direct == []
+
+
+@pytest.mark.parametrize("failure", [subprocess.CalledProcessError(1, "schtasks"), FileNotFoundError("schtasks")])
+def test_relaunch_installed_falls_back_to_direct_launch(failure):
+    run, direct = TaskRunner(failure), []
+    ws.relaunch("T.exe", installed=lambda: True, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
+    assert len(run.calls) == 1
+    assert direct == [["T.exe"]]
+
+
+def test_relaunch_portable_launches_directly():
+    run, direct = TaskRunner(), []
+    ws.relaunch("T.exe", installed=lambda: False, run=run, direct=direct.append, system_dir=lambda: r"C:\Sys32")
+    assert run.calls == [] and direct == [["T.exe"]]
+
+
+def test_finish_update_relaunches_through_relaunch(monkeypatch):
+    seen: list[str] = []
+    monkeypatch.setattr(ws, "relaunch", lambda target, **kw: seen.append(target))
+    assert ws.finish_update("T.exe", 0, copy=lambda s, d: None, sleep=lambda _s: None) == 0
+    assert seen == ["T.exe"]

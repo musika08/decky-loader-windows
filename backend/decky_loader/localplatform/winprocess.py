@@ -6,7 +6,7 @@ Administrators deny-only, all privileges but SeChangeNotify removed, medium inte
 Each child starts suspended inside its own kill-on-close Job object, so stopping a plugin also stops every process
 it started (the PyInstaller onefile bootloader runs the real interpreter as its child).
 '''
-import ctypes, subprocess
+import ctypes, os, subprocess
 from ctypes import wintypes
 from typing import Any
 
@@ -315,6 +315,40 @@ def _create_job() -> int:
         _close(job)
         raise
     return job
+
+
+def run_in_job(argv: list[str], env: dict[str, str] | None, cwd: str | None) -> int:
+    """Run `argv` to completion inside a new kill-on-close Job object and return its exit code.
+
+    The child starts suspended and only runs once it is in the job, so nothing it starts can escape. The job handle
+    lives in this process: if we die, or once the child exits, everything still in the job is killed.
+    The child shares our console and standard handles, like subprocess.run.
+    """
+    import _winapi # pyright: ignore [reportMissingImports]
+    k = _api()[0]
+    job = _create_job()
+    try:
+        hp, ht, _pid, _tid = _winapi.CreateProcess(None, subprocess.list2cmdline(argv), None, None, False,
+                                                   CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, dict(os.environ) if env is None else env, cwd,
+                                                   subprocess.STARTUPINFO())
+        try:
+            try:
+                if not k.AssignProcessToJobObject(job, int(hp)):
+                    err = ctypes.get_last_error()
+                    k.TerminateProcess(int(hp), 1)
+                    raise ctypes.WinError(err) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+                if k.ResumeThread(int(ht)) == 0xFFFFFFFF:
+                    err = ctypes.get_last_error()
+                    k.TerminateJobObject(job, 1)
+                    raise ctypes.WinError(err) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+            finally:
+                _winapi.CloseHandle(ht)
+            _winapi.WaitForSingleObject(hp, _winapi.INFINITE)
+            return int(_winapi.GetExitCodeProcess(hp))
+        finally:
+            _winapi.CloseHandle(hp)
+    finally:
+        _close(job)
 
 
 class PluginProcess:

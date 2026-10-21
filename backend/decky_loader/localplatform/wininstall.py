@@ -299,6 +299,109 @@ MOVEFILE_DELAY_UNTIL_REBOOT = 0x4
 def move_on_reboot(path: str) -> bool:
     return bool(ctypes.windll.kernel32.MoveFileExW(path, None, MOVEFILE_DELAY_UNTIL_REBOOT)) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
 
+TH32CS_SNAPPROCESS = 0x2
+PROCESS_TERMINATE = 0x0001
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+TERMINATE_WAIT_MS = 5000
+
+def list_processes() -> list[tuple[int, str | None]]:
+    '''(pid, full image path) for every process; the path is None where it cannot be queried.'''
+    from ctypes import wintypes
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_wchar * 260)]
+    k = _kernel32()
+    k.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    k.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    k.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    k.Process32FirstW.restype = wintypes.BOOL
+    k.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    k.Process32NextW.restype = wintypes.BOOL
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    k.QueryFullProcessImageNameW.restype = wintypes.BOOL
+
+    snap = k.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap is None or snap == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    pids: list[int] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(entry)
+        ok = k.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            pids.append(int(entry.th32ProcessID))
+            ok = k.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        k.CloseHandle(snap)
+
+    out: list[tuple[int, str | None]] = []
+    for pid in pids:
+        image: str | None = None
+        h = k.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if h:
+            try:
+                buf = ctypes.create_unicode_buffer(32768)
+                size = wintypes.DWORD(len(buf))
+                if k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    image = buf.value
+            finally:
+                k.CloseHandle(h)
+        out.append((pid, image))
+    return out
+
+def _norm_path(p: str) -> str:
+    return os.path.normcase(os.path.normpath(p))
+
+def matching_pids(processes: list[tuple[int, str | None]], exe: str, own: set[int]) -> list[int]:
+    '''Pids whose image is exactly `exe`, other than ours (`own`).'''
+    target = _norm_path(exe)
+    return [pid for pid, image in processes if image is not None and pid not in own and _norm_path(image) == target]
+
+def terminate_pid(pid: int) -> None:
+    k = _kernel32()
+    from ctypes import wintypes
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.TerminateProcess.argtypes = [ctypes.c_void_p, wintypes.UINT]
+    k.TerminateProcess.restype = wintypes.BOOL
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    h = k.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, pid)
+    if not h:
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    try:
+        if not k.TerminateProcess(h, 1):
+            raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+        k.WaitForSingleObject(h, TERMINATE_WAIT_MS)
+    finally:
+        k.CloseHandle(h)
+
+def terminate_image(exe: str, *, processes: Callable[[], list[tuple[int, str | None]]] = list_processes,
+                    terminate: Callable[[int], None] = terminate_pid) -> list[int]:
+    '''Kill every process running from `exe` (supervisor, loader, root plugin hosts), except this one and its
+    onefile bootloader parent. `schtasks /End` only ends the task's own process, not what it started.'''
+    killed: list[int] = []
+    for pid in matching_pids(processes(), exe, own={os.getpid(), os.getppid()}):
+        try:
+            terminate(pid)
+            killed.append(pid)
+        except OSError as e:
+            logger.warning("Could not stop process %s: %s", pid, e)
+    return killed
+
+def _stale_update_files(services: str) -> list[str]:
+    try:
+        names = os.listdir(services)
+    except OSError:
+        return []
+    return [os.path.join(services, n) for n in names
+            if n.lower() == (EXE_NAME + ".new").lower() or n.lower().startswith((EXE_NAME + ".download").lower())]
+
 COPY_ATTEMPTS = 10
 
 def _elevate(args: str, shell_execute: Callable[..., int], exe: str | None) -> int:
@@ -330,7 +433,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             close_dir: Callable[[Any], None] = close_handle,
             create_dir: Callable[[str], None] = create_secure_dir, rename: Callable[[str, str], None] = os.rename,
             rmdir: Callable[[str], None] = os.rmdir, reparse: Callable[[str], bool] = is_reparse_point,
-            system_dir: Callable[[], str] = system_directory) -> int:
+            system_dir: Callable[[], str] = system_directory, kill_running: Callable[[str], list[int]] = terminate_image,
+            remove: Callable[[str], None] = os.remove) -> int:
     exe = exe or sys.executable
     if not is_admin():
         if not is_admin_member():
@@ -348,8 +452,10 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
     tmp_dir = os.path.join(root, "tmp")
     installed_exe = os.path.join(services, EXE_NAME)
 
-    # Stop a running elevated loader first, it locks the installed exe
+    # Stop a running elevated loader first, it locks the installed exe. Ending the task only ends its first
+    # process, so also stop everything else still running from the installed exe.
     run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
+    kill_running(installed_exe)
 
     root_handle: Any = None
     try:
@@ -364,6 +470,16 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         except OSError as e:
             print(f"Could not prepare {root}: {e}", file=sys.stderr)
             return 1
+
+        # A leftover update from an older install would otherwise be swapped in over this one at the next restart
+        for stale in _stale_update_files(services):
+            try:
+                remove(stale)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                print(f"Could not remove the stale update file {stale}: {e}", file=sys.stderr)
+                return 1
 
         if not (os.path.exists(installed_exe) and _same_file(exe, installed_exe)):
             # Write a brand new file inside the protected directory, then swap it in. An existing exe is never opened for writing.
@@ -415,14 +531,16 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
 def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,
               shell_execute: Callable[..., int] = _shell_execute, exe: str | None = None,
               program_data: str | None = None, rmtree: Callable[..., Any] = shutil.rmtree,
-              defer_delete: Callable[[str], bool] = move_on_reboot) -> int:
+              defer_delete: Callable[[str], bool] = move_on_reboot,
+              kill_running: Callable[[str], list[int]] = terminate_image) -> int:
     if not is_admin():
         return _elevate("--uninstall", shell_execute, exe or sys.executable)
 
+    services = os.path.join(program_data or known_program_data(), "decky", "services")
     run(["schtasks", "/End", "/TN", TASK_NAME], check=False)
+    kill_running(os.path.join(services, EXE_NAME))
     run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], check=False)
 
-    services = os.path.join(program_data or known_program_data(), "decky", "services")
     failed: list[str] = []
 
     def on_error(func: Any, path: str, exc: Any) -> None:
