@@ -66,6 +66,10 @@ jobs:
         poetry self add "poetry-dynamic-versioning[plugin]"
         poetry install --no-interaction
 
+    - name: Run backend tests 🧪
+      working-directory: ./backend
+      run: poetry run pytest -v
+
     - name: Install JS dependencies ⬇️
       working-directory: ./frontend
       run: |
