@@ -17,6 +17,12 @@ if __name__ == "__main__":
             sys.exit(winsupervisor.run_supervisor(winsupervisor.make_spawn(exe), time.sleep, exe, winsupervisor.launch_detached))
         except KeyboardInterrupt:
             sys.exit(0)
+    elif sys.argv[1:2] == ["--install"] and (len(sys.argv) == 2 or (len(sys.argv) == 4 and sys.argv[2] == "--for-sid")):
+        from decky_loader.localplatform import wininstall
+        sys.exit(wininstall.install(sys.argv[3] if len(sys.argv) == 4 else None))
+    elif sys.argv[1:] == ["--uninstall"]:
+        from decky_loader.localplatform import wininstall
+        sys.exit(wininstall.uninstall())
     else:
         print(f"Unknown arguments: {sys.argv[1:]}", file=sys.stderr)
         sys.exit(2)

@@ -1,5 +1,5 @@
 from ..enums import UserType
-import os
+import os, sys
 from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
 
@@ -56,8 +56,28 @@ def get_effective_username() -> str:
 def get_username() -> str:
     return os.getlogin()
 
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.realpath(path))
+
+def installed_root() -> str | None:
+    r'''`%ProgramData%\decky` when running from `%ProgramData%\decky\services`, else None.'''
+    root = os.path.join(os.environ.get("PROGRAMDATA", r"C:\ProgramData"), "decky")
+    services = _norm(os.path.join(root, "services"))
+    if _norm(sys.executable).startswith(services + os.sep):
+        return root
+    return None
+
 def get_privileged_path() -> str:
-    '''On windows, privileged_path is equal to unprivileged_path'''
+    r'''Installed: the admin-only `%ProgramData%\decky`. Portable: same as unprivileged_path.'''
+    path = os.getenv("PRIVILEGED_PATH")
+    if path != None:
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    root = installed_root()
+    if root != None:
+        return root
+
     return get_unprivileged_path()
 
 def get_unprivileged_path() -> str:
