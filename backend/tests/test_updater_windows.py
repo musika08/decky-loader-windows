@@ -59,25 +59,40 @@ def _run(body: bytes, is_zip: bool):
     asyncio.run(go())
 
 
-def test_windows_update_leaves_new_file(tmp_path: Any, monkeypatch: Any):
-    monkeypatch.chdir(tmp_path)
-    running = tmp_path / "PluginLoader.exe"
+def _portable(tmp_path: Any, monkeypatch: Any) -> Any:
+    # A portable copy keeps its release name; the update must land next to sys.executable whatever the cwd
+    exe_dir = tmp_path / "portable"
+    exe_dir.mkdir()
+    running = exe_dir / "PluginLoader-win.exe"
     running.write_bytes(b"old")
+    monkeypatch.setattr(sys, "executable", str(running))
+    monkeypatch.chdir(tmp_path)
+    return running
+
+
+def test_windows_update_leaves_new_file(tmp_path: Any, monkeypatch: Any):
+    running = _portable(tmp_path, monkeypatch)
     _run(PAYLOAD, is_zip=False)
-    assert (tmp_path / "PluginLoader.exe.new").read_bytes() == PAYLOAD
+    assert (running.parent / "PluginLoader-win.exe.new").read_bytes() == PAYLOAD
     assert running.read_bytes() == b"old"
+    assert not (tmp_path / "PluginLoader.exe.new").exists()
+
+
+def test_new_file_matches_what_the_supervisor_looks_for(tmp_path: Any, monkeypatch: Any):
+    from decky_loader.localplatform import winsupervisor
+    running = _portable(tmp_path, monkeypatch)
+    _run(PAYLOAD, is_zip=False)
+    assert winsupervisor.pending_update_path(str(running)) == str(running) + ".new"
 
 
 def test_windows_update_extracts_zip_member(tmp_path: Any, monkeypatch: Any):
-    monkeypatch.chdir(tmp_path)
-    running = tmp_path / "PluginLoader.exe"
-    running.write_bytes(b"old")
+    running = _portable(tmp_path, monkeypatch)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("PluginLoader.exe", PAYLOAD)
     _run(buf.getvalue(), is_zip=True)
-    assert (tmp_path / "PluginLoader.exe.new").read_bytes() == PAYLOAD
-    assert sorted(os.listdir(tmp_path)) == [".loader.version", "PluginLoader.exe", "PluginLoader.exe.new"]  # no leftover temp files
+    assert (running.parent / "PluginLoader-win.exe.new").read_bytes() == PAYLOAD
+    assert sorted(os.listdir(running.parent)) == ["PluginLoader-win.exe", "PluginLoader-win.exe.new"]  # no leftover temp files
     assert running.read_bytes() == b"old"
 
 
@@ -91,7 +106,7 @@ def test_is_supported_only_when_supervised(monkeypatch: Any):
 def test_dropped_connection_leaves_no_new_file(tmp_path: Any, monkeypatch: Any):
     from aiohttp import web, ClientError
 
-    monkeypatch.chdir(tmp_path)
+    running = _portable(tmp_path, monkeypatch)
 
     async def handler(req: Any) -> Any:
         resp = web.StreamResponse(headers={"Content-Length": str(len(PAYLOAD))})
@@ -115,4 +130,4 @@ def test_dropped_connection_leaves_no_new_file(tmp_path: Any, monkeypatch: Any):
             await runner.cleanup()
 
     asyncio.run(go())
-    assert not (tmp_path / "PluginLoader.exe.new").exists()
+    assert not (running.parent / "PluginLoader-win.exe.new").exists()

@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, List, TypedDict
 if TYPE_CHECKING:
     from .main import PluginManager
 from .localplatform.localplatform import chmod, service_restart, service_stop, ON_LINUX, ON_WINDOWS, ON_MAC, ON_ARM64, get_keep_systemd_service, get_selinux
-import shutil
+import shutil, sys
 from typing import List, TYPE_CHECKING, TypedDict
 import zipfile
 
@@ -181,8 +181,16 @@ class Updater:
 
     async def download_decky_binary(self, download_url: str, version: str, is_zip: bool = False, size_in_bytes: int | None = None):
         download_filename = self.get_local_binary_name()
-        # On Windows ".new" means "complete, ready to swap in", so stream into a separate name first
-        download_temp_filename = download_filename + (".download" if ON_WINDOWS else ".new")
+        download_temp_filename = download_filename + ".new"
+        download_temp_path = path.join(getcwd(), download_temp_filename)
+        windows_new_path = ""
+        if ON_WINDOWS:
+            # The supervisor swaps in `<its own exe>.new`, and a portable copy keeps its release name
+            # (e.g. PluginLoader-win.exe), so derive every path from the running exe, not the cwd and a fixed name.
+            # ".new" means "complete, ready to swap in", so stream into a separate name first.
+            exe_dir, exe_name = path.dirname(sys.executable), path.basename(sys.executable)
+            download_temp_path = path.join(exe_dir, exe_name + ".download")
+            windows_new_path = path.join(exe_dir, exe_name + ".new")
 
         if size_in_bytes == None:
             size_in_bytes = 35000000 # 35MiB, a reasonable overestimate (30.00 MiB as of 2026/10/05)
@@ -192,7 +200,7 @@ class Updater:
             async with web.request("GET", download_url, ssl=helpers.get_ssl_context(), allow_redirects=True) as res:
                 total = int(res.headers.get('content-length', size_in_bytes))
                 if total == 0: total = 1
-                with open(path.join(getcwd(), download_temp_filename), "wb") as out:
+                with open(download_temp_path, "wb") as out:
                     progress = 0
                     raw = 0
                     async for c in res.content.iter_chunked(512):
@@ -225,8 +233,8 @@ class Updater:
 
         if ON_WINDOWS:
             # The running exe is locked, so only leave the new file next to it; the supervisor swaps it in on restart.
-            downloaded = path.join(getcwd(), download_temp_filename)
-            new_path = path.join(getcwd(), download_filename + ".new")
+            downloaded = download_temp_path
+            new_path = windows_new_path
             if is_zip:
                 extracted = downloaded + ".exe"
                 with zipfile.ZipFile(downloaded, 'r') as file, file.open(download_filename) as src, open(extracted, "wb") as dst:
