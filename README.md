@@ -97,6 +97,7 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 **Install**
 
 1. Download the build for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win.exe` (x86_64) or `PluginLoader-win-arm64.exe` (ARM). The `-noconsole` variants (`PluginLoader-win-noconsole.exe`, `PluginLoader-win-arm64-noconsole.exe`) do the same without a console window. Use a `-noconsole` variant for installed mode: the console build opens a window at every logon, and closing that window stops Decky.
+1. If you were running a portable copy of Decky, close it first. Both use port 1337, so the installed copy cannot start while it runs.
 1. Run the file you downloaded with `--install`, for example `PluginLoader-win.exe --install`, from any terminal. Windows will ask for administrator approval if needed. This copies Decky to `%ProgramData%\decky\services\PluginLoader.exe` and registers a scheduled task named `Decky Loader`, which starts Decky at every logon and starts it right away.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
 1. Install plugins from Decky's built-in store.
@@ -107,7 +108,7 @@ Restarting Steam or closing Big Picture does not stop Decky. If Decky was stoppe
 
 **Upgrading from an older portable Windows build**
 
-Plugins in `%USERPROFILE%\homebrew\plugins` are not moved to the new install. Reinstall them from Decky's store. Your settings and data in `%USERPROFILE%\homebrew` are kept.
+Plugins in `%USERPROFILE%\homebrew\plugins` are not moved to the new install. Reinstall them from Decky's store. Plugin settings and data in `%USERPROFILE%\homebrew` are kept. Decky's own settings (plugin order, update branch and similar) live in `%ProgramData%\decky\settings` in installed mode, so they do not carry over from portable mode.
 
 **Uninstall**
 
@@ -122,6 +123,8 @@ Running the exe without `--install` still works. Plugins that need the `root` fl
 In installed mode, Decky runs with administrator rights. Like Decky on Linux, which runs as root, it accepts commands from local programs on `127.0.0.1`. This means software already running on your PC can use Decky to install plugins that run with administrator rights. If you do not want that, use portable mode instead.
 
 **Known limits**
+
+In installed mode, plugins without the `root` flag run with standard user rights and cannot write inside their own plugin folder (`%ProgramData%\decky\plugins`). They should keep their files in their settings and data folders under `%USERPROFILE%\homebrew`.
 
 Plugins that depend on Linux-specific features (Proton, flatpak, SteamOS-only tools) do not apply on Windows.
 

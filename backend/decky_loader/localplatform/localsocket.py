@@ -205,7 +205,7 @@ class PortSocket (UnixSocket):
                         raise
                     self.reader, self.writer = reader, writer
                     return True
-                except:
+                except Exception: # not a bare except: a cancellation must stop the retry loop, not be swallowed
                     await asyncio.sleep(CONNECT_RETRY_DELAY)
                     retries += 1
             return False

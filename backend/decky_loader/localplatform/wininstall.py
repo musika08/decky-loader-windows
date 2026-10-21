@@ -85,8 +85,6 @@ def build_task_xml(exe: str, workdir: str, user_sid: str, tmp_dir: str, cmd_exe:
 
 # Applied at directory creation, so there is no window where the directory is writable by anyone else.
 # Owner and group: Administrators. Protected DACL: SYSTEM full, Administrators full, Users read/execute.
-# Applied at directory creation, so there is no window where the directory is writable by anyone else.
-# Owner and group: Administrators. Protected DACL: SYSTEM full, Administrators full, Users read/execute.
 SECURE_SDDL = "O:BAG:BAD:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)"
 
 FILE_ATTRIBUTE_DIRECTORY = 0x10

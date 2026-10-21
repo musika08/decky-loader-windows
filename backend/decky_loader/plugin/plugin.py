@@ -196,7 +196,10 @@ class PluginWrapper:
                 ], timeout=1)
 
             if ON_WINDOWS:
-                await self._request_stop() # no SIGTERM on Windows: ask over the socket, kill_if_still_running is the backstop
+                # no SIGTERM on Windows: ask over the socket, kill_if_still_running is the backstop.
+                # A host that already exited cannot answer, and writing to it would only stall on the socket.
+                if self.proc and self.proc.is_alive():
+                    await self._request_stop()
             else:
                 self.terminate() # the plugin process will handle SIGTERM and shut down cleanly without a socket message
 

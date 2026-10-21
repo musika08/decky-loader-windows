@@ -200,7 +200,7 @@ class SandboxedPlugin:
             self.uninstalling = data.get("uninstall")
             return
 
-        if data.get("stop"):
+        if ON_WINDOWS and data.get("stop"):
             # Windows has no SIGTERM, so the loader asks for a clean shutdown over the socket
             ensure_future(self.shutdown())
             return

@@ -6,7 +6,9 @@ import pytest
 from decky_loader.plugin.sandboxed_plugin import SandboxedPlugin
 
 
-def test_stop_message_runs_unload():
+def test_stop_message_runs_unload(monkeypatch: pytest.MonkeyPatch):
+    from decky_loader.plugin import sandboxed_plugin
+    monkeypatch.setattr(sandboxed_plugin, "ON_WINDOWS", True)
     called: list[bool] = []
 
     class FakePlugin:
@@ -28,6 +30,21 @@ def test_stop_message_runs_unload():
     finally:
         loop.close()
     assert called == [True]
+
+
+def test_stop_message_is_windows_only(monkeypatch: pytest.MonkeyPatch):
+    from decky_loader.plugin import sandboxed_plugin
+    monkeypatch.setattr(sandboxed_plugin, "ON_WINDOWS", False)
+    shutdowns: list[bool] = []
+    sp = SandboxedPlugin("p", False, [], "main.py", "p", ".", None, "me", 1)
+
+    async def shutdown(uninstall: bool = False) -> None:
+        shutdowns.append(True)
+
+    sp.shutdown = shutdown # pyright: ignore [reportAttributeAccessIssue]
+    with pytest.raises(KeyError): # elsewhere it is not a control message (Linux uses SIGTERM), as before
+        asyncio.run(sp.on_new_message(json.dumps({"stop": True})))
+    assert shutdowns == []
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only stop path")
@@ -85,4 +102,16 @@ def test_wrapper_stop_sends_stop_line_and_closes_process(tmp_path: Path, monkeyp
     assert [json.loads(e) if e.startswith("{") else e for e in events] == [{"uninstall": True}, {"stop": True}, "wait", "close"]
 
     asyncio.run(run(True)) # a dead connection must not stop the shutdown from finishing
+    assert events == ["wait", "close"]
+
+    async def run_dead() -> None:
+        events.clear()
+        w = Wrapper(str(pdir / "main.py"), "P", str(tmp_path / "plugins"), noop)
+        w._socket = FakeSocket() # pyright: ignore [reportPrivateUsage, reportAttributeAccessIssue]
+        proc = FakeProc()
+        proc.alive = False
+        w.proc = proc # pyright: ignore [reportAttributeAccessIssue]
+        await w.stop()
+
+    asyncio.run(run_dead()) # a host that already exited gets no stop request (it could only stall on the socket)
     assert events == ["wait", "close"]

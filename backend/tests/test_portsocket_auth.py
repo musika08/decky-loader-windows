@@ -289,3 +289,37 @@ def test_server_port_is_exclusive():
             await _close_server(server)
 
     assert _run(run)
+
+
+def test_cancellation_while_connecting_is_not_swallowed(monkeypatch: pytest.MonkeyPatch):
+    attempts: list[int] = []
+
+    async def cancelled(*_a: Any, **_k: Any) -> Any:
+        attempts.append(1)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(localsocket.asyncio, "open_connection", cancelled)
+    monkeypatch.setattr(localsocket, "CONNECT_RETRY_DELAY", 0.01)
+
+    async def go() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await PortSocket(_free_port(), "abc")._open_socket_if_not_exists() # pyright: ignore [reportPrivateUsage]
+
+    _run(go)
+    assert attempts == [1] # no retry loop after a cancellation
+
+
+def test_connection_errors_are_still_retried(fast_retry: None, monkeypatch: pytest.MonkeyPatch):
+    attempts: list[int] = []
+
+    async def refused(*_a: Any, **_k: Any) -> Any:
+        attempts.append(1)
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr(localsocket.asyncio, "open_connection", refused)
+
+    async def go() -> bool:
+        return await PortSocket(_free_port(), "abc")._open_socket_if_not_exists() # pyright: ignore [reportPrivateUsage]
+
+    assert _run(go) is False
+    assert attempts == [1, 1]
