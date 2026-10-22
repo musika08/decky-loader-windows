@@ -79,3 +79,48 @@ def test_explicit_shutdown_still_stops_on_windows(main_mod: Any):
     with pytest.raises(GracefulExit):
         asyncio.run(main_mod.Updater.do_shutdown(object())) # type: ignore
     assert lp.requested_exit_code() == 43
+
+
+class LoadedTab(FakeTab):
+    '''A GamepadUI tab that still has the frontend of an earlier loader run in it.'''
+    def __init__(self) -> None:
+        super().__init__()
+        self.closed = False
+
+    async def has_global_var(self, *_a: Any) -> bool:
+        return True
+
+    async def close_websocket(self) -> None:
+        self.closed = True
+
+
+def _reinject(main_mod: Any, monkeypatch: pytest.MonkeyPatch, restarted: bool) -> tuple[Any, LoadedTab, list[int]]:
+    monkeypatch.setattr(main_mod, "ON_WINDOWS", True)
+    monkeypatch.setattr(main_mod, "ON_LINUX", False)
+    calls: list[int] = []
+
+    async def restart() -> bool:
+        calls.append(1)
+        return restarted
+    monkeypatch.setattr(main_mod, "restart_webhelper", restart)
+    pm = _manager(main_mod, 0)
+    pm.frontend_loaded_since = 1.0
+    pm.js_ctx_tab = tab = LoadedTab()
+    asyncio.run(pm.inject_javascript(tab, True))
+    return pm, tab, calls
+
+
+def test_windows_reinject_restarts_webhelper(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    # Like Linux: a stale frontend is cleared by restarting the webhelper, then the next tab is caught by the main loop
+    pm, tab, calls = _reinject(main_mod, monkeypatch, restarted=True)
+    assert calls == [1]
+    assert tab.closed and pm.js_ctx_tab is None and pm.frontend_loaded_since is None
+    assert tab.scripts == []
+
+
+def test_windows_reinject_falls_back_when_webhelper_cannot_be_restarted(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    # Keep the tab and inject as before: the inject script restarts the JS context when deckyHasLoaded is set
+    pm, tab, calls = _reinject(main_mod, monkeypatch, restarted=False)
+    assert calls == [1]
+    assert not tab.closed and pm.js_ctx_tab is tab
+    assert len(tab.scripts) == 1 and "RestartJSContext" in tab.scripts[0]

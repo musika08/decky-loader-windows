@@ -182,7 +182,7 @@ def test_installed_mode_is_supported_without_the_in_app_updater(tmp_path: Path, 
     info = asyncio.run(u.get_version_info())
     assert info["supported"] is True
     assert info["updater_available"] is False
-    assert r"tools\update-decky.ps1" in info["updater_unavailable_reason"]
+    assert r"tools\update-decky.ps1" in str(info["updater_unavailable_reason"])
 
 
 def test_not_supported_for_a_onedir_build(tmp_path: Any, monkeypatch: Any):

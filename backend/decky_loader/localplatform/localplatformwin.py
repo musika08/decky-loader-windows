@@ -96,7 +96,10 @@ def get_unprivileged_user() -> str:
     return os.getenv("UNPRIVILEGED_USER", os.getlogin())
 
 async def restart_webhelper() -> bool:
-    return True # Stubbed
+    '''End steamwebhelper.exe in this session; Steam starts it again. Ending processes blocks, so it runs off the loop.'''
+    import asyncio
+    from . import winwebhelper
+    return await asyncio.to_thread(winwebhelper.restart_webhelper)
 
 async def close_cef_socket():
     return # Stubbed

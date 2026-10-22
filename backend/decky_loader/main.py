@@ -279,6 +279,17 @@ class PluginManager:
                 await restart_webhelper()
                 await sleep(1) # To give CEF enough time to close down the websocket
                 return # We'll catch the next tab in the main loop
+            if ON_WINDOWS and await tab.has_global_var("deckyHasLoaded", False):
+                # Same as Linux, but only drop the tab once the webhelper is really gone: otherwise reconnecting would
+                # find the old frontend again and loop. If it can't be restarted, the inject script below falls back
+                # to restarting the JS context, as before.
+                if await restart_webhelper():
+                    self.set_frontend_loaded(False)
+                    await tab.close_websocket()
+                    self.js_ctx_tab = None
+                    await sleep(1)
+                    return
+                logger.warning("Could not restart steamwebhelper; restarting the JS context instead")
             await tab.evaluate_js(create_inject_script("index.js" if self.webhelper_crash_count < 3 else "fallback.js"), False, False, False)
             self.set_frontend_loaded(True)
             # On Windows only an explicit shutdown from the UI may stop the loader; see handle_crash
