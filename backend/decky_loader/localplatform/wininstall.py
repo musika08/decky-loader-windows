@@ -630,11 +630,40 @@ def _create_new_empty(path: str) -> None:
     # O_EXCL is CREATE_NEW: fails if anything, a link included, already has the name; nothing is followed or overwritten
     os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)))
 
+def final_path_of_handle(handle: Any) -> str:
+    '''The path the OS resolved for an open handle, with every link along the way followed (extended-length form).'''
+    from ctypes import wintypes
+    k = _kernel32()
+    k.GetFinalPathNameByHandleW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    k.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    buf = ctypes.create_unicode_buffer(32768)
+    n = k.GetFinalPathNameByHandleW(handle, buf, len(buf), 0)
+    if n == 0 or n >= len(buf):
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    return buf.value
+
+GENERIC_READ = 0x80000000
+
+def final_path_of_file(path: str) -> str:
+    '''Final path of the file at `path`, opened without following a final reparse point.'''
+    k = _kernel32()
+    handle = k.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT, None)
+    if handle is None or handle == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    try:
+        return final_path_of_handle(handle)
+    finally:
+        k.CloseHandle(handle)
+
 def enable_cef_remote_debugging(sid: str, *, steam_dir: Callable[[str], str | None] = steam_dir_for_sid,
                                 reparse: Callable[[str], bool] = is_reparse_point, opener: Callable[[str], Any] = open_dir,
                                 query: Callable[[Any], tuple[int, str, int]] = query_dir,
                                 closer: Callable[[Any], None] = close_handle,
-                                create: Callable[[str], None] = _create_new_empty) -> str | None:
+                                create: Callable[[str], None] = _create_new_empty,
+                                folder_path: Callable[[Any], str] = final_path_of_handle,
+                                file_path: Callable[[str], str] = final_path_of_file,
+                                remove: Callable[[str], None] = os.remove) -> str | None:
     r'''Create the empty `<Steam>\.cef-enable-remote-debugging` if missing, so Steam's CEF debugger (which Decky needs)
     is on. Best effort: prints a note instead of failing the install. Never follows a reparse point: the Steam folder
     is user-writable and this runs elevated. Returns the marker path if it was created.'''
@@ -659,6 +688,12 @@ def enable_cef_remote_debugging(sid: str, *, steam_dir: Callable[[str], str | No
                 print(f"Not creating {marker}: {steam} is not a plain folder.")
                 return None
             create(marker)
+            # Belt and braces: the new file must really be inside the folder we hold, else delete what we made
+            created = file_path(marker)
+            if os.path.normcase(os.path.dirname(created)) != os.path.normcase(folder_path(handle)):
+                remove(created)
+                print(f"Not creating {marker}: it resolved to {created}, outside {steam}. Removed it.")
+                return None
         finally:
             closer(handle)
         print(f"Created {marker} (Steam's CEF debugger, which Decky uses). It takes effect the next time Steam starts.")

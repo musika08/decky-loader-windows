@@ -27,8 +27,11 @@ def _gone(_pid: int) -> bool:
 
 def _restart(killed: list[int], **kw: Any) -> bool:
     from decky_loader.localplatform import winwebhelper as w
+    def terminate(pid: int, session: int) -> None:
+        assert session == 1
+        killed.append(pid)
     args: dict[str, Any] = dict(processes=lambda: PROCS, session_of=SESSIONS.get, own_session=lambda: 1,
-                                terminate=killed.append, wait_exit=_alive)
+                                terminate=terminate, wait_exit=_alive)
     args.update(kw)
     return w.restart_webhelper(**args)
 
@@ -69,14 +72,14 @@ def test_listing_failure_is_logged_not_raised():
 
 
 def test_children_already_gone_count_as_stopped():
-    def terminate(pid: int) -> None:
+    def terminate(pid: int, session: int) -> None:
         if pid != 100:
             raise OSError("gone with its parent")
     assert _restart([], terminate=terminate, wait_exit=_gone) is True
 
 
 def test_a_survivor_is_reported():
-    def terminate(pid: int) -> None:
+    def terminate(pid: int, session: int) -> None:
         if pid == 102:
             raise PermissionError("access denied")
     assert _restart([], terminate=terminate, wait_exit=_alive) is False
@@ -87,7 +90,20 @@ def test_terminate_refuses_a_pid_that_is_not_a_webhelper():
     from decky_loader.localplatform import winwebhelper as w
     # Our own process is not steamwebhelper.exe, so it must be refused before anything is terminated
     with pytest.raises(OSError, match="no longer"):
-        w.terminate_webhelper(os.getpid())
+        w.terminate_webhelper(os.getpid(), w.session_of(os.getpid()) or 0)
+
+
+def test_terminate_rechecks_the_session_on_the_held_handle():
+    import os
+    from decky_loader.localplatform import winwebhelper as w
+    checked: list[int] = []
+    def other_session(pid: int) -> int | None:
+        checked.append(pid)
+        return 7
+    # Refused before the image check or anything is terminated
+    with pytest.raises(OSError, match="not in session 1"):
+        w.terminate_webhelper(os.getpid(), 1, session_of=other_session)
+    assert checked == [os.getpid()]
 
 
 def test_real_snapshot_and_session_lookup_work():

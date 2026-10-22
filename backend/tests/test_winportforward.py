@@ -121,3 +121,17 @@ def test_sshd_service_calls_use_the_windows_service(monkeypatch: pytest.MonkeyPa
     assert asyncio.run(lp.service_start(helpers.SSHD_UNIT)) is True
     assert asyncio.run(lp.service_stop(helpers.SSHD_UNIT)) is False
     assert calls == [True, False]
+
+
+def test_start_warns_with_the_listening_address(caplog: pytest.LogCaptureFixture):
+    import logging
+    async def go() -> None:
+        fwd = _forward(1)
+        with caplog.at_level(logging.WARNING, logger="winportforward"):
+            assert await fwd.start() is True
+        try:
+            assert "listening on 127.0.0.1:0" in caplog.text
+            assert all(r.levelno == logging.WARNING for r in caplog.records if "listening on" in r.getMessage())
+        finally:
+            await fwd.stop()
+    asyncio.run(go())

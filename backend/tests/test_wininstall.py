@@ -1190,7 +1190,12 @@ def _handle_events(events: list[str], attrs: int) -> dict[str, Any]:
         return attrs, "", 0
     def closer(h: str) -> None:
         events.append("close")
-    return dict(opener=opener, query=query, closer=closer)
+    def folder_path(h: str) -> str:
+        return h  # the fake handle is the folder path
+    def file_path(p: str) -> str:
+        events.append("verify")
+        return p
+    return dict(opener=opener, query=query, closer=closer, folder_path=folder_path, file_path=file_path)
 
 
 def test_cef_marker_checks_the_held_handle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -1209,7 +1214,39 @@ def test_cef_marker_created_while_the_folder_is_held(tmp_path: Path):
     def create(p: str) -> None:
         events.append("create")
     _enable(steam, create=create, **_handle_events(events, DIR_ATTR))
+    assert events == ["open", "create", "verify", "close"]
+
+
+def test_cef_marker_resolving_outside_steam_is_removed(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    # The file landed somewhere else (folder swapped despite the checks): delete exactly what was created there
+    steam = _steam(tmp_path)
+    elsewhere = str(tmp_path / "elsewhere" / wi.CEF_DEBUG_MARKER)
+    events: list[str] = []
+    removed: list[str] = []
+    def create(p: str) -> None:
+        events.append("create")
+    def file_path(p: str) -> str:
+        return elsewhere
+    kw = _handle_events(events, DIR_ATTR)
+    kw["file_path"] = file_path
+    assert _enable(steam, create=create, remove=removed.append, **kw) is None
+    assert removed == [elsewhere]
     assert events == ["open", "create", "close"]
+    assert "outside" in capsys.readouterr().out
+
+
+def test_real_final_paths_agree_for_a_plain_folder(tmp_path: Path):
+    steam = _steam(tmp_path)
+    marker = steam / wi.CEF_DEBUG_MARKER
+    marker.write_bytes(b"")
+    h = wi.open_dir(str(steam))
+    try:
+        folder = wi.final_path_of_handle(h)
+    finally:
+        wi.close_handle(h)
+    created = wi.final_path_of_file(str(marker))
+    assert os.path.normcase(os.path.dirname(created)) == os.path.normcase(folder)
+    assert os.path.normcase(created).endswith(os.path.normcase(str(marker))[2:])  # \?\C:\... form
 
 
 def test_cef_marker_without_steam_prints_a_note(capsys: pytest.CaptureFixture[str]):

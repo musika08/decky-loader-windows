@@ -70,7 +70,9 @@ class PortForward:
             logger.error(f"Could not listen on {self.listen_host}:{self.listen_port} for CEF remote debugging: {e}")
             self.server = None
             return False
-        logger.info(f"Forwarding {self.listen_host}:{self.listen_port} to the CEF debugger on {self.target_host}:{self.target_port}")
+        # Unauthenticated access to Steam's debugger for anyone who can reach this address, so always say so
+        logger.warning(f"CEF remote debugging is listening on {self.listen_host}:{self.listen_port} "
+                       f"(forwarding to {self.target_host}:{self.target_port})")
         return True
 
     async def stop(self) -> bool:

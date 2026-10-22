@@ -52,6 +52,19 @@ def gamepadui_poll_seconds() -> float:
     # Windows: Big Picture can be opened at any time, so pick it up quickly. Linux keeps its original interval.
     return 1 if ON_WINDOWS else 5
 
+CEF_FORWARD_REVIEWED = "cef_forward_windows_reviewed"
+
+def reset_windows_cef_forward_once(settings: SettingsManager) -> None:
+    '''Before this version the remote debugging toggle did nothing on Windows; now it opens 0.0.0.0:8081. So a
+    `cef_forward` saved back then is reset once instead of opening a network port after an upgrade.'''
+    if settings.getSetting(CEF_FORWARD_REVIEWED, False):
+        return
+    if settings.getSetting("cef_forward", False):
+        logger.warning("Remote CEF debugging was turned off: on Windows it now really opens a network port (0.0.0.0:8081). "
+                       "Turn it on again in Decky's developer settings if you want it.")
+        settings.setSetting("cef_forward", False)
+    settings.setSetting(CEF_FORWARD_REVIEWED, True)
+
 def chown_plugin_dir():
     if not path.exists(plugin_path): # For safety, create the folder before attempting to do anything with it
         mkdir_as_user(plugin_path)
@@ -91,10 +104,7 @@ class PluginManager:
         jinja_setup(self.web_app)
 
         async def startup(_: Application):
-            if self.settings.getSetting("cef_forward", False):
-                self.loop.create_task(service_start(REMOTE_DEBUGGER_UNIT))
-            else:
-                self.loop.create_task(service_stop(REMOTE_DEBUGGER_UNIT))
+            self.loop.create_task(self.apply_cef_forward_setting())
             self.loop.create_task(self.loader_reinjector())
             self.loop.create_task(self.load_plugins())
 
@@ -107,6 +117,14 @@ class PluginManager:
         for route in list(self.web_app.router.routes()):
             self.cors.add(route) # pyright: ignore [reportUnknownMemberType]
         self.web_app.add_routes([static("/static", path.join(path.dirname(__file__), 'static'))])
+
+    async def apply_cef_forward_setting(self):
+        if ON_WINDOWS:
+            reset_windows_cef_forward_once(self.settings)
+        if self.settings.getSetting("cef_forward", False):
+            await service_start(REMOTE_DEBUGGER_UNIT)
+        else:
+            await service_stop(REMOTE_DEBUGGER_UNIT)
 
     async def handle_crash(self):
         if not self.reinject:

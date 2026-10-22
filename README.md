@@ -105,7 +105,7 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 
 **Restarting**
 
-Restarting Steam or closing Big Picture does not stop Decky. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
+Restarting Steam or closing Big Picture does not stop Decky. If Decky itself restarts while Steam still shows it (for example after an update), it restarts Steam's webhelper, so the Steam interface reloads briefly. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
 
 **Where things live**
 

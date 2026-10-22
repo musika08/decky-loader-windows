@@ -60,9 +60,9 @@ def session_of(pid: int) -> int | None:
 def own_session() -> int | None:
     return session_of(os.getpid())
 
-def terminate_webhelper(pid: int) -> None:
-    '''Terminate `pid` after checking, on the opened handle, that it still is a steamwebhelper.exe (the pid
-    could have been reused since the snapshot). Raises OSError if it cannot be opened, checked or ended.'''
+def terminate_webhelper(pid: int, session: int, *, session_of: Callable[[int], int | None] = session_of) -> None:
+    '''Terminate `pid` after checking, while its handle is held (so the pid cannot be reused meanwhile), that it
+    still runs in `session` and still is a steamwebhelper.exe. Raises OSError if it cannot be opened, checked or ended.'''
     from ctypes import wintypes
     k = _kernel32()
     k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
@@ -77,6 +77,8 @@ def terminate_webhelper(pid: int) -> None:
     if not h:
         raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
     try:
+        if session_of(pid) != session:
+            raise OSError(f"pid {pid} is not in session {session}")
         buf = ctypes.create_unicode_buffer(32768)
         size = wintypes.DWORD(len(buf))
         if not k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
@@ -100,7 +102,7 @@ def webhelper_pids(processes: list[tuple[int, int, str]], session: int,
 def restart_webhelper(*, processes: Callable[[], list[tuple[int, int, str]]] = process_names,
                       session_of: Callable[[int], int | None] = session_of,
                       own_session: Callable[[], int | None] = own_session,
-                      terminate: Callable[[int], None] = terminate_webhelper,
+                      terminate: Callable[[int, int], None] = terminate_webhelper,
                       wait_exit: Callable[[int], bool] = wait_pid_exit) -> bool:
     '''End this session's steamwebhelper.exe processes. True if any was running and all of them are gone.'''
     session = own_session()
@@ -119,7 +121,7 @@ def restart_webhelper(*, processes: Callable[[], list[tuple[int, int, str]]] = p
     stopped = True
     for pid in pids:
         try:
-            terminate(pid)
+            terminate(pid, session)
         except OSError as e:
             # Children usually exit with the top-level webhelper, which makes opening them fail
             if not wait_exit(pid):
