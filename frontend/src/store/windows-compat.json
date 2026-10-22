@@ -67,13 +67,13 @@
     },
     "23": {
       "name": "Animation Changer",
-      "tier": "B",
-      "reason": "main.py OVERRIDE_PATH ~/.steam/root/config/uioverrides/movies"
+      "tier": "A",
+      "reason": "Verified on Windows 2026-10-22: works through the ~/.steam/root junction and the Big Picture movie mirror"
     },
     "24": {
       "name": "RadiYo!",
-      "tier": "B",
-      "reason": "logging.basicConfig(filename='/tmp/radiyo.log') at import time fails if C:\\tmp is missing"
+      "tier": "A",
+      "reason": "Verified on Windows 2026-10-22: plays streams"
     },
     "26": {
       "name": "HLTB for Deck",
@@ -152,8 +152,8 @@
     },
     "50": {
       "name": "Storage Cleaner",
-      "tier": "B",
-      "reason": "main.py hardcodes DECKY_USER_HOME/.steam/steam/steamapps/{shadercache,compatdata}"
+      "tier": "A",
+      "reason": "Verified on Windows 2026-10-22: loads and lists caches through the ~/.steam/steam junction"
     },
     "52": {
       "name": "Game Theme Music",
@@ -517,13 +517,13 @@
     },
     "132": {
       "name": "SuggestMe",
-      "tier": "B",
-      "reason": "_detect_steam_id reads ~/.steam/steam/config/loginusers.vdf"
+      "tier": "A",
+      "reason": "Verified on Windows 2026-10-22: finds the Steam account through the ~/.steam/steam junction"
     },
     "133": {
       "name": "Non-Steam Badges",
-      "tier": "B",
-      "reason": "main.py hardcodes Path('/home/deck/.steam/steam/userdata/') in _find_shortcuts_vdf, _find_localconfig_vdf..."
+      "tier": "A",
+      "reason": "Verified on Windows 2026-10-22: badges show"
     },
     "134": {
       "name": "Deck Progress Tracker",
