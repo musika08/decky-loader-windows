@@ -41,7 +41,7 @@ class UnixSocket:
                 try:
                     self.reader, self.writer = await asyncio.open_unix_connection(self.socket_addr, limit=BUFFER_LIMIT)
                     return True
-                except:
+                except Exception:
                     await asyncio.sleep(2)
                     retries += 1
             return False
@@ -95,7 +95,7 @@ class UnixSocket:
             except asyncio.LimitOverrunError:
                 line.extend(await reader.read(reader._limit)) # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType, reportAttributeAccessIssue]
                 continue
-            except asyncio.IncompleteReadError:
+            except (asyncio.IncompleteReadError, OSError):
                 return None
             except asyncio.CancelledError:
                 raise

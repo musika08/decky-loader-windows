@@ -1,6 +1,9 @@
 from asyncio import CancelledError, Task, create_task, sleep, wait, wait_for
 from json import dumps, load, loads
 from logging import getLogger
+import logging
+import os
+import signal
 from os import environ, path
 from multiprocessing import Process
 from time import time
@@ -19,6 +22,28 @@ if TYPE_CHECKING:
     from ..localplatform.winprocess import PluginProcess
 
 EmittedEventCallbackType = Callable[[str, Any], Coroutine[Any, Any, Any]]
+
+_held_locks: List[Any] = []
+
+def _before_fork():
+    for ref in list(getattr(logging, "_handlerList", [])):
+        lock = getattr(ref(), "lock", None)
+        if lock is not None and lock.acquire(timeout=0.5):
+            _held_locks.append(lock)
+
+def _after_fork_in_parent():
+    while _held_locks:
+        _held_locks.pop().release()
+
+def _after_fork_in_child():
+    _held_locks.clear()
+    signal.set_wakeup_fd(-1)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        if signal.getsignal(sig) != signal.SIG_IGN:
+            signal.signal(sig, signal.SIG_DFL)
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent, after_in_child=_after_fork_in_child)
 
 class PluginWrapper:
     def __init__(self, file: str, plugin_directory: str, plugin_path: str, emit_callback: EmittedEventCallbackType) -> None:
@@ -97,14 +122,21 @@ class PluginWrapper:
                 line = await self._socket.read_single_line()
                 # EOF reads as None while the connection is still held ("" if the socket was deactivated);
                 # None with no reader means connecting failed, which the next iteration retries.
-                if ON_WINDOWS and (line == "" or (line is None and self._socket.reader is not None)):
-                    # EOF: the plugin host closed the connection or died. Reading again would spin.
-                    self.log.info(f"Plugin {self.get_display_name()} closed its socket")
+                windows_eof = ON_WINDOWS and (line == "" or (line is None and self._socket.reader is not None))
+                exited = not windows_eof and line is None and self.proc is not None and not self.proc.is_alive()
+                if windows_eof or exited:
+                    if windows_eof:
+                        # EOF: the plugin host closed the connection or died. Reading again would spin.
+                        self.log.info(f"Plugin {self.get_display_name()} closed its socket")
+                    else:
+                        self.log.error(f"{self.get_display_name()} exited unexpectedly (exit code {getattr(self.proc, 'exitcode', None)})")
                     await self._socket.close_socket_connection()
                     for request in self._method_call_requests.values():
                         request.cancel()
                     self._method_call_requests = {}
                     return
+                if line is None:
+                    await sleep(0.5)
                 if line != None:
                     res = loads(line)
                     if res["type"] == SocketMessageType.EVENT.value:
