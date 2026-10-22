@@ -366,13 +366,15 @@ def _cmd_safe(args: Sequence[Any]) -> bool:
 
 
 def find_program(name: str, env: Mapping[Any, Any] | None, bin_dir: str = SHIM_BIN_DIR) -> str | None:
-    '''Searches the absolute PATH entries of `env` (os.environ if None) in PATHEXT order, like
+    '''Searches the drive or UNC PATH entries of `env` (os.environ if None) in PATHEXT order, like
     shutil.which, but only for .exe/.com files, plus .bat/.cmd files inside `bin_dir`.'''
     pathext = [e.strip().lower() for e in (_env_value(env, "PATHEXT") or _DEFAULT_PATHEXT).split(os.pathsep)]
     shim_dir = os.path.normcase(os.path.normpath(bin_dir))
     for entry in (_env_value(env, "PATH") or "").split(os.pathsep):
         entry = entry.strip().strip('"')
-        if not entry or not os.path.isabs(entry):
+        # Drive or UNC paths only: before Python 3.13 isabs accepts rooted Linux-style entries
+        # like /usr/bin, which resolve against the current drive
+        if not os.path.splitdrive(entry)[0] or not os.path.isabs(entry):
             continue
         in_shim_dir = os.path.normcase(os.path.normpath(entry)) == shim_dir
         for ext in pathext:

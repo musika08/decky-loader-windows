@@ -419,6 +419,21 @@ def test_find_program_rules(tmp_path: Path):
     assert compat.find_program("tool", {"PATH": str(a)}, str(shim)) is None
     assert compat.find_program("tool", {}, str(shim)) is None
 
+
+def test_find_program_skips_rooted_entries_without_drive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Rooted entries resolve against the current drive (C:\usr\local\bin); never look there
+    looked: list[str] = []
+
+    def isfile(path: str) -> bool:
+        looked.append(path)
+        return True
+    monkeypatch.setattr(compat.os.path, "isfile", isfile)
+    env = {"PATH": os.pathsep.join(["/usr/local/bin", r"\home\deck\bin", "C:relative"])}
+    assert compat.find_program("tool", env, str(tmp_path / "winbin")) is None
+    assert looked == []
+    unc = r"\\server\share\bin"
+    assert compat.find_program("tool", {"PATH": unc}, str(tmp_path / "winbin")) is not None
+
 # --- entry point ---
 
 def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool) -> tuple[Path, dict[str, str], dict[str, Any]]:

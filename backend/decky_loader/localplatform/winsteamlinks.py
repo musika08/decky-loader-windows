@@ -11,6 +11,7 @@ creates/renames from an elevated process would let a planted junction redirect t
 """
 import ctypes
 import os
+import stat
 import time
 import _winapi  # pyright: ignore [reportMissingImports]
 from logging import getLogger
@@ -65,12 +66,21 @@ def _ensure_link(link: str, steam_dir: str) -> None:
     _log.info(f"linked {link} -> {steam_dir}")
 
 
+def _is_reparse_point(path: str) -> bool:
+    '''Junction, symlink or any other reparse point.'''
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+
 def _ensure_parent(home: str, parts: tuple[str, ...]) -> str | None:
     '''Creates home/parts... as plain folders; None if any of them is a link or a file.'''
     path = home
     for part in parts:
         path = os.path.join(path, part)
-        if os.path.isjunction(path) or os.path.islink(path):
+        if _is_reparse_point(path):
             _log.warning(f"{path} is a link, leaving it alone")
             return None
         if os.path.lexists(path):
@@ -82,16 +92,21 @@ def _ensure_parent(home: str, parts: tuple[str, ...]) -> str | None:
             os.mkdir(path)
         except FileExistsError:
             # Created at the same time by another plugin host; check it again
-            if os.path.isjunction(path) or os.path.islink(path) or not os.path.isdir(path):
+            if _is_reparse_point(path) or not os.path.isdir(path):
                 return None
     return path
 
 
 def ensure_steam_home_links(home: str, steam_dir: str) -> None:
+    '''Each link is best effort on its own: one failing never stops the others.'''
     for parts, name in LINKS:
-        parent = _ensure_parent(home, parts)
-        if parent is not None:
-            _ensure_link(os.path.join(parent, name), steam_dir)
+        link = os.path.join(home, *parts, name)
+        try:
+            parent = _ensure_parent(home, parts)
+            if parent is not None:
+                _ensure_link(os.path.join(parent, name), steam_dir)
+        except Exception as e:
+            _log.warning(f"could not link {link} -> {steam_dir}: {e}")
 
 
 def setup_steam_home_links() -> None:

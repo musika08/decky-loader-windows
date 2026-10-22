@@ -111,6 +111,19 @@ def test_existing_local_share_steam_dir_is_moved_aside(tmp_path: Path):
     assert (home / ".local" / "share" / "Steam.decky-old" / "note.txt").read_text() == "x"
 
 
+def test_one_failing_link_does_not_stop_the_others(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    steam, home = _steam(tmp_path), tmp_path / "home"
+    (home / ".steam" / "root").mkdir(parents=True)  # plain dir: gets renamed first
+
+    def no_rename(src: str, dst: str) -> None:
+        raise PermissionError("in use")
+    monkeypatch.setattr(winsteamlinks.os, "rename", no_rename)
+    winsteamlinks.ensure_steam_home_links(str(home), str(steam))
+    assert not os.path.isjunction(home / ".steam" / "root")
+    assert os.path.isjunction(home / ".steam" / "steam")
+    assert os.path.isjunction(home / ".local" / "share" / "Steam")
+
+
 def test_setup_skips_when_elevated(monkeypatch: pytest.MonkeyPatch):
     called: list[object] = []
     monkeypatch.setattr(winsteamlinks.ctypes.windll.shell32, "IsUserAnAdmin", lambda: 1)
