@@ -1,0 +1,684 @@
+{
+  "ids": {
+    "1": {
+      "name": "XR Gaming",
+      "tier": "D",
+      "reason": "main.py runs su -l, ~/.local/bin/breezy_vulkan_setup/verify/uninstall, sha256sum, XDG_RUNTIME_DIR=/run/user/1000"
+    },
+    "2": {
+      "name": "Example Plugin",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "7": {
+      "name": "CSS Loader",
+      "tier": "A",
+      "reason": "Verify symlink privilege (or fall back to junction/copy) and that watchdog/aiohttp/pystray/PIL are available in..."
+    },
+    "10": {
+      "name": "vibrantDeck",
+      "tier": "C",
+      "reason": "Subprocess xprop -root GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS"
+    },
+    "11": {
+      "name": "Fantastic",
+      "tier": "C",
+      "reason": "main.py spawns bin/backend (Rust ELF reading /sys/class/thermal and Deck hwmon fan)"
+    },
+    "12": {
+      "name": "MusicControl",
+      "tier": "C",
+      "reason": "main.py runs dbus-send piped through tail/cut/rev/tr in shell=True"
+    },
+    "13": {
+      "name": "Pause Games",
+      "tier": "B",
+      "reason": "main.py shells to 'ps --ppid' and 'kill -SIGSTOP/-SIGCONT' with LD_LIBRARY_PATH cleanup"
+    },
+    "14": {
+      "name": "ProtonDB Badges",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "16": {
+      "name": "Audio Loader",
+      "tier": "A",
+      "reason": "Confirm symlink works unelevated or substitute junction/copy"
+    },
+    "18": {
+      "name": "Bluetooth",
+      "tier": "C",
+      "reason": "main.py uses jeepney D-Bus system bus to org.bluez (GetManagedObjects, Adapter1.Powered)"
+    },
+    "19": {
+      "name": "Notebook",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "21": {
+      "name": "PowerTools",
+      "tier": "C",
+      "reason": "main.py launches bin/backend, a Linux ELF (Rust, uses sysfs cpufreq/amdgpu, bundled ryzenadj + libryzenadj.so)"
+    },
+    "22": {
+      "name": "Memory Deck",
+      "tier": "C",
+      "reason": "scanmem.py ctypes loads bin/libscanmem.so.1.0.0 (ELF)"
+    },
+    "23": {
+      "name": "Animation Changer",
+      "tier": "B",
+      "reason": "main.py OVERRIDE_PATH ~/.steam/root/config/uioverrides/movies"
+    },
+    "24": {
+      "name": "RadiYo!",
+      "tier": "B",
+      "reason": "logging.basicConfig(filename='/tmp/radiyo.log') at import time fails if C:\\tmp is missing"
+    },
+    "26": {
+      "name": "HLTB for Deck",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "27": {
+      "name": "AutoSuspend",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "28": {
+      "name": "Emuchievements",
+      "tier": "B",
+      "reason": "main.py hash() runs bin/hash (Linux ELF embedding rcheevos rc_hash) via os.popen with single quotes"
+    },
+    "30": {
+      "name": "TunnelDeck",
+      "tier": "C",
+      "reason": "main.py shells nmcli, systemctl restart NetworkManager, ip -j route, getent, ping -c"
+    },
+    "32": {
+      "name": "AutoFlatpaks",
+      "tier": "D",
+      "reason": "main.py runs flatpak CLI, uses ~/.var/app, /run/user/<uid> and shutil.chown"
+    },
+    "35": {
+      "name": "MoonDeck",
+      "tier": "B",
+      "reason": "python/lib/utils.py fcntl.flock"
+    },
+    "36": {
+      "name": "SteamGridDB",
+      "tier": "A",
+      "reason": "Works as-is; verify shortcuts.vdf and librarycache writes behave on Windows Steam."
+    },
+    "37": {
+      "name": "Discord Status",
+      "tier": "B",
+      "reason": "main.py Pipe uses socket.AF_UNIX to /run/user/1000/discord-ipc-N and flatpak path"
+    },
+    "38": {
+      "name": "Volume Mixer",
+      "tier": "C",
+      "reason": "main.py uses pulsectl (PulseAudio) with XDG_RUNTIME_DIR=/run/user/1000, HOME=/home/deck, and ravel/dbussy DBus..."
+    },
+    "40": {
+      "name": "Controller Tools",
+      "tier": "B",
+      "reason": "bin/backend is a Linux Rust ELF (hidapi, rustc)"
+    },
+    "43": {
+      "name": "Tailscale Control",
+      "tier": "B",
+      "reason": "main.py shells 'tailscale up/down/status'"
+    },
+    "44": {
+      "name": "DeckMTP",
+      "tier": "D",
+      "reason": "bin/start.sh uses configfs/dwc3 USB gadget, modprobe libcomposite, dmidecode, /sys/bus/pci binds"
+    },
+    "46": {
+      "name": "Steamback",
+      "tier": "C",
+      "reason": "main.py steam_dir=~/.local/share/Steam"
+    },
+    "48": {
+      "name": "Quick Launch",
+      "tier": "B",
+      "reason": "get_flatpaks runs flatpak and runuser"
+    },
+    "49": {
+      "name": "Decky Cloud Save",
+      "tier": "B",
+      "reason": "bin/rclone is a Linux ELF with bash bin/rcloneLauncher"
+    },
+    "50": {
+      "name": "Storage Cleaner",
+      "tier": "B",
+      "reason": "main.py hardcodes DECKY_USER_HOME/.steam/steam/steamapps/{shadercache,compatdata}"
+    },
+    "52": {
+      "name": "Game Theme Music",
+      "tier": "B",
+      "reason": "main.py runs bin/yt-dlp (Linux build) with chmod and LD_LIBRARY_PATH=/usr/lib"
+    },
+    "53": {
+      "name": "Shotty",
+      "tier": "B",
+      "reason": "main.py hardcodes ~/.local/share/Steam/userdata globs, os.link, gamescope rescuer watching..."
+    },
+    "56": {
+      "name": "MangoPeel",
+      "tier": "D",
+      "reason": "Inotify via ctypes CDLL(None), scans /proc/*/cmdline for mangoapp and rewrites its config"
+    },
+    "58": {
+      "name": "Volume Boost",
+      "tier": "C",
+      "reason": "main.py shells out to pactl info/get-sink-volume/set-sink-volume, sets XDG_RUNTIME_DIR=/run/user/1000"
+    },
+    "59": {
+      "name": "Web Browser",
+      "tier": "A",
+      "reason": "Likely works if Windows build exposes the injector module and CEF debug endpoint"
+    },
+    "60": {
+      "name": "DeckyFileServer",
+      "tier": "B",
+      "reason": "bin/backend is a Linux Go ELF launched by main.py"
+    },
+    "61": {
+      "name": "TabMaster",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "62": {
+      "name": "TS3 QuickAccess",
+      "tier": "B",
+      "reason": "main.py launches flatpak/native ts3client_linux_amd64 (/opt/teamspeak3, PULSE_SERVER, xcb), loads bin/ts3-qs4sd.so..."
+    },
+    "63": {
+      "name": "Free Loader",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "64": {
+      "name": "Syncthing",
+      "tier": "C",
+      "reason": "main.py spawns bin/decky-syncthing-watchdog (Linux ELF, Rust) managing systemd/flatpak modes over DBus..."
+    },
+    "65": {
+      "name": "Decky Terminal",
+      "tier": "B",
+      "reason": "Import pty, termios, fcntl.ioctl TIOCSWINSZ, os.setsid, os.getuid"
+    },
+    "66": {
+      "name": "PlayTime",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "67": {
+      "name": "Battery Tracker",
+      "tier": "C",
+      "reason": "main.py reads /sys/class/power_supply/BAT1/{voltage_now,current_now,capacity,status} directly each sample"
+    },
+    "68": {
+      "name": "Wine Cellar",
+      "tier": "D",
+      "reason": "bin/backend (Rust 'Wine Cask' ELF) manages compatibilitytools.d Proton/Wine runners"
+    },
+    "70": {
+      "name": "MicroSDeck",
+      "tier": "C",
+      "reason": "bin/backend Rust ELF reads /sys/block/mmcblk, /dev/mmcblk0p1, /run/media/*/steamapps for card ID and mount"
+    },
+    "72": {
+      "name": "ScreenshotUploader",
+      "tier": "A",
+      "reason": "Works as-is."
+    },
+    "73": {
+      "name": "EmuDecky",
+      "tier": "C",
+      "reason": "Emudeck sources /home/deck/.config/EmuDeck/backend/functions/all.sh via shell=True"
+    },
+    "74": {
+      "name": "KDE Connect",
+      "tier": "D",
+      "reason": "main.py polls xprop GAMESCOPE_FOCUSED_APP, pkill kdeconnectd"
+    },
+    "75": {
+      "name": "Reshadeck",
+      "tier": "D",
+      "reason": "main.py destination ~/.local/share/gamescope/reshade/Shaders"
+    },
+    "76": {
+      "name": "CheatDeck",
+      "tier": "D",
+      "reason": "Frontend builds Proton launch options using STEAM_COMPAT_DATA_PATH and %command% wrappers"
+    },
+    "77": {
+      "name": "BT Wake Control",
+      "tier": "C",
+      "reason": "main.py reads /sys/devices/virtual/dmi/id, bluetoothctl, and dbus-send to org.bluez WakeAllowed"
+    },
+    "78": {
+      "name": "Brightness Bar",
+      "tier": "B",
+      "reason": "Frontend only; dist/index.js uses SteamClient.System.Display.RegisterForBrightnessChanges which relies on Deck..."
+    },
+    "79": {
+      "name": "Decky Notifications",
+      "tier": "B",
+      "reason": "py_modules/connector/crypto.py shells openssl via create_subprocess_shell with single-quoted -subj (breaks on..."
+    },
+    "80": {
+      "name": "MagicBlack",
+      "tier": "A",
+      "reason": "Works as-is; audio mute and touch-disable calls may not apply on desktop Steam."
+    },
+    "81": {
+      "name": "IsThereAnyDeal for Deck",
+      "tier": "A",
+      "reason": "Install as-is; HTTP calls from frontend."
+    },
+    "82": {
+      "name": "MagicPods",
+      "tier": "C",
+      "reason": "bin/magicpodscore is a Linux x86-64 ELF using BlueZ over dbus (strings: org.bluez, bluez_card)"
+    },
+    "84": {
+      "name": "Junk-Store",
+      "tier": "D",
+      "reason": "scripts/*.sh via bash"
+    },
+    "85": {
+      "name": "Decky-Undervolt",
+      "tier": "B",
+      "reason": "main.py runs 'sudo ./bin/ryzenadj --set-coper'"
+    },
+    "87": {
+      "name": "ScreenSaver",
+      "tier": "D",
+      "reason": "main.py uses dbus_next to export org.freedesktop.ScreenSaver / PowerManagement.Inhibit on session bus for Linux apps"
+    },
+    "88": {
+      "name": "steamdeck-input-disabler",
+      "tier": "D",
+      "reason": "main.py writes /etc/udev/rules.d/99-disable-steam-input.rules, runs udevadm, bluetoothctl, writes..."
+    },
+    "89": {
+      "name": "DeckySpy",
+      "tier": "A",
+      "reason": "Ensure psutil is available in Decky Windows Python or drop a win_amd64 psutil wheel into py_modules"
+    },
+    "90": {
+      "name": "Picture in Picture",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "91": {
+      "name": "PlayCount",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "92": {
+      "name": "Crosshair",
+      "tier": "D",
+      "reason": "main.py scans /proc for mangoapp cmdline/environ, writes MangoHud.conf or /tmp/mangohud_crosshair.conf"
+    },
+    "93": {
+      "name": "Deck Settings",
+      "tier": "A",
+      "reason": "Works with degraded hardware detection"
+    },
+    "94": {
+      "name": "Decky DoT DNS",
+      "tier": "C",
+      "reason": "main.py writes /etc/systemd/resolved.conf.d/decky-dot-dns.conf and runs 'systemctl restart systemd-resolved'"
+    },
+    "95": {
+      "name": "Decky-SpoofDPI",
+      "tier": "B",
+      "reason": "main.py launches bin/spoofdpi (Linux Go ELF)"
+    },
+    "96": {
+      "name": "Simple Timer",
+      "tier": "A",
+      "reason": "Works as-is."
+    },
+    "97": {
+      "name": "Decky-Framegen",
+      "tier": "D",
+      "reason": "Shells to 7z, writes ~/fgmod, copies fgmod.sh launch-option wrapper (bash, chmod)"
+    },
+    "98": {
+      "name": "Decky-Lookup",
+      "tier": "A",
+      "reason": "Works as-is."
+    },
+    "99": {
+      "name": "Decky Zerotier",
+      "tier": "B",
+      "reason": "main.py runs bin/zerotier-one (Linux, not shipped in zip) with -D settings dir, os.chmod, LD_LIBRARY_PATH=/usr/lib"
+    },
+    "100": {
+      "name": "Virtual Surround Sound",
+      "tier": "C",
+      "reason": "service.sh builds libpipewire-module-filter-chain config"
+    },
+    "101": {
+      "name": "XIVOmega",
+      "tier": "D",
+      "reason": "main.py Popen 'podman exec xivomega', patches /etc/containers storage.conf, container /home/omega_alpha.sh, scapy..."
+    },
+    "102": {
+      "name": "DeckSP",
+      "tier": "C",
+      "reason": "main.py launches 'flatpak --user run me.timschneeberger.jdsp4linux --tray', paths in ~/.var/app, relinks PipeWire..."
+    },
+    "103": {
+      "name": "Decky Ludusavi",
+      "tier": "A",
+      "reason": "User installs ludusavi.exe on PATH (winget/scoop)"
+    },
+    "104": {
+      "name": "Game Sync",
+      "tier": "B",
+      "reason": "rclone_manager.py downloads rclone-current-linux-amd64.zip and chmods it"
+    },
+    "105": {
+      "name": "WiFi Locker",
+      "tier": "C",
+      "reason": "assets/lock_wifi.sh and unlock_wifi.sh use nmcli, iw dev link, grep -P, /tmp logs"
+    },
+    "106": {
+      "name": "LetMeReShade",
+      "tier": "D",
+      "reason": "assets/reshade-install.sh, reshade-game-manager.sh run via subprocess"
+    },
+    "107": {
+      "name": "Decky Sunshine",
+      "tier": "B",
+      "reason": "py_modules/sunshine.py uses flatpak ps/run/kill/install, chmod u+s bwrap, LD_LIBRARY_PATH, preexec_fn setsid"
+    },
+    "108": {
+      "name": "HueSync",
+      "tier": "C",
+      "reason": "py_modules/ec.py uses portio.so (iopl/inb/outb) for AYANEO EC"
+    },
+    "109": {
+      "name": "MuraDeck",
+      "tier": "D",
+      "reason": "main.py tails gamescope/displaymgr logs, create_subprocess_shell with gamescope-specific commands, /tmp/mura, ships..."
+    },
+    "110": {
+      "name": "Dimmer Deck",
+      "tier": "D",
+      "reason": "main.py scans /proc for steam DISPLAY and sets GAMESCOPE_COMPOSITE_FORCE / COLOR_3DLUT_OVERRIDE / SHAPERLUT_OVERRIDE..."
+    },
+    "111": {
+      "name": "Music Control",
+      "tier": "C",
+      "reason": "All control via dbus-send MPRIS (org.mpris.MediaPlayer2), DBUS_SESSION_BUS_ADDRESS=/run/user/uid/bus, os.getuid"
+    },
+    "112": {
+      "name": "Better Keyboard",
+      "tier": "C",
+      "reason": "main.py uses bundled evdev_mod (InputDevice grab, /dev/input), /usr/bin/udevadm"
+    },
+    "113": {
+      "name": "Decky LSFG-VK",
+      "tier": "D",
+      "reason": "Ships .flatpak Vulkan layers and lsfg-vk zip"
+    },
+    "114": {
+      "name": "Network Sentinel",
+      "tier": "B",
+      "reason": "Ping uses '-c/-W' flags and Linux output parse"
+    },
+    "115": {
+      "name": "Decky Clash",
+      "tier": "B",
+      "reason": "bin/mihomo.gz is Linux binary"
+    },
+    "116": {
+      "name": "Muon",
+      "tier": "C",
+      "reason": "assets/start_hotspot.sh uses iw, hostapd, dnsmasq, systemctl stop NetworkManager/iwd, iptables"
+    },
+    "117": {
+      "name": "DeckyParty File Manager",
+      "tier": "B",
+      "reason": "Popen ['sudo','-u',user,-E,copyparty-sfx.py]"
+    },
+    "118": {
+      "name": "Speed Test",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "119": {
+      "name": "Decky Clipboard",
+      "tier": "B",
+      "reason": "py_modules/clipboard.py drives xclip and reads /run/user/1000/gamescope-environment for DISPLAY"
+    },
+    "120": {
+      "name": "Reroll",
+      "tier": "C",
+      "reason": "memscan.py ctypes.CDLL('bin/memscan.so') Linux shared object (process memory via /proc)"
+    },
+    "121": {
+      "name": "DeckPass",
+      "tier": "B",
+      "reason": "py_modules/keypass_cli.py runs 'flatpak run --command=keepassxc-cli org.keepassxc.KeePassXC' and 'locale -a'"
+    },
+    "123": {
+      "name": "Steam Status",
+      "tier": "A",
+      "reason": "Works as-is."
+    },
+    "124": {
+      "name": "AlarMe",
+      "tier": "C",
+      "reason": "main.py writes /dev/uinput to wake/press input"
+    },
+    "125": {
+      "name": "Decky Localsend",
+      "tier": "B",
+      "reason": "main.py runs bin/localsend-core (Linux ELF, Go localsend-go)"
+    },
+    "126": {
+      "name": "Launch Options",
+      "tier": "B",
+      "reason": "main.py writes ~/.dlo/run bash script (#!/bin/bash) and chmods it"
+    },
+    "127": {
+      "name": "Decky Translator",
+      "tier": "C",
+      "reason": "main.py captures via GStreamer pipewiresrc, monitors /dev/hidraw Deck controller and evdev gamepads (fcntl/select)..."
+    },
+    "128": {
+      "name": "Quick User Switcher",
+      "tier": "B",
+      "reason": "'import pwd' fails at load"
+    },
+    "129": {
+      "name": "ShadowDeck",
+      "tier": "B",
+      "reason": "Bin ships sing-box-1.12.15-linux-amd64.tar.gz"
+    },
+    "130": {
+      "name": "Games Prefix Manager",
+      "tier": "D",
+      "reason": "main.py DECK_HOME=/home/deck, compatdata dirs, symlink handling, lexists/islink on Wine prefixes"
+    },
+    "131": {
+      "name": "Download All",
+      "tier": "A",
+      "reason": "Works as-is."
+    },
+    "132": {
+      "name": "SuggestMe",
+      "tier": "B",
+      "reason": "_detect_steam_id reads ~/.steam/steam/config/loginusers.vdf"
+    },
+    "133": {
+      "name": "Non-Steam Badges",
+      "tier": "B",
+      "reason": "main.py hardcodes Path('/home/deck/.steam/steam/userdata/') in _find_shortcuts_vdf, _find_localconfig_vdf..."
+    },
+    "134": {
+      "name": "Deck Progress Tracker",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "135": {
+      "name": "Deck Shelves",
+      "tier": "A",
+      "reason": "No known Windows blockers"
+    },
+    "136": {
+      "name": "Decky-Clipper",
+      "tier": "C",
+      "reason": "main.py runs bundled Linux GStreamer with pipewiresrc target gamescope and vah264enc"
+    },
+    "137": {
+      "name": "Decky Proton Launch",
+      "tier": "D",
+      "reason": "py_modules/proton_launch: writes ~/proton-launch %command% wrapper, chmod 755, /tmp/proton-launch.log, scans..."
+    },
+    "138": {
+      "name": "Docky",
+      "tier": "D",
+      "reason": "main.py imports pwd at top"
+    },
+    "139": {
+      "name": "Output Manager",
+      "tier": "C",
+      "reason": "main.py reads /sys/class/drm connectors, uses pactl list/set-default-sink via runuser, pgrep plasmashell, Deck eDP-1..."
+    },
+    "140": {
+      "name": "IPv6 Enabler Plugin",
+      "tier": "C",
+      "reason": "Writes /proc/sys/net/ipv6/conf/*/disable_ipv6, /etc/sysctl.d, calls /usr/bin/nmcli, ip, sysctl"
+    },
+    "141": {
+      "name": "DeckyClocker",
+      "tier": "B",
+      "reason": "main.py runs timedatectl set-ntp/set-time/show and 'date +%Y-%m-%d'"
+    }
+  },
+  "names": {
+    "xr gaming": "1",
+    "example plugin": "2",
+    "css loader": "7",
+    "vibrantdeck": "10",
+    "fantastic": "11",
+    "musiccontrol": "12",
+    "pause games": "13",
+    "protondb badges": "14",
+    "audio loader": "16",
+    "bluetooth": "18",
+    "notebook": "19",
+    "powertools": "21",
+    "memory deck": "22",
+    "animation changer": "23",
+    "radiyo!": "24",
+    "hltb for deck": "26",
+    "autosuspend": "27",
+    "emuchievements": "28",
+    "tunneldeck": "30",
+    "autoflatpaks": "32",
+    "moondeck": "35",
+    "steamgriddb": "36",
+    "discord status": "37",
+    "volume mixer": "38",
+    "controller tools": "40",
+    "tailscale control": "43",
+    "deckmtp": "44",
+    "steamback": "46",
+    "quick launch": "48",
+    "decky cloud save": "49",
+    "storage cleaner": "50",
+    "game theme music": "52",
+    "shotty": "53",
+    "mangopeel": "56",
+    "volume boost": "58",
+    "web browser": "59",
+    "deckyfileserver": "60",
+    "tabmaster": "61",
+    "ts3 quickaccess": "62",
+    "free loader": "63",
+    "syncthing": "64",
+    "decky terminal": "65",
+    "playtime": "66",
+    "battery tracker": "67",
+    "wine cellar": "68",
+    "microsdeck": "70",
+    "screenshotuploader": "72",
+    "emudecky": "73",
+    "kde connect": "74",
+    "reshadeck": "75",
+    "cheatdeck": "76",
+    "bt wake control": "77",
+    "brightness bar": "78",
+    "decky notifications": "79",
+    "magicblack": "80",
+    "isthereanydeal for deck": "81",
+    "magicpods": "82",
+    "junk-store": "84",
+    "decky-undervolt": "85",
+    "screensaver": "87",
+    "steamdeck-input-disabler": "88",
+    "deckyspy": "89",
+    "picture in picture": "90",
+    "playcount": "91",
+    "crosshair": "92",
+    "deck settings": "93",
+    "decky dot dns": "94",
+    "decky-spoofdpi": "95",
+    "simple timer": "96",
+    "decky-framegen": "97",
+    "decky-lookup": "98",
+    "decky zerotier": "99",
+    "virtual surround sound": "100",
+    "xivomega": "101",
+    "decksp": "102",
+    "decky ludusavi": "103",
+    "game sync": "104",
+    "wifi locker": "105",
+    "letmereshade": "106",
+    "decky sunshine": "107",
+    "huesync": "108",
+    "muradeck": "109",
+    "dimmer deck": "110",
+    "music control": "111",
+    "better keyboard": "112",
+    "decky lsfg-vk": "113",
+    "network sentinel": "114",
+    "decky clash": "115",
+    "muon": "116",
+    "deckyparty file manager": "117",
+    "speed test": "118",
+    "decky clipboard": "119",
+    "reroll": "120",
+    "deckpass": "121",
+    "steam status": "123",
+    "alarme": "124",
+    "decky localsend": "125",
+    "launch options": "126",
+    "decky translator": "127",
+    "quick user switcher": "128",
+    "shadowdeck": "129",
+    "games prefix manager": "130",
+    "download all": "131",
+    "suggestme": "132",
+    "non-steam badges": "133",
+    "deck progress tracker": "134",
+    "deck shelves": "135",
+    "decky-clipper": "136",
+    "decky proton launch": "137",
+    "docky": "138",
+    "output manager": "139",
+    "ipv6 enabler plugin": "140",
+    "deckyclocker": "141"
+  }
+}

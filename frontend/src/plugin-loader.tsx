@@ -318,6 +318,7 @@ class PluginLoader extends Logger {
         hash={hash}
         installType={install_type}
         disabled={this.deckyState.publicState().disabledPlugins.some((p) => p.name === artifact)}
+        platform={this.deckyState.publicState().versionInfo?.platform}
         onOK={() => DeckyBackend.call<[string]>('utilities/confirm_plugin_install', request_id)}
         onCancel={() => DeckyBackend.call<[string]>('utilities/cancel_plugin_install', request_id)}
       />,

@@ -21,6 +21,8 @@ export default defineConfig([
       nodeResolve({
         browser: true,
       }),
+      // before externalGlobals, which parses every module as JS (src/store/windows-compat.json)
+      json(),
       externalGlobals({
         react: 'SP_REACT',
         'react/jsx-runtime': 'SP_JSX',
@@ -31,7 +33,6 @@ export default defineConfig([
         url: '{fileURLToPath: (f) => f}',
       }),
       typescript(),
-      json(),
       replace({
         preventAssignment: false,
         'process.env.NODE_ENV': JSON.stringify('production'),

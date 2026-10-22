@@ -114,7 +114,9 @@ class Updater:
             "remote": self.remoteVer,
             "all": self.allRemoteVers,
             "updatable": self.localVer != "unknown" and self.localVer != "dev",
-            "supported": self.isSupported
+            "supported": self.isSupported,
+            # lets the frontend show Windows-specific UI such as the store compatibility badges
+            "platform": sys.platform,
         }
 
     async def check_for_updates(self):
