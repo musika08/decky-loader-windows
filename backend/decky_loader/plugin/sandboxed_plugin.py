@@ -112,8 +112,12 @@ class SandboxedPlugin:
             if ON_WINDOWS:
                 from ..localplatform.winsymlink import install_symlink_fallback
                 install_symlink_fallback()
-                from ..localplatform.winsteamlinks import setup_steam_home_links
+                from ..localplatform.winsteamlinks import setup_steam_home_links, steam_install_dir
                 setup_steam_home_links()
+                steam_dir = steam_install_dir()
+                if steam_dir is not None:
+                    from ..localplatform.winsteammovies import install_movie_mirror
+                    install_movie_mirror(steam_dir)
 
             spec = spec_from_file_location("_", self.file)
             assert spec is not None
