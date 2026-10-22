@@ -3,7 +3,7 @@
 The supervisor runs the loader as a child process (`--loader`). The child reports what it wants through its exit code.
 '''
 import hashlib, logging, os, shutil, subprocess, sys, threading, time
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 logger = logging.getLogger("winsupervisor")
 
@@ -106,12 +106,50 @@ def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any
     sys.stdout, sys.stderr = out, err
     return True
 
-def self_command() -> list[str]:
-    '''Command that starts another copy of this program, without mode flags.'''
-    if getattr(sys, "frozen", False):
-        return [sys.executable]
-    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "main.py")
-    return [sys.executable, main_py]
+def self_command(*, executable: str | None = None, frozen: bool | None = None, package_file: str = __file__,
+                 our_runtime: bool | None = None) -> list[str]:
+    r'''Command that starts another copy of this program, without mode flags.
+
+    A PyInstaller build is just its exe. From source, it is this interpreter running the main.py next to the
+    decky_loader package; on our own runtime (installed, or an installer folder) with -I, so PYTHON* environment
+    variables are ignored: `<dir>\python\pythonw.exe -I <dir>\app\main.py` when installed.'''
+    from .wininstall import self_invocation
+    executable = executable or sys.executable
+    if getattr(sys, "frozen", False) if frozen is None else frozen:
+        return [executable]
+    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(package_file)))), "main.py")
+    return self_invocation(executable, main_py, our_runtime=our_runtime)
+
+def child_env(env: dict[str, str]) -> dict[str, str]:
+    '''`env` without any PYTHON* variable, for the processes we start (loader, plugin hosts, update finisher). They run
+    with -I on our runtime anyway; this also keeps them out of anything those processes start.'''
+    return {k: v for k, v in env.items() if not k.upper().startswith("PYTHON")}
+
+# Next to main.py in an installer folder (tools\build_win_runtime.py writes it): the values PyInstaller's runtime
+# hook (build_config.py, written by pyinstaller.spec) sets in a packaged build
+BUILD_CONFIG = "build_config.json"
+BUILD_CONFIG_KEYS = ("DECKY_PACKAGED_BUILD", "DECKY_REPO", "DECKY_BRANCH", "DECKY_NOCONSOLE")
+
+def apply_build_config(path: str, environ: Any = os.environ) -> dict[str, str]:
+    '''Set the BUILD_CONFIG_KEYS found in the JSON object at `path` in `environ`, overriding like the runtime hook
+    does. A missing file (running from a checkout) changes nothing; a broken one is logged and ignored.'''
+    import json
+    try:
+        with open(path, encoding="utf-8") as f:
+            data: Any = json.load(f)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as e:
+        logger.warning("Ignoring %s: %s", path, e)
+        return {}
+    applied: dict[str, str] = {}
+    if isinstance(data, dict):
+        values = cast(dict[str, Any], data)
+        for key in BUILD_CONFIG_KEYS:
+            value = values.get(key)
+            if isinstance(value, str):
+                environ[key] = applied[key] = value
+    return applied
 
 def next_backoff(prev: float, ran_for: float) -> float:
     if ran_for >= HEALTHY_RUN_SECONDS or prev <= 0:
@@ -175,7 +213,7 @@ def make_spawn(exe: str, run: Callable[[list[str], dict[str, str] | None, str | 
     The child runs in a kill-on-close job held by this process, so if the supervisor dies or is ended, the loader and
     its plugin hosts go with it.'''
     def spawn(argv: list[str]) -> int:
-        env = {**os.environ, "DECKY_SUPERVISED": "1", **_FRESH_ENV}
+        env = child_env({**os.environ, "DECKY_SUPERVISED": "1", **_FRESH_ENV})
         cwd = os.path.dirname(exe) if getattr(sys, "frozen", False) else None
         return run(argv, env, cwd)
     return spawn
@@ -183,7 +221,7 @@ def make_spawn(exe: str, run: Callable[[list[str], dict[str, str] | None, str | 
 def launch_detached(argv: list[str]) -> None:
     flags = getattr(subprocess, "DETACHED_PROCESS", 0x00000008) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
     subprocess.Popen(argv, creationflags=flags, close_fds=True, cwd=os.path.dirname(argv[0]) or None,
-                     env={**os.environ, **_FRESH_ENV})
+                     env=child_env({**os.environ, **_FRESH_ENV}))
 
 SUPERVISOR_MUTEX = "Local\\DeckyLoader-Supervisor"
 ERROR_ACCESS_DENIED = 5
@@ -235,7 +273,12 @@ def acquire_supervisor_lock(kernel32: Any = None, last_error: Callable[[], int] 
     return True
 
 def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], None], exe: str,
-                   launch_detached: Callable[[list[str]], None], clock: Callable[[], float] = time.monotonic) -> int:
+                   launch_detached: Callable[[list[str]], None], clock: Callable[[], float] = time.monotonic,
+                   self_update: bool | None = None) -> int:
+    '''`self_update`: swap in a downloaded `<exe>.new` on restart. Only a PyInstaller exe updates itself (the default);
+    from source `exe` is the Python interpreter, which must never be replaced.'''
+    if self_update is None:
+        self_update = bool(getattr(sys, "frozen", False))
     backoff = 0.0
     while True:
         started = clock()
@@ -248,7 +291,7 @@ def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], N
             return 0
         if code == EXIT_RESTART:
             backoff = 0.0
-            new = pending_update_path(exe)
+            new = pending_update_path(exe) if self_update else None
             if new is not None:
                 # The finisher outlives us, so it must not be a child we wait on.
                 # Under a onefile build our own pid is the child; the bootloader parent is what holds the image lock.

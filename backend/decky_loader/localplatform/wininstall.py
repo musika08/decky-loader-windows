@@ -1,21 +1,53 @@
-r'''Windows install: copies the onedir build to Program Files and registers an elevated logon task that starts it.
+r'''Windows install: copies the installer folder to Program Files and registers an elevated logon task that starts it.
 
-Layout: `%ProgramFiles%\Decky Loader\PluginLoader.exe` plus its `_internal` folder (the program), and
-`%ProgramData%\decky` (privileged root: plugins, settings). Only a onedir build can be installed.
+Layout: `%ProgramFiles%\Decky Loader\python` (a private copy of the PSF-signed CPython runtime) and `\app` (Decky's
+source and its dependencies), and `%ProgramData%\decky` (privileged root: plugins, settings). The task runs
+`python\pythonw.exe app\main.py`. Only an installer folder (`python` plus `app`, built by tools\build_win_runtime.py)
+can be installed; PyInstaller builds are portable only.
 '''
-import csv, ctypes, datetime, io, logging, os, platform, secrets, shutil, subprocess, sys, tempfile, time
+import csv, ctypes, datetime, io, logging, os, secrets, shutil, subprocess, sys, tempfile, time
 from typing import Any, Callable
 from xml.sax.saxutils import escape
-
-from .winsupervisor import ONEDIR_CONTENTS, is_onedir_build, self_command
 
 logger = logging.getLogger("wininstall")
 
 TASK_NAME = "Decky Loader"
+# The portable PyInstaller exe, and what earlier installs put in Program Files (with its `_internal` folder)
 EXE_NAME = "PluginLoader.exe"
 PROGRAM_DIR_NAME = "Decky Loader"
 # Left in %ProgramData%\decky by the earlier onefile layout (the exe and its wscript launcher, its extraction dir)
 LEGACY_DIRS = ("services", "tmp")
+
+# The installed program, and an installer folder, hold exactly these two folders
+RUNTIME_DIR_NAME = "python"
+APP_DIR_NAME = "app"
+PROGRAM_SUBDIRS = (RUNTIME_DIR_NAME, APP_DIR_NAME)
+MAIN_SCRIPT = "main.py"
+CONSOLE_INTERPRETER = "python.exe"
+WINDOWED_INTERPRETER = "pythonw.exe" # What the task runs: no console window
+INTERPRETERS = (CONSOLE_INTERPRETER, WINDOWED_INTERPRETER)
+
+def runtime_interpreters(root: str) -> list[str]:
+    r'''`<root>\python\python.exe` and `pythonw.exe`.'''
+    return [os.path.join(root, RUNTIME_DIR_NAME, name) for name in INTERPRETERS]
+
+def main_script_path(root: str) -> str:
+    r'''`<root>\app\main.py`.'''
+    return os.path.join(root, APP_DIR_NAME, MAIN_SCRIPT)
+
+def running_main_script() -> str | None:
+    '''Absolute path of the script this interpreter was started with (`__main__`), or None (e.g. `-c`).'''
+    main = sys.modules.get("__main__")
+    path = getattr(main, "__file__", None)
+    return os.path.abspath(path) if isinstance(path, str) and path else None
+
+def _is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
+
+def program_images(app_dir: str, root: str) -> list[str]:
+    r'''Every image our processes can run from: the installed runtime's interpreters, and the exe of the two earlier
+    layouts (`<app_dir>\PluginLoader.exe`, `<root>\services\PluginLoader.exe`). Other Pythons never match.'''
+    return runtime_interpreters(app_dir) + [os.path.join(app_dir, EXE_NAME), os.path.join(root, "services", EXE_NAME)]
 
 _SID_SYSTEM = "S-1-5-18"
 _SID_ADMINS = "S-1-5-32-544"
@@ -34,9 +66,11 @@ def current_user_sid(run: Callable[..., Any] = subprocess.run) -> str:
     row = next(csv.reader(io.StringIO(out.strip())))
     return row[1]
 
-def build_task_xml(exe: str, workdir: str, user_sid: str) -> str:
-    '''The logon task: start `exe` directly, with no arguments, in `workdir`, elevated, for `user_sid`.'''
+def build_task_xml(exe: str, workdir: str, user_sid: str, arguments: str | None = None) -> str:
+    '''The logon task: start `exe` directly with `arguments` (a command line, or none), in `workdir`, elevated,
+    for `user_sid`.'''
     sid, workdir, command = escape(user_sid), escape(workdir), escape(exe)
+    args = f"\n      <Arguments>{escape(arguments)}</Arguments>" if arguments else ""
     return f'''<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -70,7 +104,7 @@ def build_task_xml(exe: str, workdir: str, user_sid: str) -> str:
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>{command}</Command>
+      <Command>{command}</Command>{args}
       <WorkingDirectory>{workdir}</WorkingDirectory>
     </Exec>
   </Actions>
@@ -259,7 +293,7 @@ def known_program_files() -> str:
     return known_folder(_FOLDERID_PROGRAMFILES)
 
 def program_dir(program_files: str | None = None) -> str:
-    r'''`%ProgramFiles%\Decky Loader`, where installed mode keeps the onedir program.'''
+    r'''`%ProgramFiles%\Decky Loader`, where installed mode keeps the runtime (`python`) and the program (`app`).'''
     return os.path.join(program_files or known_program_files(), PROGRAM_DIR_NAME)
 
 def system_directory() -> str:
@@ -453,12 +487,13 @@ def terminate_image(exe: str, *, processes: Callable[[], list[tuple[int, str | N
 
 COPY_ATTEMPTS = 10
 
-def _elevate(args: str, shell_execute: Callable[..., int], exe: str | None) -> int:
-    cmd = self_command()
-    if exe is not None and not getattr(sys, "frozen", False):
-        cmd = [exe] + cmd[1:]
-    file = cmd[0]
-    params = " ".join(([subprocess.list2cmdline(cmd[1:])] if cmd[1:] else []) + [args])
+def elevation_params(command: list[str], args: list[str]) -> tuple[str, str]:
+    '''(file, parameters) for ShellExecute: `command[0]` runs, and the rest of `command` (the script, when running from
+    source) goes before `args`. Every parameter is quoted as needed, so paths with spaces survive.'''
+    return command[0], subprocess.list2cmdline(command[1:] + args)
+
+def _elevate(command: list[str], args: list[str], shell_execute: Callable[..., int]) -> int:
+    file, params = elevation_params(command, args)
     result = shell_execute(None, "runas", file, params, None, SW_SHOWNORMAL)
     if result <= SHELL_EXECUTE_OK_ABOVE:
         logger.error("Elevation was refused or failed (code %s)", result)
@@ -471,13 +506,96 @@ def _shell_execute(*args: Any) -> int:
 def _same_file(a: str, b: str) -> bool:
     return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
 
-def installer_zip_name(machine: str | None = None) -> str:
-    arch = (machine if machine is not None else platform.machine()).lower()
-    return "PluginLoader-win-arm64-installer.zip" if arch in ("arm64", "aarch64") else "PluginLoader-win-installer.zip"
+INSTALL_COMMAND = r"python\python.exe app\main.py --install"
 
-def onefile_install_message(machine: str | None = None) -> str:
-    return (f"This PluginLoader.exe is the portable single-file build and cannot be installed. To install Decky Loader, "
-            f"download {installer_zip_name(machine)} from the release, extract it, and run PluginLoader.exe --install from there.")
+def frozen_install_message() -> str:
+    return ("This PluginLoader.exe is a portable build and cannot be installed. Installed mode runs Decky on a private copy "
+            "of the signed Python runtime: build the installer folder with tools\\update-decky.ps1 -NoInstall (or "
+            f"tools\\build_win_runtime.py), then run {INSTALL_COMMAND} from that folder.")
+
+def not_a_stage_message(exe: str, script: str | None) -> str:
+    return (f"--install only works from an installer folder (with python and app folders, built by tools\\build_win_runtime.py): "
+            f"run {INSTALL_COMMAND} from that folder. This copy runs {script or '(no script)'} with {exe}.")
+
+def stage_root(exe: str, script: str | None, *, isdir: Callable[[str], bool] = os.path.isdir) -> str | None:
+    r'''The installer folder this copy runs from: `exe` is `<folder>\python\python.exe` (or pythonw.exe), `script` is
+    `<folder>\app\main.py`, and both folders exist. None if this copy is not running from one.'''
+    if not script:
+        return None
+    root = os.path.dirname(os.path.dirname(os.path.abspath(exe)))
+    if not any(_same_file(exe, i) for i in runtime_interpreters(root)) or not _same_file(script, main_script_path(root)):
+        return None
+    if not all(isdir(os.path.join(root, sub)) for sub in PROGRAM_SUBDIRS):
+        return None
+    return root
+
+# Right after our runtime's interpreter on every launch. The ._pth file pins sys.path, but without -I the interpreter
+# still honours PYTHON* environment variables (PYTHONINSPECT, PYTHONSTARTUP, PYTHONWARNINGS, PYTHONPYCACHEPREFIX...),
+# and the elevated task inherits the user's environment (HKCU\Environment is user-writable).
+ISOLATE_FLAG = "-I"
+
+def self_invocation(exe: str, script: str, *, our_runtime: bool | None = None) -> list[str]:
+    r'''`exe` running `script`, with -I when `exe` is our runtime (an installer folder or the installed copy, see
+    stage_root). A development venv keeps plain `python main.py`: -I would drop the checkout from sys.path.'''
+    if our_runtime is None:
+        our_runtime = stage_root(exe, script) is not None
+    return [exe, ISOLATE_FLAG, script] if our_runtime else [exe, script]
+
+def launched_isolated(orig_argv: list[str]) -> bool:
+    '''True if the interpreter options in `orig_argv` (sys.orig_argv) include -I. sys.flags.isolated cannot tell:
+    the ._pth file sets it even when the environment was honoured.'''
+    args = iter(orig_argv[1:])
+    for arg in args:
+        if not arg.startswith("-") or arg == "-" or arg.startswith("--"):
+            return False
+        if arg[1] in "cm":
+            return False
+        if arg[1] in "WX":
+            if len(arg) == 2:
+                next(args, None) # the option's value
+            continue
+        if "I" in arg[1:]:
+            return True
+    return False
+
+def isolation_error(executable: str, script: str, orig_argv: list[str]) -> str | None:
+    '''Why this copy must not run: our runtime started without -I. None when it may.'''
+    if stage_root(executable, script) is None or launched_isolated(orig_argv):
+        return None
+    return (f"Decky's Python runtime must be started with -I, so that PYTHON* environment variables are ignored: "
+            f"\"{executable}\" -I \"{script}\" ...")
+
+def _copy_file_plain(src: str, dst: str) -> str:
+    # Content and timestamps only. The copy gets the ACL it inherits where it lands (Program Files: Users read and
+    # execute), never the source's: copy2 (CopyFile2) is not used, and nothing copies security descriptors.
+    shutil.copyfile(src, dst)
+    shutil.copystat(src, dst)
+    return dst
+
+class ReparsePointError(OSError):
+    pass
+
+def copy_tree_plain(src: str, dst: str, *, reparse: Callable[[str], bool] = is_reparse_point) -> object:
+    '''Copy the folder `src` to the new folder `dst`, file contents and timestamps only (see _copy_file_plain).
+    A junction or symbolic link anywhere in `src` (or `src` itself) is refused, never followed: the installer folder
+    is user-writable and this runs elevated.'''
+    # Checked up front over the whole tree (never descending into a link), so nothing is copied when one is there
+    pending = [src]
+    while pending:
+        path = pending.pop()
+        if reparse(path):
+            raise ReparsePointError(f"{path} is a junction or symbolic link")
+        if os.path.isdir(path):
+            pending.extend(os.path.join(path, name) for name in os.listdir(path))
+
+    # And again while copying (as a shutil.Error then), in case one appears in between
+    def refuse_links(directory: str, names: list[str]) -> set[str]:
+        for name in names:
+            if reparse(os.path.join(directory, name)):
+                raise ReparsePointError(f"{os.path.join(directory, name)} is a junction or symbolic link")
+        return set()
+
+    return shutil.copytree(src, dst, copy_function=_copy_file_plain, ignore=refuse_links)
 
 def remove_tree(path: str, *, rmtree: Callable[..., Any] = shutil.rmtree, defer_delete: Callable[[str], bool] = move_on_reboot,
                 reparse: Callable[[str], bool] = is_reparse_point, rmdir: Callable[[str], None] = os.rmdir) -> list[str]:
@@ -523,13 +641,14 @@ def stale_copies(app_dir: str, *, listdir: Callable[[str], list[str]] = os.listd
         return []
     return [os.path.join(parent, e) for e in entries if e.lower().startswith(prefixes)]
 
-def stage_and_swap(src_exe: str, app_dir: str, *, copyfile: Callable[[str, str], object] = shutil.copyfile,
-                   copytree: Callable[[str, str], object] = shutil.copytree, mkdir: Callable[[str], None] = os.mkdir,
+def stage_and_swap(src_root: str, app_dir: str, *, copytree: Callable[[str, str], object] = copy_tree_plain,
+                   mkdir: Callable[[str], None] = os.mkdir,
                    rename: Callable[[str, str], None] = os.rename, sleep: Callable[[float], None] = time.sleep,
                    discard: Callable[[str], list[str]] = remove_tree, listdir: Callable[[str], list[str]] = os.listdir,
                    token: Callable[[], str] = lambda: secrets.token_hex(8)) -> bool:
-    '''Copy the onedir build (`src_exe` and the `_internal` folder next to it) into a new sibling of `app_dir`, then
-    swap it in: the current `app_dir` is renamed aside, the staged copy renamed into place, and the old copy deleted.
+    r'''Copy the installer folder's `python` and `app` folders (and nothing else from `src_root`) into a new sibling
+    of `app_dir`, then swap it in: the current `app_dir` is renamed aside, the staged copy renamed into place, and the
+    old copy deleted, so whatever an earlier install left in `app_dir` (`PluginLoader.exe`, `_internal`) goes with it.
     Nothing in an existing `app_dir` is written in place. On failure prints why, keeps (or restores) the current
     `app_dir`, and returns False. Copies left behind by earlier installs are removed first, best effort (`discard`
     removes a link as a link only).'''
@@ -548,9 +667,9 @@ def stage_and_swap(src_exe: str, app_dir: str, *, copyfile: Callable[[str, str],
         print(f"Could not create {staged}: {e}", file=sys.stderr)
         return False
     try:
-        copyfile(src_exe, os.path.join(staged, EXE_NAME))
-        copytree(os.path.join(os.path.dirname(src_exe), ONEDIR_CONTENTS), os.path.join(staged, ONEDIR_CONTENTS))
-    except OSError as e:
+        for sub in PROGRAM_SUBDIRS:
+            copytree(os.path.join(src_root, sub), os.path.join(staged, sub))
+    except OSError as e: # shutil.Error (copytree's collected failures) included
         print(f"Could not copy Decky Loader to {staged}: {e}", file=sys.stderr)
         discard(staged)
         return False
@@ -705,11 +824,95 @@ def enable_cef_remote_debugging(sid: str, *, steam_dir: Callable[[str], str | No
               f"with that name in the Steam folder.")
         return None
 
+INSTALL_LOG = "install.log"
+TEMP_LOG_PREFIX = "decky-install-"
+
+def _install_log_dir() -> str | None:
+    r'''`%ProgramData%\decky\logs`, only if the root is already admin-owned and protected (prepare_log_dir checks it
+    and creates `logs` the same way). None otherwise, e.g. before the first install created the root.'''
+    from .winlogging import prepare_log_dir
+    root = os.path.join(known_program_data(), "decky")
+    return prepare_log_dir(installed_root=lambda: root)
+
+def write_install_log(text: str, *, log_dir: Callable[[], str | None] = _install_log_dir,
+                      temp_dir: Callable[[], str] = tempfile.gettempdir) -> str | None:
+    '''Append `text` to <log dir>\\install.log, else write it to a new %TEMP%\\decky-install-*.log (created
+    exclusively, so nothing already there is followed or overwritten). Returns the file written, or None.'''
+    try:
+        logs = log_dir()
+        if logs is not None:
+            path = os.path.join(logs, INSTALL_LOG)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text)
+            return path
+    except Exception:
+        logger.exception("Could not write %s", INSTALL_LOG)
+    try:
+        fd, path = tempfile.mkstemp(prefix=TEMP_LOG_PREFIX, suffix=".log", dir=temp_dir())
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        return path
+    except Exception:
+        logger.exception("Could not write an install log to the temp directory either")
+        return None
+
+class _Tee:
+    '''Writes to the original stream (if any) and to a buffer.'''
+    def __init__(self, stream: Any, buffer: io.StringIO) -> None:
+        self.stream, self.buffer = stream, buffer
+
+    def write(self, s: str) -> int:
+        self.buffer.write(s)
+        if self.stream is not None:
+            try:
+                self.stream.write(s)
+            except (OSError, ValueError):
+                pass
+        return len(s)
+
+    def flush(self) -> None:
+        if self.stream is not None:
+            try:
+                self.stream.flush()
+            except (OSError, ValueError):
+                pass
+
+def run_logged(action: str, argv: list[str], work: Callable[[], int], *, elevated: Callable[[], bool] = is_admin,
+               write_log: Callable[[str], str | None] = write_install_log,
+               now: Callable[[], datetime.datetime] = datetime.datetime.now) -> int:
+    '''Run `work` (install or uninstall). The elevated copy runs in a console of its own that closes when it exits,
+    so when it fails (nonzero, or an exception) what it printed and the traceback go to the install log. The exit
+    code is kept (1 for an exception).'''
+    if not elevated():
+        return work()
+    import traceback
+    buffer = io.StringIO()
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = _Tee(old_out, buffer), _Tee(old_err, buffer)
+    tb = ""
+    try:
+        rc = work()
+    except Exception:
+        tb = traceback.format_exc()
+        rc = 1
+    finally:
+        sys.stdout, sys.stderr = old_out, old_err
+    if rc != 0:
+        text = (f"==== {now().isoformat(timespec='seconds')} {action} failed (exit code {rc})\n"
+                f"command: {subprocess.list2cmdline(argv)}\n{buffer.getvalue()}{tb}\n")
+        path = write_log(text)
+        if tb:
+            print(tb, file=sys.stderr)
+        if path:
+            print(f"The {action} failed. Details: {path}", file=sys.stderr)
+    return rc
+
 def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,
             shell_execute: Callable[..., int] = _shell_execute, current_sid: Callable[[], str] = current_user_sid,
-            is_admin_member: Callable[[], bool] = user_in_administrators, onedir: Callable[[], bool] = is_onedir_build,
-            exe: str | None = None, program_data: str | None = None, program_files: str | None = None,
-            copyfile: Callable[[str, str], object] = shutil.copyfile, copytree: Callable[[str, str], object] = shutil.copytree,
+            is_admin_member: Callable[[], bool] = user_in_administrators, frozen: Callable[[], bool] = _is_frozen,
+            exe: str | None = None, script: str | None = None, program_data: str | None = None,
+            program_files: str | None = None, isdir: Callable[[str], bool] = os.path.isdir,
+            copytree: Callable[[str, str], object] = copy_tree_plain,
             mkdir: Callable[[str], None] = os.mkdir, rmtree: Callable[..., Any] = shutil.rmtree,
             defer_delete: Callable[[str], bool] = move_on_reboot,
             sleep: Callable[[float], None] = time.sleep, open_trusted: Callable[[str], Any] = open_trusted_dir,
@@ -720,8 +923,13 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             cef_debug: Callable[[str], object] = enable_cef_remote_debugging) -> int:
     exe = exe or sys.executable
     # Checked before elevating, so the message shows up in the console the user typed into
-    if not onedir():
-        print(onefile_install_message(), file=sys.stderr)
+    if frozen():
+        print(frozen_install_message(), file=sys.stderr)
+        return 1
+    script = script or running_main_script()
+    src = stage_root(exe, script, isdir=isdir)
+    if src is None or script is None:
+        print(not_a_stage_message(exe, script), file=sys.stderr)
         return 1
     if not is_admin():
         if not is_admin_member():
@@ -729,14 +937,12 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             return 1
         # Resolve the SID before elevating so the task targets this user even if UAC credentials belong to another admin.
         sid = for_sid or current_sid()
-        return _elevate(f"--install --for-sid {sid}", shell_execute, exe)
+        return _elevate(self_invocation(exe, script, our_runtime=True), ["--install", "--for-sid", sid], shell_execute)
 
     sid = for_sid or current_sid()
     root = os.path.join(program_data or known_program_data(), "decky")
     plugins_dst = os.path.join(root, "plugins")
     app_dir = program_dir(program_files)
-    installed_exe = os.path.join(app_dir, EXE_NAME)
-    legacy_exe = os.path.join(root, "services", EXE_NAME)
     schtasks = os.path.join(system_dir(), "schtasks.exe")
     remove_kw: dict[str, Any] = dict(rmtree=rmtree, defer_delete=defer_delete, reparse=reparse, rmdir=rmdir)
 
@@ -746,10 +952,10 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         return 1
 
     # Stop a running elevated loader first, it locks the installed files. Ending the task only ends its first
-    # process, so also stop everything else still running from the installed exe, or from the earlier layout's.
+    # process, so also stop everything else still running from the installed runtime, or from an earlier layout's exe.
     run([schtasks, "/End", "/TN", TASK_NAME], check=False)
-    kill_running(installed_exe)
-    kill_running(legacy_exe)
+    for image in program_images(app_dir, root):
+        kill_running(image)
 
     root_handle: Any = None
     try:
@@ -764,8 +970,9 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             print(f"Could not prepare {root}: {e}", file=sys.stderr)
             return 1
 
-        if not (os.path.exists(installed_exe) and _same_file(exe, installed_exe)):
-            if not stage_and_swap(exe, app_dir, copyfile=copyfile, copytree=copytree, mkdir=mkdir, rename=rename,
+        # Run from the installed copy itself: there is nothing to copy
+        if not _same_file(src, app_dir):
+            if not stage_and_swap(src, app_dir, copytree=copytree, mkdir=mkdir, rename=rename,
                                   sleep=sleep, discard=lambda p: remove_tree(p, **remove_kw)):
                 return 1
 
@@ -777,7 +984,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
         try:
             with os.fdopen(fd, "w", encoding="utf-16") as f: # utf-16 writes a BOM
-                f.write(build_task_xml(installed_exe, app_dir, sid))
+                f.write(build_task_xml(os.path.join(app_dir, RUNTIME_DIR_NAME, WINDOWED_INTERPRETER), app_dir, sid,
+                                       subprocess.list2cmdline([ISOLATE_FLAG, main_script_path(app_dir)])))
             run([schtasks, "/Create", "/TN", TASK_NAME, "/XML", xml_path, "/F"], check=True)
         finally:
             try:
@@ -797,7 +1005,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
     return 0
 
 def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,
-              shell_execute: Callable[..., int] = _shell_execute, exe: str | None = None,
+              shell_execute: Callable[..., int] = _shell_execute, exe: str | None = None, script: str | None = None,
+              frozen: Callable[[], bool] = _is_frozen,
               program_data: str | None = None, program_files: str | None = None, rmtree: Callable[..., Any] = shutil.rmtree,
               defer_delete: Callable[[str], bool] = move_on_reboot,
               kill_running: Callable[[str], list[int]] = terminate_image,
@@ -805,14 +1014,16 @@ def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any
               rmdir: Callable[[str], None] = os.rmdir, open_trusted: Callable[[str], Any] = open_trusted_dir,
               close_dir: Callable[[Any], None] = close_handle) -> int:
     if not is_admin():
-        return _elevate("--uninstall", shell_execute, exe or sys.executable)
+        exe = exe or sys.executable
+        script = None if frozen() else (script or running_main_script())
+        return _elevate(self_invocation(exe, script) if script else [exe], ["--uninstall"], shell_execute)
 
     root = os.path.join(program_data or known_program_data(), "decky")
     app_dir = program_dir(program_files)
     schtasks = os.path.join(system_dir(), "schtasks.exe")
     run([schtasks, "/End", "/TN", TASK_NAME], check=False)
-    kill_running(os.path.join(app_dir, EXE_NAME))
-    kill_running(os.path.join(root, "services", EXE_NAME))
+    for image in program_images(app_dir, root):
+        kill_running(image)
     run([schtasks, "/Delete", "/TN", TASK_NAME, "/F"], check=False)
 
     # Plugins and settings in the root are left alone

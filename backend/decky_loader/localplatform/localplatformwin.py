@@ -2,7 +2,7 @@ from ..enums import UserType
 import os, sys
 from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
-from .wininstall import EXE_NAME, known_program_data, program_dir
+from .wininstall import known_program_data, main_script_path, program_dir, running_main_script, runtime_interpreters
 from . import winportforward, winsshd
 
 _exit_code: int | None = None
@@ -72,11 +72,19 @@ def get_username() -> str:
 def _norm(path: str) -> str:
     return os.path.normcase(os.path.realpath(path))
 
+def is_installed_copy(executable: str, script: str | None, program_files: str | None = None) -> bool:
+    r'''True for the installed runtime running the installed program: `executable` is
+    `%ProgramFiles%\Decky Loader\python\python.exe` (or pythonw.exe) and `script` is `...\Decky Loader\app\main.py`.'''
+    app_dir = program_dir(program_files)
+    if script is None or _norm(script) != _norm(main_script_path(app_dir)):
+        return False
+    return any(_norm(executable) == _norm(i) for i in runtime_interpreters(app_dir))
+
 def installed_root(program_data: str | None = None, program_files: str | None = None) -> str | None:
-    r'''`%ProgramData%\decky` when running as the installed `%ProgramFiles%\Decky Loader\PluginLoader.exe`, else None.
+    r'''`%ProgramData%\decky` when this is the installed copy (see is_installed_copy), else None.
 
     Both folders come from the known-folder API, never from the user-controlled PROGRAMDATA/ProgramFiles env vars.'''
-    if _norm(sys.executable) == _norm(os.path.join(program_dir(program_files), EXE_NAME)):
+    if is_installed_copy(sys.executable, running_main_script(), program_files):
         return os.path.join(program_data or known_program_data(), "decky")
     return None
 
