@@ -34,11 +34,19 @@ def get_ssl_context():
 def get_csrf_token():
     return csrf_token
 
+def is_public_status(request: Request) -> bool: # pyright: ignore [reportUnknownParameterType]
+    '''Read-only status other local apps may poll without the token (see PluginManager.get_frontend_status).'''
+    # The raw path too: a percent-encoded spelling (e.g. /status%2Ffrontend) must not be exempt
+    url = request.rel_url # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+    return str(url.raw_path) == "/status/frontend" and str(url.path) == "/status/frontend" # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+
 @middleware
 async def csrf_middleware(request: Request, handler: Handler):
+    public = is_public_status(request) # pyright: ignore [reportUnknownArgumentType]
     if str(request.method) == "OPTIONS" or \
         request.headers.get('X-Decky-Auth') == csrf_token or \
         str(request.rel_url) == "/auth/token" or \
+        public or \
         str(request.rel_url).startswith("/plugins/load_main/") or \
         str(request.rel_url).startswith("/static/") or \
         str(request.rel_url).startswith("/steam_resource/") or \

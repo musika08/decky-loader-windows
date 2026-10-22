@@ -29,6 +29,34 @@ ATTACH_PARENT_PROCESS = -1
 # PyInstaller's default onedir contents directory (EXE(contents_directory=...), "_internal" since PyInstaller 6)
 ONEDIR_CONTENTS = "_internal"
 
+# Same as the loader's (main.py LOG_FORMAT)
+LOG_FORMAT = "[%(module)s][%(levelname)s]: %(message)s"
+SUPERVISOR_LOG = "supervisor.log"
+
+def _setup_file_logging(filename: str, fmt: str) -> str | None:
+    from .winlogging import setup_file_logging
+    return setup_file_logging(filename, fmt)
+
+def _log_level() -> int:
+    from .localplatform import get_log_level
+    return get_log_level()
+
+def setup_logging(basic_config: Callable[..., None] = logging.basicConfig, log_level: Callable[[], int] = _log_level,
+                  file_logging: Callable[[str, str], str | None] = _setup_file_logging) -> str | None:
+    '''Log like the loader does: to the console, if there is one, and to supervisor.log next to the loader's log.'''
+    try:
+        level, invalid = log_level(), False
+    except KeyError:
+        # An invalid LOG_LEVEL must not stop the supervisor (the loader still fails on it and gets respawned)
+        level, invalid = logging.INFO, True
+    basic_config(level=level, format=LOG_FORMAT)
+    if invalid:
+        logger.warning("Invalid LOG_LEVEL %r, using INFO", os.getenv("LOG_LEVEL"))
+    path = file_logging(SUPERVISOR_LOG, LOG_FORMAT)
+    if path:
+        logger.info("Logging to %s", path)
+    return path
+
 def is_onedir_build() -> bool:
     r'''True for a PyInstaller onedir build: frozen, with `sys._MEIPASS` being the `_internal` folder next to the exe.
 
@@ -213,6 +241,7 @@ def run_supervisor(spawn: Callable[[list[str]], int], sleep: Callable[[float], N
         started = clock()
         code = spawn(self_command() + ["--loader"])
         ran_for = clock() - started
+        logger.info("The loader exited with code %s after %.0f seconds", code, ran_for)
 
         # A plain 0 is a clean shutdown the loader did not ask us to undo (e.g. Ctrl+C), so do not respawn.
         if code == EXIT_STOP or code == 0:

@@ -627,7 +627,7 @@ def _uninstall(tmp_path: Path, **over: Any) -> int:
     kw: dict[str, Any] = dict(is_admin=lambda: True, run=Recorder(), kill_running=lambda exe: list[int](),
                               shell_execute=lambda *a: None, program_data=str(tmp_path / "ProgramData"),
                               program_files=str(tmp_path / "Program Files"), defer_delete=lambda p: True,
-                              system_dir=lambda: r"C:\Sys32")
+                              system_dir=lambda: r"C:\Sys32", open_trusted=lambda p: p, close_dir=lambda h: None)
     kw.update(over)
     return wi.uninstall(**kw)
 
@@ -953,3 +953,144 @@ def test_own_ancestry_stops_at_cycles_and_unknown_parents():
 def test_own_ancestry_from_a_real_snapshot():
     chain = wi.own_ancestry(os.getpid(), wi.process_snapshot())
     assert {os.getpid(), os.getppid()} <= chain
+
+
+# Legacy layout removal only after a successful swap; staging and leftovers
+
+def test_install_keeps_the_legacy_layout_when_the_swap_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    src_exe = _fake_env(tmp_path)
+    _, root = _layout(tmp_path)
+    dirs = Dirs()
+    dirs.trusted.update([str(root), str(root / "plugins")])
+
+    def rename(src: str, dst: str) -> None:
+        if os.path.basename(src).startswith("Decky Loader.installing-"):
+            raise OSError("disk on fire")
+        os.rename(src, dst)
+
+    assert _install(tmp_path, src_exe, dirs=dirs, rename=rename) == 1
+    # The earlier layout still works: its exe and launcher are untouched
+    assert (root / "services" / "PluginLoader.exe").is_file() and (root / "tmp").is_dir()
+
+
+def test_install_removes_the_legacy_layout_only_after_the_swap(tmp_path: Path):
+    src_exe = _fake_env(tmp_path)
+    _, root = _layout(tmp_path)
+    dirs = Dirs()
+    dirs.trusted.update([str(root), str(root / "plugins")])
+    seen: list[bool] = []
+
+    def rename(src: str, dst: str) -> None:
+        seen.append((root / "services").exists())
+        os.rename(src, dst)
+
+    assert _install(tmp_path, src_exe, dirs=dirs, rename=rename) == 0
+    assert seen and all(seen)
+    assert sorted(os.listdir(root)) == ["plugins", "settings"]
+
+
+def test_stage_and_swap_does_not_discard_a_staging_dir_it_could_not_create(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    src_exe = _fake_env(tmp_path)
+    app = _app_dir(tmp_path)
+    discarded: list[str] = []
+
+    def mkdir(p: str) -> None:
+        raise FileExistsError(p)
+
+    ok = wi.stage_and_swap(str(src_exe), str(app), mkdir=mkdir, discard=lambda p: discarded.append(p) or list[str](),
+                           listdir=lambda p: list[str](), token=lambda: "t", sleep=lambda s: None)
+    assert ok is False and discarded == []
+    assert "Decky Loader.installing-t" in capsys.readouterr().err
+
+
+def test_stage_and_swap_still_discards_its_own_half_staged_copy(tmp_path: Path):
+    src_exe = _fake_env(tmp_path)
+    app = _app_dir(tmp_path)
+
+    def broken(src: str, dst: str) -> None:
+        raise OSError("disk full")
+
+    assert wi.stage_and_swap(str(src_exe), str(app), copytree=broken, token=lambda: "t", sleep=lambda s: None) is False
+    assert os.listdir(tmp_path / "Program Files") == []
+
+
+def test_stage_and_swap_cleans_copies_left_by_earlier_installs(tmp_path: Path):
+    src_exe = _fake_env(tmp_path)
+    pf = tmp_path / "Program Files"
+    app = _old_install(tmp_path)
+    for leftover in ("Decky Loader.old-aaa", "Decky Loader.installing-bbb", "decky loader.OLD-ccc"):
+        (pf / leftover / "_internal").mkdir(parents=True)
+        (pf / leftover / "PluginLoader.exe").write_bytes(b"stale")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "victim.txt").write_text("v")
+    _junction(pf / "Decky Loader.old-link", elsewhere)
+    for unrelated in ("Decky Loader Extra", "Other.old-x", "Decky Loader.untrusted-1"):
+        (pf / unrelated).mkdir()
+
+    assert wi.stage_and_swap(str(src_exe), str(app), token=lambda: "t", sleep=lambda s: None) is True
+    assert sorted(os.listdir(pf)) == ["Decky Loader", "Decky Loader Extra", "Decky Loader.untrusted-1", "Other.old-x"]
+    assert (elsewhere / "victim.txt").read_text() == "v"  # the link was removed, not followed
+    assert (app / "PluginLoader.exe").read_bytes() == b"exe"
+
+
+def test_stale_copy_cleanup_is_best_effort(tmp_path: Path, caplog: pytest.LogCaptureFixture):
+    src_exe = _fake_env(tmp_path)
+    pf = tmp_path / "Program Files"
+    (pf / "Decky Loader.old-aaa").mkdir()
+    app = _app_dir(tmp_path)
+
+    def discard(p: str) -> list[str]:
+        if p.endswith("old-aaa"):
+            return [p]
+        return wi.remove_tree(p)
+
+    assert wi.stage_and_swap(str(src_exe), str(app), discard=discard, token=lambda: "t", sleep=lambda s: None) is True
+    assert "Decky Loader.old-aaa" in caplog.text
+    assert (app / "PluginLoader.exe").read_bytes() == b"exe"
+
+
+def test_stale_copies_listing_failure_is_ignored():
+    def broken(p: str) -> list[str]:
+        raise OSError("gone")
+    assert wi.stale_copies(APP_DIR, listdir=broken) == []
+    assert wi.stale_copies(APP_DIR, listdir=lambda p: ["Decky Loader.old-1", "Decky Loader", "Decky Loader.installing-2"]) == [
+        r"C:\Program Files\Decky Loader.old-1", r"C:\Program Files\Decky Loader.installing-2"]
+
+
+# uninstall validates the ProgramData root before touching the legacy layout
+
+def test_uninstall_leaves_an_untrusted_root_alone(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    app, root = _layout(tmp_path)
+    opened: list[str] = []
+    rc = _uninstall(tmp_path, open_trusted=lambda p: opened.append(p) or None)
+    assert rc == 0 and opened == [str(root)]
+    assert not app.exists()  # the program dir is still removed
+    assert sorted(os.listdir(root)) == ["plugins", "services", "settings", "tmp"]
+    assert "not owned and protected" in capsys.readouterr().err
+
+
+def test_uninstall_holds_the_trusted_root_open_while_removing_legacy_dirs(tmp_path: Path):
+    _, root = _layout(tmp_path)
+    events: list[str] = []
+
+    def rmtree(path: str, **kw: Any) -> None:
+        events.append("rmtree " + os.path.basename(path))
+        shutil.rmtree(path)
+
+    rc = _uninstall(tmp_path, rmtree=rmtree, open_trusted=lambda p: events.append("open") or p,
+                    close_dir=lambda h: events.append("close"))
+    assert rc == 0
+    assert events == ["rmtree Decky Loader", "open", "rmtree services", "rmtree tmp", "close"]
+    assert sorted(os.listdir(root)) == ["plugins", "settings"]
+
+
+def test_uninstall_with_the_real_check_refuses_a_user_made_root(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    # tmp_path is owned by the current user with an inherited DACL, so the real check must not trust it
+    _, root = _layout(tmp_path)
+    kw: dict[str, Any] = dict(is_admin=lambda: True, run=Recorder(), kill_running=lambda exe: list[int](),
+                              shell_execute=lambda *a: None, program_data=str(tmp_path / "ProgramData"),
+                              program_files=str(tmp_path / "Program Files"), defer_delete=lambda p: True,
+                              system_dir=lambda: r"C:\Sys32")
+    assert wi.uninstall(**kw) == 0
+    assert (root / "services" / "PluginLoader.exe").is_file()
