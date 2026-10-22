@@ -3,6 +3,7 @@ import os, sys
 from aiohttp.web_runner import GracefulExit # pyright: ignore [reportMissingImports, reportUnknownVariableType]
 from .winsupervisor import EXIT_RESTART, EXIT_STOP
 from .wininstall import EXE_NAME, known_program_data, program_dir
+from . import winportforward, winsshd
 
 _exit_code: int | None = None
 
@@ -34,15 +35,26 @@ def setuid(user : UserType = UserType.HOST_USER):
     pass # Stubbed
 
 async def service_active(service_name : str) -> bool:
+    if service_name == winportforward.UNIT:
+        return winportforward.forward.active
     return True # Stubbed
 
 async def service_stop(service_name : str) -> bool:
     if service_name == "plugin_loader":
         request_exit(EXIT_STOP)
+    if service_name == winportforward.UNIT:
+        return await winportforward.forward.stop()
+    if service_name == winsshd.UNIT:
+        return await winsshd.set_sshd_running(False) is None
 
     return True # Stubbed
 
 async def service_start(service_name : str) -> bool:
+    # The CEF debugger port forward runs inside the loader; sshd is the OpenSSH Server service, if installed
+    if service_name == winportforward.UNIT:
+        return await winportforward.forward.start()
+    if service_name == winsshd.UNIT:
+        return await winsshd.set_sshd_running(True) is None
     return True # Stubbed
 
 async def service_restart(service_name : str, block : bool = True) -> bool:
@@ -96,7 +108,10 @@ def get_unprivileged_user() -> str:
     return os.getenv("UNPRIVILEGED_USER", os.getlogin())
 
 async def restart_webhelper() -> bool:
-    return True # Stubbed
+    '''End steamwebhelper.exe in this session; Steam starts it again. Ending processes blocks, so it runs off the loop.'''
+    import asyncio
+    from . import winwebhelper
+    return await asyncio.to_thread(winwebhelper.restart_webhelper)
 
 async def close_cef_socket():
     return # Stubbed

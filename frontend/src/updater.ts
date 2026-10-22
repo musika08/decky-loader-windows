@@ -24,6 +24,9 @@ export interface VerInfo {
   all: RemoteVerInfo[] | null;
   updatable: boolean;
   supported: boolean;
+  // false where the in-app updater must not be used (Windows installed mode); absent from older backends
+  updater_available?: boolean;
+  updater_unavailable_reason?: string | null;
   platform?: string; // backend sys.platform
 }
 

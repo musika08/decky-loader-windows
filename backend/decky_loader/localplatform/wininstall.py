@@ -586,6 +586,125 @@ def stage_and_swap(src_exe: str, app_dir: str, *, copyfile: Callable[[str, str],
 
 NOT_MIGRATED_NOTICE =r"Plugins in %USERPROFILE%\homebrew\plugins are not migrated. Reinstall them from the Decky store."
 
+# Steam's CEF only opens its DevTools port (127.0.0.1:8080), which Decky injects through, while this file exists
+CEF_DEBUG_MARKER = ".cef-enable-remote-debugging"
+
+def read_registry_value(hive: int, key: str, value: str) -> str | None:
+    import winreg
+    try:
+        with winreg.OpenKey(hive, key) as k:
+            return str(winreg.QueryValueEx(k, value)[0])
+    except OSError:
+        return None
+
+def steam_dir_for_sid(sid: str, *, read: Callable[[int, str, str], str | None] = read_registry_value,
+                      isfile: Callable[[str], bool] = os.path.isfile) -> str | None:
+    r'''The Steam install of the user `sid`: their own `SteamPath` (from `HKEY_USERS\<sid>`, since this runs elevated
+    and HKCU may belong to whoever approved the UAC prompt), else the machine-wide InstallPath. Must hold steam.exe.'''
+    import winreg
+    candidates: list[tuple[int, str, str]] = [
+        (winreg.HKEY_USERS, sid + r"\Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ]
+    for hive, key, value in candidates:
+        raw = read(hive, key, value)
+        if not raw:
+            continue
+        path = os.path.normpath(raw)
+        if os.path.isabs(path) and isfile(os.path.join(path, "steam.exe")):
+            return path
+    return None
+
+def _path_has_reparse_point(path: str, reparse: Callable[[str], bool]) -> bool:
+    '''True if `path` or any directory above it is a junction or symlink.'''
+    while True:
+        if reparse(path):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+def _create_new_empty(path: str) -> None:
+    # O_EXCL is CREATE_NEW: fails if anything, a link included, already has the name; nothing is followed or overwritten
+    os.close(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)))
+
+def final_path_of_handle(handle: Any) -> str:
+    '''The path the OS resolved for an open handle, with every link along the way followed (extended-length form).'''
+    from ctypes import wintypes
+    k = _kernel32()
+    k.GetFinalPathNameByHandleW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    k.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+    buf = ctypes.create_unicode_buffer(32768)
+    n = k.GetFinalPathNameByHandleW(handle, buf, len(buf), 0)
+    if n == 0 or n >= len(buf):
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    return buf.value
+
+GENERIC_READ = 0x80000000
+
+def final_path_of_file(path: str) -> str:
+    '''Final path of the file at `path`, opened without following a final reparse point.'''
+    k = _kernel32()
+    handle = k.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING,
+                           FILE_FLAG_OPEN_REPARSE_POINT, None)
+    if handle is None or handle == INVALID_HANDLE_VALUE:
+        raise ctypes.WinError(ctypes.get_last_error()) # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType]
+    try:
+        return final_path_of_handle(handle)
+    finally:
+        k.CloseHandle(handle)
+
+def enable_cef_remote_debugging(sid: str, *, steam_dir: Callable[[str], str | None] = steam_dir_for_sid,
+                                reparse: Callable[[str], bool] = is_reparse_point, opener: Callable[[str], Any] = open_dir,
+                                query: Callable[[Any], tuple[int, str, int]] = query_dir,
+                                closer: Callable[[Any], None] = close_handle,
+                                create: Callable[[str], None] = _create_new_empty,
+                                folder_path: Callable[[Any], str] = final_path_of_handle,
+                                file_path: Callable[[str], str] = final_path_of_file,
+                                remove: Callable[[str], None] = os.remove) -> str | None:
+    r'''Create the empty `<Steam>\.cef-enable-remote-debugging` if missing, so Steam's CEF debugger (which Decky needs)
+    is on. Best effort: prints a note instead of failing the install. Never follows a reparse point: the Steam folder
+    is user-writable and this runs elevated. Returns the marker path if it was created.'''
+    try:
+        steam = steam_dir(sid)
+        if steam is None:
+            print(f"Steam was not found, so {CEF_DEBUG_MARKER} was not created. Decky needs it: create an empty file "
+                  f"with that name in the Steam folder.")
+            return None
+        marker = os.path.join(steam, CEF_DEBUG_MARKER)
+        if os.path.lexists(marker):
+            return None
+        if _path_has_reparse_point(steam, reparse):
+            print(f"Not creating {marker}: the Steam folder path contains a junction or symbolic link. "
+                  f"Create the empty file yourself if Decky does not load.")
+            return None
+        # Held without share-delete while the file is created, so the folder (and so its path) cannot be swapped
+        handle = opener(steam)
+        try:
+            attrs, _owner, _control = query(handle)
+            if not attrs & FILE_ATTRIBUTE_DIRECTORY or attrs & FILE_ATTRIBUTE_REPARSE_POINT:
+                print(f"Not creating {marker}: {steam} is not a plain folder.")
+                return None
+            create(marker)
+            # Belt and braces: the new file must really be inside the folder we hold, else delete what we made
+            created = file_path(marker)
+            if os.path.normcase(os.path.dirname(created)) != os.path.normcase(folder_path(handle)):
+                remove(created)
+                print(f"Not creating {marker}: it resolved to {created}, outside {steam}. Removed it.")
+                return None
+        finally:
+            closer(handle)
+        print(f"Created {marker} (Steam's CEF debugger, which Decky uses). It takes effect the next time Steam starts.")
+        return marker
+    except FileExistsError:
+        return None
+    except Exception as e:
+        print(f"Could not create {CEF_DEBUG_MARKER} in the Steam folder: {e}. Decky needs it: create an empty file "
+              f"with that name in the Steam folder.")
+        return None
+
 def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any] = subprocess.run,
             shell_execute: Callable[..., int] = _shell_execute, current_sid: Callable[[], str] = current_user_sid,
             is_admin_member: Callable[[], bool] = user_in_administrators, onedir: Callable[[], bool] = is_onedir_build,
@@ -597,7 +716,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             close_dir: Callable[[Any], None] = close_handle,
             create_dir: Callable[[str], None] = create_secure_dir, rename: Callable[[str, str], None] = os.rename,
             rmdir: Callable[[str], None] = os.rmdir, reparse: Callable[[str], bool] = is_reparse_point,
-            system_dir: Callable[[], str] = system_directory, kill_running: Callable[[str], list[int]] = terminate_image) -> int:
+            system_dir: Callable[[], str] = system_directory, kill_running: Callable[[str], list[int]] = terminate_image,
+            cef_debug: Callable[[str], object] = enable_cef_remote_debugging) -> int:
     exe = exe or sys.executable
     # Checked before elevating, so the message shows up in the console the user typed into
     if not onedir():
@@ -671,6 +791,8 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
         if root_handle is not None:
             close_dir(root_handle)
 
+    # For the user the task runs as. Uninstall leaves the file in place.
+    cef_debug(sid)
     print(NOT_MIGRATED_NOTICE)
     return 0
 

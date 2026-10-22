@@ -99,13 +99,13 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 1. Download the installer zip for your machine from the [releases page](https://github.com/SteamDeckHomebrew/decky-loader/releases): `PluginLoader-win-installer.zip` (x86_64) or `PluginLoader-win-arm64-installer.zip` (ARM). The single-file `.exe` builds are for portable mode and cannot be installed.
 1. Extract the zip. It contains a `PluginLoader` folder with `PluginLoader.exe` and an `_internal` folder next to it.
 1. If you were running a portable copy of Decky, close it first. Both use port 1337, so the installed copy cannot start while it runs.
-1. From any terminal, run `PluginLoader.exe --install` from the extracted folder. Windows will ask for administrator approval if needed. This copies `PluginLoader.exe` and its `_internal` folder to `%ProgramFiles%\Decky Loader` and registers a scheduled task named `Decky Loader`, which starts `%ProgramFiles%\Decky Loader\PluginLoader.exe` directly at every logon, without a window, and starts it right away. You can delete the extracted folder afterwards.
+1. From any terminal, run `PluginLoader.exe --install` from the extracted folder. Windows will ask for administrator approval if needed. This copies `PluginLoader.exe` and its `_internal` folder to `%ProgramFiles%\Decky Loader` and registers a scheduled task named `Decky Loader`, which starts `%ProgramFiles%\Decky Loader\PluginLoader.exe` directly at every logon, without a window, and starts it right away. It also creates the empty file `.cef-enable-remote-debugging` in your Steam folder if it is missing, which turns on Steam's debugger that Decky connects to (restart Steam once for it to take effect). Uninstalling leaves that file in place. You can delete the extracted folder afterwards.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
 1. Install plugins from Decky's built-in store.
 
 **Restarting**
 
-Restarting Steam or closing Big Picture does not stop Decky. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
+Restarting Steam or closing Big Picture does not stop Decky. If Decky itself restarts while Steam still shows it (for example after an update), it restarts Steam's webhelper, so the Steam interface reloads briefly. If Decky was stopped, for example with the shutdown option in its settings, start it again without logging out by running `schtasks /Run /TN "Decky Loader"`.
 
 **Where things live**
 
@@ -113,7 +113,11 @@ The program is in `%ProgramFiles%\Decky Loader`. Plugins and Decky's settings ar
 
 **Updating**
 
-Decky's built-in updater is not available in installed mode. To update, download the new installer zip, extract it, and run `PluginLoader.exe --install` from it again. This stops the running Decky, replaces `%ProgramFiles%\Decky Loader`, and starts the new version. Plugins and settings are kept.
+Decky's built-in updater is not available in installed mode; its Updates page says so instead of offering an update. To update, download the new installer zip, extract it, and run `PluginLoader.exe --install` from it again. This stops the running Decky, replaces `%ProgramFiles%\Decky Loader`, and starts the new version. Plugins and settings are kept.
+
+**Developer options**
+
+The Developer settings' remote debugging toggle forwards port 8081 on all network interfaces to Steam's debugger, as on Linux, so anyone on your network can reach it without authentication. It is off by default. Decky does not change firewall rules, so Windows may block or ask about incoming connections. The crash screen's "enable SSH" option starts the OpenSSH Server Windows service (`sshd`) if it is already installed (Settings > System > Optional features); Decky never installs it.
 
 **Upgrading from an older Windows build**
 

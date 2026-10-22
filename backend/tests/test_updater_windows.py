@@ -99,9 +99,14 @@ def test_windows_update_extracts_zip_member(tmp_path: Any, monkeypatch: Any):
 
 def test_is_supported_only_when_supervised(monkeypatch: Any):
     monkeypatch.delenv("DECKY_SUPERVISED", raising=False)
-    assert _updater().isSupported is False
+    u = _updater()
+    assert u.isSupported is False
+    assert u.updaterAvailable is False
+    assert "supervisor" in (u.updaterUnavailableReason or "")
     monkeypatch.setenv("DECKY_SUPERVISED", "1")
-    assert _updater().isSupported is True
+    u = _updater()
+    assert u.isSupported is True
+    assert u.updaterAvailable is True
 
 
 def test_dropped_connection_leaves_no_new_file(tmp_path: Any, monkeypatch: Any):
@@ -163,10 +168,21 @@ def _installed_layout(tmp_path: Path, monkeypatch: Any) -> Path:
     return running
 
 
-def test_not_supported_in_installed_mode(tmp_path: Path, monkeypatch: Any):
+@pytest.mark.parametrize("supervised", ["1", None])
+def test_installed_mode_is_supported_without_the_in_app_updater(tmp_path: Path, monkeypatch: Any, supervised: str | None):
+    # No "Unsupported Installation" toast in installed mode; only the in-app updater is off, with what to do instead
     _installed_layout(tmp_path, monkeypatch)
-    monkeypatch.setenv("DECKY_SUPERVISED", "1")
-    assert _updater().isSupported is False
+    if supervised is None:
+        monkeypatch.delenv("DECKY_SUPERVISED", raising=False)
+    else:
+        monkeypatch.setenv("DECKY_SUPERVISED", supervised)
+    u = _updater()
+    assert u.isSupported is True
+    assert u.updaterAvailable is False
+    info = asyncio.run(u.get_version_info())
+    assert info["supported"] is True
+    assert info["updater_available"] is False
+    assert r"tools\update-decky.ps1" in str(info["updater_unavailable_reason"])
 
 
 def test_not_supported_for_a_onedir_build(tmp_path: Any, monkeypatch: Any):
@@ -175,7 +191,10 @@ def test_not_supported_for_a_onedir_build(tmp_path: Any, monkeypatch: Any):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(running.parent / "_internal"), raising=False)
     monkeypatch.setenv("DECKY_SUPERVISED", "1")
-    assert _updater().isSupported is False
+    u = _updater()
+    assert u.isSupported is False
+    assert u.updaterAvailable is False
+    assert "onedir" in (u.updaterUnavailableReason or "")
 
 
 def test_portable_onefile_still_supported(tmp_path: Any, monkeypatch: Any):
@@ -183,7 +202,10 @@ def test_portable_onefile_still_supported(tmp_path: Any, monkeypatch: Any):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "Temp" / "_MEI123"), raising=False)
     monkeypatch.setenv("DECKY_SUPERVISED", "1")
-    assert _updater().isSupported is True
+    u = _updater()
+    assert u.isSupported is True
+    assert u.updaterAvailable is True
+    assert u.updaterUnavailableReason is None
     _run(PAYLOAD, is_zip=False)
     assert (running.parent / "PluginLoader-win.exe.new").read_bytes() == PAYLOAD
 
