@@ -10,22 +10,26 @@ This module adds what can be faked cheaply inside the plugin process:
 - unelevated hosts only: cwd on the system drive, `<SystemDrive>\tmp`, and
   `<SystemDrive>\home\<user>` and `\home\deck` junctions to the user profile
 - a bin dir on PATH with a no-op `chmod.cmd`
+- list-form subprocess calls (subprocess and asyncio) find a bare program name that CreateProcess
+  misses: `.exe`/`.com` on PATH, or a `.cmd`/`.bat` from that bin dir only, so `["chmod", ...]` works
 
 Not shimmed: /proc, /sys, /dev, systemctl, dbus, flatpak, pty/termios.
 Root plugins must not use /tmp (use DECKY_PLUGIN_RUNTIME_DIR): <SystemDrive>\tmp may be user-owned.
 Everything is best effort; a failing shim is logged and never stops a plugin from loading.
 """
+import ctypes
 import errno
 import msvcrt
 import os
 import stat
+import subprocess
 import sys
 import threading
 import time
 import types
 import _winapi  # pyright: ignore [reportMissingImports]
 from logging import getLogger
-from typing import Any, Callable, MutableMapping, NamedTuple
+from typing import Any, Callable, Mapping, MutableMapping, NamedTuple, Sequence, cast
 
 _log = getLogger("winplugincompat")
 
@@ -307,6 +311,122 @@ def prepend_shim_bin(env: MutableMapping[str, str], bin_dir: str = SHIM_BIN_DIR)
     env["PATH"] = bin_dir + (os.pathsep + path if path else "")
     return True
 
+# --- program lookup for list-form calls ------------------------------------------------
+
+# CreateProcess only tries `<name>.exe` for a bare program name, so subprocess.run(["chmod", ...])
+# and asyncio.create_subprocess_exec("chmod", ...) miss chmod.cmd, which shell=True finds.
+_ANYWHERE_EXTS = (".com", ".exe")
+# cmd.exe parses a batch file's command line again, and list2cmdline's quoting doesn't protect
+# against that (BatBadBut). Batch files are only run from our read-only bin dir, and only with
+# arguments free of characters cmd.exe treats specially.
+_SHIM_EXTS = (".bat", ".cmd")
+_CMD_SPECIAL = frozenset('"%!^&|<>()')
+_NAME_INVALID = frozenset('/\\:*?"<>|')
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+def _found_as_exe(name: str) -> bool:
+    '''Whether CreateProcess finds `name` itself: SearchPathW without a path uses its search
+    order (application dir, current dir, system dirs, PATH) and also appends only .exe.'''
+    buf = ctypes.create_unicode_buffer(32768)
+    found = ctypes.windll.kernel32.SearchPathW(None, name, ".exe", len(buf), buf, None)  # pyright: ignore [reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
+    return bool(found)
+
+
+def _env_value(env: Mapping[Any, Any] | None, key: str) -> str | None:
+    if env is None:
+        env = os.environ
+    for k, v in env.items():
+        if isinstance(k, str) and k.upper() == key and isinstance(v, str):
+            return v
+    return None
+
+
+def _bare_name(arg: Any) -> str | None:
+    '''A program name without directory or extension, as CreateProcess would append .exe to.'''
+    if not isinstance(arg, (str, bytes, os.PathLike)):
+        return None
+    name = os.fsdecode(cast("str | bytes | os.PathLike[str]", arg))
+    if not name or name != name.strip() or name.endswith("."):
+        return None
+    if any(c in _NAME_INVALID or ord(c) < 32 for c in name) or os.path.splitext(name)[1]:
+        return None
+    return name
+
+
+def _cmd_safe(args: Sequence[Any]) -> bool:
+    for arg in args:
+        try:
+            text = os.fsdecode(arg)
+        except Exception:
+            return False
+        if any(c in _CMD_SPECIAL or ord(c) < 32 for c in text):
+            return False
+    return True
+
+
+def find_program(name: str, env: Mapping[Any, Any] | None, bin_dir: str = SHIM_BIN_DIR) -> str | None:
+    '''Searches the drive or UNC PATH entries of `env` (os.environ if None) in PATHEXT order, like
+    shutil.which, but only for .exe/.com files, plus .bat/.cmd files inside `bin_dir`.'''
+    pathext = [e.strip().lower() for e in (_env_value(env, "PATHEXT") or _DEFAULT_PATHEXT).split(os.pathsep)]
+    shim_dir = os.path.normcase(os.path.normpath(bin_dir))
+    for entry in (_env_value(env, "PATH") or "").split(os.pathsep):
+        entry = entry.strip().strip('"')
+        # Drive or UNC paths only: before Python 3.13 isabs accepts rooted Linux-style entries
+        # like /usr/bin, which resolve against the current drive
+        if not os.path.splitdrive(entry)[0] or not os.path.isabs(entry):
+            continue
+        in_shim_dir = os.path.normcase(os.path.normpath(entry)) == shim_dir
+        for ext in pathext:
+            if ext in _ANYWHERE_EXTS or (in_shim_dir and ext in _SHIM_EXTS):
+                candidate = os.path.join(entry, name + ext)
+                if os.path.isfile(candidate):
+                    return candidate
+    return None
+
+
+def resolve_argv(args: Any, env: Mapping[Any, Any] | None, bin_dir: str = SHIM_BIN_DIR) -> Any:
+    '''Returns `args` with a bare argv[0] that CreateProcess won't find replaced by a full path,
+    or `args` unchanged. Only lists and tuples are looked at (a tuple comes back as a list).'''
+    if not isinstance(args, (list, tuple)):
+        return args
+    argv: list[Any] = list(cast("Sequence[Any]", args))
+    try:
+        name = _bare_name(argv[0]) if argv else None
+        if name is None or _found_as_exe(name):
+            return argv
+        program = find_program(name, env, bin_dir)
+        if program is None:
+            return argv
+        if os.path.splitext(program)[1].lower() in _SHIM_EXTS and not _cmd_safe([program, *argv[1:]]):
+            _log.warning(f"not running {program} for {name!r}: its arguments contain characters cmd.exe would interpret")
+            return argv
+        _log.debug(f"resolved {name!r} to {program}")
+        return [program, *argv[1:]]
+    except Exception as e:
+        _log.warning(f"program lookup for {argv[0]!r} failed: {e}")
+        return argv
+
+
+def install_program_lookup(popen: Any = subprocess.Popen, bin_dir: str = SHIM_BIN_DIR) -> bool:
+    '''Wraps Popen._execute_child, which every subprocess call and asyncio's Windows subprocess
+    transport (asyncio.windows_utils.Popen subclasses subprocess.Popen) go through. Only list-form
+    calls without shell=True or executable= are touched. Returns False if already installed.'''
+    original = popen._execute_child
+    if getattr(original, "_decky_program_lookup", False):
+        return False
+
+    def _execute_child(self: Any, args: Any, executable: Any, preexec_fn: Any, close_fds: Any, pass_fds: Any,
+                       cwd: Any, env: Any, startupinfo: Any, creationflags: Any, shell: Any, *rest: Any) -> Any:
+        if executable is None and not shell:
+            args = resolve_argv(args, env, bin_dir)
+        return original(self, args, executable, preexec_fn, close_fds, pass_fds, cwd, env, startupinfo,
+                        creationflags, shell, *rest)
+
+    setattr(_execute_child, "_decky_program_lookup", True)
+    popen._execute_child = _execute_child
+    return True
+
 # --- entry point -----------------------------------------------------------------------
 
 def _is_elevated() -> bool:
@@ -344,6 +464,7 @@ def install_plugin_compat(elevated: bool | None = None, env: MutableMapping[str,
     _best_effort("shim fcntl/pwd/grp", _modules)
     _best_effort("add os.getuid", lambda: install_os_ids(uid))
     _best_effort("add the shim bin dir to PATH", lambda: prepend_shim_bin(env))
+    _best_effort("set up program lookup", install_program_lookup)
     if elevated:
         # The drive root and profile are user-writable; an admin process must not create or
         # follow things there on a plugin's behalf (see winsteamlinks)
