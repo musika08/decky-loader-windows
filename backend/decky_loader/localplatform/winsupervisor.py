@@ -44,7 +44,14 @@ def _log_level() -> int:
 def setup_logging(basic_config: Callable[..., None] = logging.basicConfig, log_level: Callable[[], int] = _log_level,
                   file_logging: Callable[[str, str], str | None] = _setup_file_logging) -> str | None:
     '''Log like the loader does: to the console, if there is one, and to supervisor.log next to the loader's log.'''
-    basic_config(level=log_level(), format=LOG_FORMAT)
+    try:
+        level, invalid = log_level(), False
+    except KeyError:
+        # An invalid LOG_LEVEL must not stop the supervisor (the loader still fails on it and gets respawned)
+        level, invalid = logging.INFO, True
+    basic_config(level=level, format=LOG_FORMAT)
+    if invalid:
+        logger.warning("Invalid LOG_LEVEL %r, using INFO", os.getenv("LOG_LEVEL"))
     path = file_logging(SUPERVISOR_LOG, LOG_FORMAT)
     if path:
         logger.info("Logging to %s", path)

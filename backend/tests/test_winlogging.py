@@ -199,3 +199,21 @@ def test_supervisor_logging_set_up_before_the_lock(tmp_path: Path):
     # backend/main.py: the supervisor branch sets up logging first, so "another supervisor is running" is logged too
     src = (Path(__file__).resolve().parent.parent / "main.py").read_text(encoding="utf-8")
     assert src.index("winsupervisor.setup_logging()") < src.index("winsupervisor.acquire_supervisor_lock()")
+
+
+def test_supervisor_survives_an_invalid_log_level(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture):
+    monkeypatch.setenv("LOG_LEVEL", "VERBOSE")
+    calls: list[Any] = []
+    with caplog.at_level(logging.WARNING, logger="winsupervisor"):
+        path = ws.setup_logging(basic_config=lambda **kw: calls.append(kw),
+                                file_logging=lambda name, fmt: calls.append((name, fmt)) or None)
+    assert path is None
+    assert calls == [dict(level=logging.INFO, format=ws.LOG_FORMAT), ("supervisor.log", ws.LOG_FORMAT)]
+    assert "Invalid LOG_LEVEL 'VERBOSE', using INFO" in caplog.text
+
+
+def test_supervisor_uses_a_valid_log_level(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    calls: list[Any] = []
+    ws.setup_logging(basic_config=lambda **kw: calls.append(kw), file_logging=lambda name, fmt: None)
+    assert calls == [dict(level=logging.DEBUG, format=ws.LOG_FORMAT)]
