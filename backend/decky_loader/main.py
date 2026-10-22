@@ -38,9 +38,11 @@ from .enums import UserType
 from .wsrouter import WSRouter
 
 
+LOG_FORMAT = "[%(module)s][%(levelname)s]: %(message)s"
+
 basicConfig(
     level=get_log_level(),
-    format="[%(module)s][%(levelname)s]: %(message)s"
+    format=LOG_FORMAT
 )
 
 logger = getLogger("Main")
@@ -301,6 +303,13 @@ def main():
     else:
         if get_effective_user_id() != 0:
             logger.warning(f"decky is running as an unprivileged user, this is not officially supported and may cause issues")
+
+    if ON_WINDOWS:
+        # Windowed builds have no console, so also keep the log in a file
+        from .localplatform.winlogging import setup_file_logging
+        log_file = setup_file_logging("loader.log", LOG_FORMAT)
+        if log_file:
+            logger.info(f"Logging to {log_file}")
 
     # Append the system and user python paths
     sys.path.extend(get_system_pythonpaths())

@@ -17,6 +17,7 @@ if __name__ == "__main__":
         sys.exit(finish_update(sys.argv[2], int(sys.argv[3])))
     elif len(sys.argv) == 1:
         from decky_loader.localplatform import winsupervisor
+        winsupervisor.setup_logging()
         # Before anything is spawned: two supervisors would fight over the loader's port forever
         if not winsupervisor.acquire_supervisor_lock():
             sys.exit(0)
