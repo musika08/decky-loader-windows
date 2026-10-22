@@ -9,7 +9,10 @@ Stops (exit 2) when official changes clash with ours, leaving the branch as it w
 build fail. Plugins and settings in C:\ProgramData\decky are never touched; --install keeps them.
 #>
 param([switch]$Rebuild, [switch]$NoInstall, [switch]$NoPush)
-$ErrorActionPreference = 'Stop'
+# Not 'Stop': Windows PowerShell 5.1 then treats any stderr line of a native tool (PyInstaller's
+# progress output, for one) as a terminating error. Native tools are checked by $LASTEXITCODE and
+# the file operations below use -ErrorAction Stop.
+$ErrorActionPreference = 'Continue'
 
 $repo     = Split-Path -Parent $PSScriptRoot
 $backend  = Join-Path $repo 'backend'
@@ -89,10 +92,12 @@ $exe = Join-Path $work 'dist\PluginLoader\PluginLoader.exe'
 & $exe --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi winreg
 if ($LASTEXITCODE -ne 0) { Fail 3 'the built exe is missing modules (--check-imports)' }
 
-New-Item -ItemType Directory -Force (Split-Path $staged) | Out-Null
-if (Test-Path "$staged.prev") { Remove-Item -Recurse -Force "$staged.prev" }
-if (Test-Path $staged) { Move-Item $staged "$staged.prev" }
-Copy-Item -Recurse (Join-Path $work 'dist\PluginLoader') $staged
+try {
+    New-Item -ItemType Directory -Force (Split-Path $staged) -ErrorAction Stop | Out-Null
+    if (Test-Path "$staged.prev") { Remove-Item -Recurse -Force "$staged.prev" -ErrorAction Stop }
+    if (Test-Path $staged) { Move-Item $staged "$staged.prev" -ErrorAction Stop }
+    Copy-Item -Recurse (Join-Path $work 'dist\PluginLoader') $staged -ErrorAction Stop
+} catch { Fail 3 "could not stage the installer: $_" }
 Remove-Item -Recurse -Force $work, "$work.log" -ErrorAction SilentlyContinue
 Write-Host "Installer staged at $staged (previous one kept as PluginLoader.prev)"
 
