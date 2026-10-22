@@ -1,0 +1,286 @@
+import os, subprocess, sys, tarfile, threading, time, types
+from pathlib import Path
+from typing import Any
+import pytest
+
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only module")
+
+if sys.platform == "win32":
+    import _winapi
+    from decky_loader.localplatform import winplugincompat as compat
+
+
+@pytest.fixture
+def fcntl() -> Any:
+    compat._held.clear() # pyright: ignore [reportPrivateUsage]
+    return compat.make_fcntl_module()
+
+
+def _open(path: Path) -> int:
+    return os.open(path, os.O_RDWR | os.O_CREAT)
+
+# --- fcntl ---
+
+def test_flock_nb_conflict_raises_blocking_io(tmp_path: Path, fcntl: Any):
+    a, b = _open(tmp_path / "l"), _open(tmp_path / "l")
+    try:
+        fcntl.flock(a, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(b, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(a, fcntl.LOCK_UN)
+        fcntl.flock(b, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(a)
+        os.close(b)
+
+
+def test_flock_relock_and_unlock_unlocked_are_noops(tmp_path: Path, fcntl: Any):
+    with open(tmp_path / "l", "w") as f:
+        fcntl.flock(f, fcntl.LOCK_UN)
+        fcntl.flock(f, fcntl.LOCK_EX)
+        fcntl.flock(f, fcntl.LOCK_SH)
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def test_flock_keeps_file_readable_and_position(tmp_path: Path, fcntl: Any):
+    p = tmp_path / "pid"
+    with open(p, "w") as f:
+        f.write("12")
+        f.flush()
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        f.write("34")
+        f.flush()
+        assert p.read_text() == "1234"  # another handle can still read the content
+
+
+def test_flock_blocks_until_released(tmp_path: Path, fcntl: Any):
+    a, b = _open(tmp_path / "l"), _open(tmp_path / "l")
+    try:
+        fcntl.flock(a, fcntl.LOCK_EX)
+        threading.Timer(0.3, lambda: fcntl.flock(a, fcntl.LOCK_UN)).start()
+        start = time.monotonic()
+        fcntl.flock(b, fcntl.LOCK_EX)
+        assert time.monotonic() - start >= 0.2
+    finally:
+        os.close(a)
+        os.close(b)
+
+
+def test_lockf_and_bad_args(tmp_path: Path, fcntl: Any):
+    a, b = _open(tmp_path / "l"), _open(tmp_path / "l")
+    try:
+        fcntl.lockf(a, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(OSError):
+            fcntl.lockf(b, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with pytest.raises(OSError):
+            fcntl.flock(b, fcntl.LOCK_NB)
+        with pytest.raises(TypeError):
+            fcntl.flock("nope", fcntl.LOCK_EX)
+    finally:
+        os.close(a)
+        os.close(b)
+
+
+def test_fcntl_flags_are_noops(tmp_path: Path, fcntl: Any):
+    with open(tmp_path / "f", "w") as f:
+        flags = fcntl.fcntl(f, fcntl.F_GETFL)
+        assert fcntl.fcntl(f, fcntl.F_SETFL, flags | 0x800) == 0
+        with pytest.raises(OSError):
+            fcntl.fcntl(f, fcntl.F_SETLK, b"")
+        with pytest.raises(OSError):
+            fcntl.ioctl(f, 0x5414, b"")
+
+# --- pwd / grp / os ids ---
+
+def test_pwd_grp_describe_current_user():
+    pwd, grp = compat.make_pwd_grp_modules("Me", r"C:\Users\Me", 1000)
+    e = pwd.getpwuid(1000)
+    assert (e.pw_name, e.pw_dir, e.pw_uid, e.pw_gid, e.pw_shell) == ("Me", r"C:\Users\Me", 1000, 1000, "cmd.exe")
+    assert e[5] == e.pw_dir
+    assert pwd.getpwnam("deck") == pwd.getpwnam("me") == pwd.getpwuid(0) == e
+    assert pwd.getpwall() == [e]
+    with pytest.raises(KeyError):
+        pwd.getpwuid(4242)
+    with pytest.raises(KeyError):
+        pwd.getpwnam("root")
+    g = grp.getgrgid(1000)
+    assert (g.gr_name, g.gr_gid) == ("Me", 1000)
+    assert grp.getgrnam("deck") == g
+    with pytest.raises(KeyError):
+        grp.getgrnam("wheel")
+
+
+def test_root_name_only_when_elevated():
+    pwd, _ = compat.make_pwd_grp_modules("Me", r"C:\Users\Me", 0)
+    assert pwd.getpwnam("root").pw_uid == 0
+
+
+def test_install_modules_only_when_missing():
+    mods: dict[str, Any] = {}
+    made = compat.install_modules({"pwd": lambda: types.ModuleType("pwd"),
+                                   "json": lambda: types.ModuleType("json")}, mods)
+    assert made == ["pwd"]
+    assert "json" not in mods
+
+
+def test_os_ids_added_only_when_missing():
+    target = types.SimpleNamespace(getgid=lambda: 7)
+    compat.install_os_ids(0, target)
+    assert target.getuid() == target.geteuid() == target.getegid() == 0
+    assert target.getgid() == 7
+    target.chown("x", 0, 0)
+
+
+def test_tarfile_extracts_as_root_with_shims(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # tarfile chowns when geteuid() == 0; that must not break elevated plugins
+    src = tmp_path / "a.txt"
+    src.write_text("hi")
+    with tarfile.open(tmp_path / "a.tar", "w") as t:
+        t.add(src, "a.txt")
+    for name in ("geteuid", "chown", "lchown"):
+        monkeypatch.delattr(os, name, raising=False)
+    monkeypatch.setattr(os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(os, "chown", compat._noop_chown, raising=False) # pyright: ignore [reportPrivateUsage]
+    with tarfile.open(tmp_path / "a.tar") as t:
+        t.extractall(tmp_path / "out", filter="data")
+    assert (tmp_path / "out" / "a.txt").read_text() == "hi"
+
+# --- Linux paths ---
+
+def _drive(tmp_path: Path) -> tuple[str, Path]:
+    # Stand-in for C:\ ; the code joins "<drive>" + os.sep, so pass the folder without a trailing sep
+    root = tmp_path / "drive"
+    root.mkdir()
+    return str(root), root
+
+
+def test_tmp_and_home_links(tmp_path: Path):
+    drive, root = _drive(tmp_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "x.txt").write_text("x")
+    compat.ensure_tmp(drive)
+    compat.ensure_home_links(drive, str(profile), "Me")
+    assert (root / "tmp").is_dir() and not os.path.isjunction(root / "tmp")
+    for name in ("Me", "deck"):
+        assert os.path.isjunction(root / "home" / name)
+        assert (root / "home" / name / "x.txt").read_text() == "x"
+    compat.ensure_tmp(drive)
+    compat.ensure_home_links(drive, str(profile), "Me")
+
+
+def test_user_named_deck_gets_one_link(tmp_path: Path):
+    drive, root = _drive(tmp_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    compat.ensure_home_links(drive, str(profile), "Deck")
+    assert [n.lower() for n in os.listdir(root / "home")] == ["deck"]
+
+
+def test_existing_entries_are_never_replaced(tmp_path: Path):
+    drive, root = _drive(tmp_path)
+    profile, other = tmp_path / "profile", tmp_path / "other"
+    profile.mkdir()
+    other.mkdir()
+    (root / "home" / "deck").mkdir(parents=True)
+    (root / "home" / "deck" / "keep").write_text("k")
+    _winapi.CreateJunction(str(other), str(root / "home" / "Me"))
+    (root / "tmp").write_text("a file")
+    compat.ensure_tmp(drive)
+    compat.ensure_home_links(drive, str(profile), "Me")
+    assert (root / "tmp").read_text() == "a file"
+    assert (root / "home" / "deck" / "keep").read_text() == "k"
+    assert os.path.realpath(root / "home" / "Me") == os.path.realpath(other)
+
+
+def test_home_junction_is_not_followed(tmp_path: Path):
+    drive, root = _drive(tmp_path)
+    profile, elsewhere = tmp_path / "profile", tmp_path / "elsewhere"
+    profile.mkdir()
+    elsewhere.mkdir()
+    _winapi.CreateJunction(str(elsewhere), str(root / "home"))
+    compat.ensure_home_links(drive, str(profile), "Me")
+    assert os.listdir(elsewhere) == []
+
+
+def test_cwd_moves_to_system_drive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    cwd_drive = os.path.splitdrive(os.getcwd())[0]
+    home_drive = os.path.splitdrive(str(home))[0]
+    monkeypatch.chdir(tmp_path)
+    compat.ensure_cwd_on_drive(home_drive, str(home))
+    assert os.getcwd() == str(tmp_path)  # already on that drive: untouched
+    moved: list[str] = []
+    monkeypatch.setattr(compat.os, "chdir", moved.append)
+    monkeypatch.setattr(compat.os, "getcwd", lambda: r"Q:\somewhere")
+    compat.ensure_cwd_on_drive(home_drive, str(home))
+    compat.ensure_cwd_on_drive("Z:", str(home))
+    assert moved == [str(home), "Z:" + os.sep]
+    assert cwd_drive  # sanity: tests run from a drive path
+
+# --- PATH helpers ---
+
+def test_shim_bin_dir_ships_both_scripts():
+    assert sorted(os.listdir(compat.SHIM_BIN_DIR)) == ["chmod.cmd", "xdg-open.cmd"]
+
+
+def test_prepend_shim_bin_once():
+    env = {"PATH": r"C:\Windows"}
+    assert compat.prepend_shim_bin(env)
+    assert compat.prepend_shim_bin(env)
+    assert env["PATH"] == compat.SHIM_BIN_DIR + os.pathsep + r"C:\Windows"
+    assert not compat.prepend_shim_bin({}, r"C:\does\not\exist")
+
+
+def test_chmod_cmd_is_found_and_succeeds():
+    env = dict(os.environ)
+    compat.prepend_shim_bin(env)
+    r = subprocess.run("chmod +x somefile", shell=True, env=env, capture_output=True, timeout=30)
+    assert r.returncode == 0
+
+# --- entry point ---
+
+def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool) -> tuple[Path, dict[str, str], dict[str, Any]]:
+    drive, root = _drive(tmp_path)
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    mods: dict[str, Any] = {}
+    real = compat.install_modules
+    def install_modules(m: dict[str, Any]) -> list[str]:
+        return real(m, mods)
+    def install_os_ids(uid: int) -> None:
+        mods["uid"] = uid
+    def no_chdir(*_a: object) -> None:
+        pass
+    monkeypatch.setattr(compat, "install_modules", install_modules)
+    monkeypatch.setattr(compat, "install_os_ids", install_os_ids)
+    monkeypatch.setattr(compat, "ensure_cwd_on_drive", no_chdir)
+    env = {"PATH": r"C:\Windows"}
+    compat.install_plugin_compat(elevated=elevated, env=env, system_drive=drive, home=str(profile), user="Me")
+    return root, env, mods
+
+
+def test_install_unelevated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root, env, mods = _run_install(tmp_path, monkeypatch, False)
+    assert {"fcntl", "pwd", "grp"} <= set(mods)
+    assert mods["uid"] == 1000 and mods["pwd"].getpwnam("deck").pw_uid == 1000
+    assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
+    assert (root / "tmp").is_dir() and os.path.isjunction(root / "home" / "deck")
+
+
+def test_install_elevated_changes_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root, env, mods = _run_install(tmp_path, monkeypatch, True)
+    assert mods["uid"] == 0 and mods["pwd"].getpwuid(0).pw_name == "Me"
+    assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
+    assert os.listdir(root) == []
+
+
+def test_install_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def boom(*_a: object) -> None:
+        raise RuntimeError("boom")
+    for name in ("install_modules", "install_os_ids", "prepend_shim_bin", "ensure_cwd_on_drive", "ensure_tmp", "ensure_home_links"):
+        monkeypatch.setattr(compat, name, boom)
+    monkeypatch.setattr(compat, "_is_elevated", boom)
+    compat.install_plugin_compat()
+    compat.install_plugin_compat(elevated=False, env={}, system_drive=str(tmp_path), home=str(tmp_path), user="Me")
