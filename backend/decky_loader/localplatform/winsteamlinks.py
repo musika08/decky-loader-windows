@@ -1,9 +1,10 @@
 r"""Linux-style Steam paths for plugins on Windows.
 
-On Linux `~/.steam/root` and `~/.steam/steam` link to the Steam install, and many plugins
-hardcode them (Animation Changer writes `~/.steam/root/config/uioverrides/movies`). On
-Windows nothing creates them, so plugins write into a plain folder Steam never reads.
-This makes both names junctions to the Steam install dir.
+On Linux `~/.steam/root`, `~/.steam/steam` and `~/.local/share/Steam` lead to the Steam
+install, and many plugins hardcode them (Animation Changer writes
+`~/.steam/root/config/uioverrides/movies`). On Windows nothing creates them, so plugins write
+into a plain folder Steam never reads. This makes all three junctions to the Steam install dir;
+missing parent folders are created as plain folders, and a parent that is a link is left alone.
 
 Runs only in unelevated plugin hosts: the profile is user-writable, so doing these
 creates/renames from an elevated process would let a planted junction redirect them.
@@ -16,7 +17,8 @@ from logging import getLogger
 
 _log = getLogger("winsteamlinks")
 
-LINK_NAMES = ("root", "steam")
+# Parent folders under the home dir, link name
+LINKS = ((".steam",), "root"), ((".steam",), "steam"), ((".local", "share"), "Steam")
 
 
 def steam_install_dir() -> str | None:
@@ -63,14 +65,33 @@ def _ensure_link(link: str, steam_dir: str) -> None:
     _log.info(f"linked {link} -> {steam_dir}")
 
 
+def _ensure_parent(home: str, parts: tuple[str, ...]) -> str | None:
+    '''Creates home/parts... as plain folders; None if any of them is a link or a file.'''
+    path = home
+    for part in parts:
+        path = os.path.join(path, part)
+        if os.path.isjunction(path) or os.path.islink(path):
+            _log.warning(f"{path} is a link, leaving it alone")
+            return None
+        if os.path.lexists(path):
+            if not os.path.isdir(path):
+                _log.warning(f"{path} is a file, leaving it alone")
+                return None
+            continue
+        try:
+            os.mkdir(path)
+        except FileExistsError:
+            # Created at the same time by another plugin host; check it again
+            if os.path.isjunction(path) or os.path.islink(path) or not os.path.isdir(path):
+                return None
+    return path
+
+
 def ensure_steam_home_links(home: str, steam_dir: str) -> None:
-    dot_steam = os.path.join(home, ".steam")
-    if os.path.lexists(dot_steam) and (os.path.isjunction(dot_steam) or os.path.islink(dot_steam)):
-        _log.warning(f"{dot_steam} is a link, leaving it alone")
-        return
-    os.makedirs(dot_steam, exist_ok=True)
-    for name in LINK_NAMES:
-        _ensure_link(os.path.join(dot_steam, name), steam_dir)
+    for parts, name in LINKS:
+        parent = _ensure_parent(home, parts)
+        if parent is not None:
+            _ensure_link(os.path.join(parent, name), steam_dir)
 
 
 def setup_steam_home_links() -> None:
@@ -80,8 +101,8 @@ def setup_steam_home_links() -> None:
             return
         steam_dir = steam_install_dir()
         if steam_dir is None:
-            _log.warning("Steam install dir not found, skipping ~/.steam links")
+            _log.warning("Steam install dir not found, skipping the Steam home links")
             return
         ensure_steam_home_links(os.path.expanduser("~"), steam_dir)
     except Exception as e:
-        _log.warning(f"could not set up ~/.steam links: {e}")
+        _log.warning(f"could not set up the Steam home links: {e}")
