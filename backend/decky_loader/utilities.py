@@ -69,8 +69,8 @@ class Utilities:
             context.ws.add_route("utilities/remove_css_from_tab", self.remove_css_from_tab)
             context.ws.add_route("utilities/allow_remote_debugging", self.allow_remote_debugging)
             context.ws.add_route("utilities/disallow_remote_debugging", self.disallow_remote_debugging)
-            context.ws.add_route("utilities/start_ssh", self.allow_remote_debugging)
-            context.ws.add_route("utilities/stop_ssh", self.allow_remote_debugging)
+            context.ws.add_route("utilities/start_ssh", self.start_ssh)
+            context.ws.add_route("utilities/stop_ssh", self.stop_ssh)
             context.ws.add_route("utilities/filepicker_ls", self.filepicker_ls)
             context.ws.add_route("utilities/disable_rdt", self.disable_rdt)
             context.ws.add_route("utilities/enable_rdt", self.enable_rdt)
@@ -297,13 +297,23 @@ class Utilities:
         await service_stop(helpers.REMOTE_DEBUGGER_UNIT)
         return True
 
-    async def start_ssh(self):
+    async def start_ssh(self) -> bool | str:
+        if ON_WINDOWS:
+            return await self._windows_sshd(True)
         await service_start(helpers.SSHD_UNIT)
         return True
 
-    async def stop_ssh(self):
+    async def stop_ssh(self) -> bool | str:
+        if ON_WINDOWS:
+            return await self._windows_sshd(False)
         await service_stop(helpers.SSHD_UNIT)
         return True
+
+    async def _windows_sshd(self, running: bool) -> bool | str:
+        # Returns why it failed (e.g. OpenSSH Server is not installed) so the crash page can show it
+        from .localplatform.winsshd import set_sshd_running
+        error = await set_sshd_running(running)
+        return True if error is None else error
 
     async def close_cef_socket(self):
         if get_use_cef_close_workaround():
