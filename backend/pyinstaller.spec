@@ -46,6 +46,8 @@ a = Analysis(
     datas=[
         ('decky_loader/locales', 'decky_loader/locales'),
         ('decky_loader/static', 'decky_loader/static'),
+        # chmod.cmd put on plugin hosts' PATH by winplugincompat
+        ('decky_loader/localplatform/winbin', 'decky_loader/localplatform/winbin'),
     ] + copy_metadata('decky_loader'),
     runtime_hooks=['build_config.py'],
     hiddenimports=hiddenimports,
