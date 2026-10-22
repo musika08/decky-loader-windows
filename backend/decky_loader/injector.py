@@ -9,6 +9,8 @@ from aiohttp.client_exceptions import ClientConnectorError, ClientOSError
 from asyncio.exceptions import TimeoutError
 import uuid
 
+from .localplatform.localplatform import ON_WINDOWS
+
 BASE_ADDRESS = "http://localhost:8080"
 
 logger = getLogger("Injector")
@@ -379,7 +381,7 @@ async def get_tabs() -> List[Tab]:
             if not na:
                 logger.debug("Steam isn't available yet. Wait for a moment...")
                 na = True
-            await sleep(5)
+            await sleep(1 if ON_WINDOWS else 5) # Windows: Steam can start straight into Big Picture
         except ClientOSError:
             logger.warning(f"The request to {BASE_ADDRESS}/json was reset")
             await sleep(1)

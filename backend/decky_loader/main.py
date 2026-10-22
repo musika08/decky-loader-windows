@@ -20,7 +20,7 @@ import aiohttp_cors # pyright: ignore [reportMissingTypeStubs]
 
 # Partial imports
 from aiohttp import client_exceptions
-from aiohttp.web import Application, Response, Request, get, run_app, static # pyright: ignore [reportUnknownVariableType]
+from aiohttp.web import Application, Response, Request, RouteDef, get, json_response, run_app, static # pyright: ignore [reportUnknownVariableType]
 from aiohttp_jinja2 import setup as jinja_setup
 from setproctitle import getproctitle, setproctitle, setthreadtitle
 
@@ -45,6 +45,10 @@ basicConfig(
 
 logger = getLogger("Main")
 plugin_path = path.join(get_privileged_path(), "plugins")
+
+def gamepadui_poll_seconds() -> float:
+    # Windows: Big Picture can be opened at any time, so pick it up quickly. Linux keeps its original interval.
+    return 1 if ON_WINDOWS else 5
 
 def chown_plugin_dir():
     if not path.exists(plugin_path): # For safety, create the folder before attempting to do anything with it
@@ -79,6 +83,8 @@ class PluginManager:
         self.last_webhelper_exit: float = 0
         self.webhelper_crash_count: int = 0
         self.inject_fallback: bool = False
+        # When the frontend was last injected into the GamepadUI tab, None while it is not (see /status/frontend)
+        self.frontend_loaded_since: float | None = None
 
         jinja_setup(self.web_app)
 
@@ -94,7 +100,7 @@ class PluginManager:
         self.web_app.on_shutdown.append(self.shutdown)
 
         self.loop.set_exception_handler(self.exception_handler)
-        self.web_app.add_routes([get("/auth/token", self.get_auth_token)])
+        self.web_app.add_routes(self.own_routes()) # pyright: ignore [reportUnknownMemberType]
 
         for route in list(self.web_app.router.routes()):
             self.cors.add(route) # pyright: ignore [reportUnknownMemberType]
@@ -176,8 +182,19 @@ class PluginManager:
             return
         loop.default_exception_handler(context)
 
+    def own_routes(self) -> list[RouteDef]: # pyright: ignore [reportUnknownParameterType]
+        return [get("/auth/token", self.get_auth_token), get("/status/frontend", self.get_frontend_status)] # pyright: ignore [reportUnknownVariableType, reportUnknownMemberType]
+
     async def get_auth_token(self, request: Request):
         return Response(text=get_csrf_token())
+
+    async def get_frontend_status(self, request: Request) -> Response: # pyright: ignore [reportUnknownParameterType]
+        # Unauthenticated (see csrf_middleware): only says whether the frontend is in the GamepadUI tab, and since when
+        since = self.frontend_loaded_since
+        return json_response({"loaded": since is not None, "since": since}, headers={"Cache-Control": "no-store"}) # pyright: ignore [reportUnknownVariableType]
+
+    def set_frontend_loaded(self, loaded: bool):
+        self.frontend_loaded_since = time() if loaded else None
 
     async def load_plugins(self):
         # await self.wait_for_server()
@@ -208,7 +225,7 @@ class PluginManager:
                         nf = True
                     pass
                 if not tab:
-                    await sleep(5)
+                    await sleep(gamepadui_poll_seconds())
             await tab.open_websocket()
             self.js_ctx_tab = tab
             await tab.enable()
@@ -217,8 +234,11 @@ class PluginManager:
                 async for msg in tab.listen_for_message():
                     if msg.get("method", None) == "Page.domContentEventFired":
                         if not await tab.has_global_var("deckyHasLoaded", False):
+                            # The page was reloaded without the frontend
+                            self.set_frontend_loaded(False)
                             await self.inject_javascript(tab)
                     elif msg.get("method", None) == "Inspector.detached":
+                        self.set_frontend_loaded(False)
                         if not self.reinject:
                             return
                         logger.info("CEF has requested that we detach.")
@@ -228,9 +248,11 @@ class PluginManager:
                 # If this is a forceful disconnect the loop will just stop without any failure message. In this case, injector.py will handle this for us so we don't need to close the socket.
                 # This is because of https://github.com/aio-libs/aiohttp/blob/3ee7091b40a1bc58a8d7846e7878a77640e96996/aiohttp/client_ws.py#L321
                 logger.info("CEF has disconnected...")
+                self.set_frontend_loaded(False)
                 await self.handle_crash()
                 # At this point the loop starts again and we connect to the freshly started Steam client once it is ready.
             except Exception:
+                self.set_frontend_loaded(False)
                 if not self.reinject:
                     return
                 logger.error("Exception while reading page events " + format_exc())
@@ -249,12 +271,14 @@ class PluginManager:
         try:
             # if first:
             if ON_LINUX and await tab.has_global_var("deckyHasLoaded", False):
+                self.set_frontend_loaded(False)
                 await tab.close_websocket()
                 self.js_ctx_tab = None
                 await restart_webhelper()
                 await sleep(1) # To give CEF enough time to close down the websocket
                 return # We'll catch the next tab in the main loop
             await tab.evaluate_js(create_inject_script("index.js" if self.webhelper_crash_count < 3 else "fallback.js"), False, False, False)
+            self.set_frontend_loaded(True)
             # On Windows only an explicit shutdown from the UI may stop the loader; see handle_crash
             if self.webhelper_crash_count > 2 and not ON_WINDOWS:
                 self.reinject = False
