@@ -95,7 +95,9 @@ class PluginWrapper:
         while self._socket.active:
             try:
                 line = await self._socket.read_single_line()
-                if ON_WINDOWS and line == "":
+                # EOF reads as None while the connection is still held ("" if the socket was deactivated);
+                # None with no reader means connecting failed, which the next iteration retries.
+                if ON_WINDOWS and (line == "" or (line is None and self._socket.reader is not None)):
                     # EOF: the plugin host closed the connection or died. Reading again would spin.
                     self.log.info(f"Plugin {self.get_display_name()} closed its socket")
                     await self._socket.close_socket_connection()
