@@ -184,6 +184,67 @@ def test_killall_wait():
     assert slept == [] and 22 not in [p.pid for p in table.procs]
 
 
+def test_killall_wait_gives_up_and_ignores_reused_pids():
+    table, ctx = world()
+    clock = [0.0]
+
+    class Undying(FakeTable):
+        def act(self, proc: Any, action: str) -> str | None:
+            self.actions.append((proc.pid, action))
+            return None # "terminated", but it stays listed
+    table = Undying(table.procs)
+    ctx = pt.Context(table, own=[40], protected=[40, 5])
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+    err = io.StringIO()
+    assert pt.killall(["-w", "game"], ctx, io.StringIO(), err, sleep, lambda: clock[0]) == 1
+    assert "gave up waiting after 30 seconds for: 21" in err.getvalue() and clock[0] >= 30
+    # The pid now names a newer process: the one signalled is gone
+    clock[0] = 0.0
+    table.procs[3] = proc(21, 20, "game", 99)
+    def replace_on_act(p: Any, action: str) -> str | None:
+        table.procs[3] = proc(21, 20, "game", 100)
+        return None
+    table.act = replace_on_act # type: ignore[method-assign]
+    assert pt.killall(["-w", "game"], ctx, io.StringIO(), io.StringIO(), sleep, lambda: clock[0]) == 0
+    assert clock[0] == 0.0
+
+
+def test_control_characters_print_as_question_marks():
+    table, ctx = world()
+    table.procs.append(pt.Proc(60, 1, "bad\x1bname", 1, False, lambda: ["evil\narg\x07", "x"]))
+    assert run("ps", ["-p", "60", "-o", "comm=", "-o", "args="], ctx)[1] == "bad?name evil?arg? x\n"
+
+
+@pytest.mark.parametrize("name", ["steamerrorreporter", "gameoverlayui", "SteamHome", "steamwebhelper"])
+def test_steam_parts_are_protected(name: str):
+    table, ctx = world()
+    table.procs.append(proc(70, 30, pt.comm_of(name + ".exe"), 2))
+    assert run("kill", ["-STOP", "70"], ctx)[2] == "kill: (70) - Operation not permitted\n"
+    assert table.actions == []
+
+
+def test_decky_processes():
+    raw = [pt.RawProcess(1, 0, 1, 1, "supervisor", False, 0), pt.RawProcess(2, 1, 1, 2, "pythonw.exe", False, 0),
+           pt.RawProcess(3, 2, 1, 3, "pythonw.exe", False, 0), pt.RawProcess(4, 2, 1, 4, "pythonw.exe", False, 0),
+           pt.RawProcess(5, 2, 1, 1, "pythonw.exe", False, 0),  # older than the loader: stale ppid
+           pt.RawProcess(6, 3, 1, 6, "pythonw.exe", False, 0),  # this tool, started by host 3
+           pt.RawProcess(7, 9, 1, 7, "pythonw.exe", False, 0),  # a Decky process elsewhere in the tree
+           pt.RawProcess(8, 9, 1, 8, "pythonw.exe", False, 0)]  # another Python
+    installed = r"C:\Program Files\Decky Loader\python\pythonw.exe"
+    images = {6: installed, 7: installed.upper(), 8: r"C:\Python313\pythonw.exe", 4: installed}
+    # Sibling hosts (4) and every process of the installed program (7); never the plugin's own host (3)
+    assert sorted(set(pt.decky_processes(raw, 6, 3, images.get))) == [4, 7]
+    dev = {6: r"X:\venv\Scripts\pythonw.exe", 7: r"X:\venv\Scripts\pythonw.exe"}
+    assert pt.decky_processes(raw, 6, 3, dev.get) == [4]
+
+
+def test_image_path_of_this_process():
+    path = pt.image_path(os.getpid())
+    assert path is not None and os.path.isfile(path)
+
+
 def test_pidof():
     _, ctx = world()
     assert run("pidof", ["game", "game-helper"], ctx) == (0, "21 22\n", "")

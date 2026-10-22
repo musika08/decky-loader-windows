@@ -12,6 +12,7 @@ import time
 from typing import Callable, NamedTuple, TextIO
 
 DEFAULT_SIZE = 56
+MIN_USER_INTERVAL = 0.2 # seconds; below this only for elevated (root) plugins, like iputils for root
 DEFAULT_TIMEOUT = 4.0 # seconds, when -W is not given (Windows ping's default)
 # getopt spec of the iputils options handled here
 SHORT_OPTS = "46c:i:nqs:t:W:w:DOv"
@@ -44,6 +45,11 @@ class Reply(NamedTuple):
 
 
 Echo = Callable[[str, int, int | None, float], Reply]
+
+
+def _is_elevated() -> bool:
+    from .winprocess import is_elevated
+    return is_elevated()
 
 
 def is_linux_syntax(args: list[str]) -> bool:
@@ -128,7 +134,8 @@ def _number(text: str, what: str, minimum: float, maximum: float, integer: bool)
 
 def run(args: list[str], out: TextIO, err: TextIO, echo: Echo | None = None,
         resolve: Callable[[str], str] = resolve_ipv4, clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep, wall: Callable[[], float] = time.time) -> int:
+        sleep: Callable[[float], None] = time.sleep, wall: Callable[[], float] = time.time,
+        elevated: Callable[[], bool] | None = None) -> int:
     try:
         opts, rest = getopt.gnu_getopt(args, SHORT_OPTS)
     except getopt.GetoptError as e:
@@ -147,6 +154,10 @@ def run(args: list[str], out: TextIO, err: TextIO, echo: Echo | None = None,
                 count = int(_number(value, "count", 1, 2**31 - 1, True))
             elif opt == "-i":
                 interval = _number(value, "interval", 0, 2**31 - 1, False)
+                if interval < MIN_USER_INTERVAL and not (elevated or _is_elevated)():
+                    # As iputils does for users without CAP_NET_RAW (refused rather than clamped)
+                    err.write(f"ping: cannot flood; minimal interval allowed for user is {MIN_USER_INTERVAL * 1000:g}ms\n")
+                    return 2
             elif opt == "-W":
                 timeout = _number(value, "timeout", 0.001, 2**31 - 1, False)
             elif opt == "-w":

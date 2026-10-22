@@ -131,6 +131,24 @@ def test_errors():
     assert run(["-Z", "host"], [])[0] == 2
 
 
+def always_ok(ip: str, size: int, ttl: int | None, timeout: float) -> Any:
+    return ok(1)
+
+
+def test_short_interval_needs_root():
+    out, err = io.StringIO(), io.StringIO()
+    assert winping.run(["-c", "1", "-i", "0.1", "host"], out, err, elevated=lambda: False) == 2
+    assert err.getvalue() == "ping: cannot flood; minimal interval allowed for user is 200ms\n"
+    clock = Clock()
+    replies = [ok(1), ok(1)]
+    def echo(ip: str, size: int, ttl: int | None, timeout: float) -> Any:
+        return replies.pop(0)
+    assert winping.run(["-c", "2", "-i", "0.1", "host"], io.StringIO(), io.StringIO(), echo, google, clock, clock.sleep,
+                       elevated=lambda: True) == 0
+    assert winping.run(["-c", "1", "-i", "0.2", "host"], io.StringIO(), io.StringIO(), always_ok, google, clock,
+                       clock.sleep, elevated=lambda: False) == 0
+
+
 def test_real_loopback_ping():
     out, err = io.StringIO(), io.StringIO()
     assert winping.run(["-c", "1", "-W", "2", "127.0.0.1"], out, err) == 0, err.getvalue()

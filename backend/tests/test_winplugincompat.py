@@ -477,6 +477,8 @@ def test_tool_name(arg: Any, name: str | None):
     (["runuser", "-u", "Me", "--", "x", "a"], False, ["x", "a"]),
     (["runuser", "-l", "Me", "-c", "x a 'b c'"], False, ["x", "a", "b c"]),
     (["runuser", "-u", "bob", "x"], False, None),
+    (["runuser", "root", "-c", "x", "extra"], True, None),       # arguments for the shell after -c
+    (["runuser", "-l", "Me", "-c", "x", "--", "value"], False, None),
     (["su", "Me", "-c", "steam steam://open/games"], False, ["steam", "steam://open/games"]),
     (["su", "-", "deck", "-c", "x"], False, ["x"]),
     (["su", "-c", "x | grep y", "Me"], False, None),     # needs a shell
@@ -499,26 +501,6 @@ def test_split_simple_command(command: str, words: list[str] | None):
     assert compat.split_simple_command(command) == words
 
 
-@pytest.mark.parametrize("command,result", [
-    ("openssl req -nodes -subj '/C=US/O=KDE/OU=KDE Connect/CN=abc'",
-     'openssl req -nodes -subj "/C=US/O=KDE/OU=KDE Connect/CN=abc"'),                      # Decky Notifications
-    ("'C:\\p\\bin\\hash' \"C:\\roms\\a b.zip\"", '"C:\\p\\bin\\hash" "C:\\roms\\a b.zip"'),  # Emuchievements
-    ("x 'C:\\dir\\'", 'x "C:\\dir\\\\"'),
-    ("echo 'it'\\''s'", 'echo "it"\'"s"'),
-    ("echo pre'a b'post", 'echo pre"a b"post'),
-    ("echo 'a%PATH%b'", "echo 'a%PATH%b'"),
-    ("echo 'a\"b'", "echo 'a\"b'"),
-    ("echo 'a & calc'", "echo 'a & calc'"),
-    ("echo 'a\nb'", "echo 'a\nb'"),
-    ('echo "it\'s"', 'echo "it\'s"'),
-    ("echo it's", "echo it's"),
-    ('echo "open', 'echo "open'),
-    ("no quotes", "no quotes"),
-])
-def test_translate_posix_quotes(command: str, result: str):
-    assert compat.translate_posix_quotes(command) == result
-
-
 def test_rewrite_argv_tools():
     cfg = _config()
     assert compat.rewrite_argv(["ps", "--ppid", "1", "-o", "pid="], None, cfg) == _tool("ps", "--ppid", "1", "-o", "pid=")
@@ -530,6 +512,22 @@ def test_rewrite_argv_tools():
     assert compat.rewrite_argv(["sudo", "-u", "bob", "ls"], None, cfg) == _tool("sudo", "-u", "bob", "ls")
     assert compat.rewrite_argv([], None, cfg) == []
     assert compat.rewrite_argv("ps -e", None, cfg) == "ps -e"
+    # Windows-style switches belong to Windows' own programs (cmd's date /t); Linux patterns still go to Decky's
+    assert compat.rewrite_argv(["date", "/t"], None, cfg) == ["date", "/t"]
+    assert compat.rewrite_argv(["kill", "/?"], None, cfg) == ["kill", "/?"]
+    assert compat.rewrite_argv(["pgrep", "--full", r"/reaper\s.*\bAppId=1\b"], None, cfg) == \
+        _tool("pgrep", "--full", r"/reaper\s.*\bAppId=1\b")
+
+
+def test_nested_and_unknown_user_switches_are_refused():
+    root = _config(elevated=True)
+    assert compat.rewrite_argv(["sudo", "sudo", "sudo", "ps"], None, root) == _tool("ps")
+    assert compat.rewrite_argv(["sudo", "sudo", "sudo", "sudo", "ps"], None, root) == _tool("sudo", "ps")
+    assert compat.rewrite_argv(["sudo", "su", "-c", "sudo ps"], None, root) == _tool("ps")
+    assert compat.rewrite_argv(["sudo", "su", "-c", "sudo sudo ps"], None, root) == _tool("sudo", "ps")
+    for switch in ("doas", "pkexec", "/usr/bin/pkexec"):
+        assert compat.rewrite_argv([switch, "ps"], None, root) == _tool(switch.rpartition("/")[2], "ps")
+    assert compat.rewrite_argv(["sudo", "doas", "ps"], None, root) == _tool("doas", "ps")
 
 
 def test_rewrite_argv_python_scripts(tmp_path: Path):
@@ -547,6 +545,27 @@ def test_rewrite_argv_python_scripts(tmp_path: Path):
     assert compat.rewrite_argv([str(script)], None, frozen) == [str(script)]
 
 
+def test_elevated_hosts_never_run_scripts(tmp_path: Path):
+    root = _config(elevated=True)
+    script, shebang = tmp_path / "x.py", tmp_path / "tool"
+    script.write_text("print(1)")
+    shebang.write_bytes(b"#!/usr/bin/python3\n")
+    assert compat.rewrite_argv([str(script), "a"], None, root) == [str(script), "a"]
+    assert compat.rewrite_argv([str(shebang)], None, root) == [str(shebang)]
+    assert compat.rewrite_argv(["sudo", str(shebang)], None, root) == [str(shebang)]
+
+
+@pytest.mark.parametrize("ext", [".exe", ".com"])
+def test_script_planted_next_to_a_program_is_ignored(tmp_path: Path, ext: str):
+    # CreateProcess runs `tool.exe` for `...\tool`; a `tool` file planted beside it must not win
+    planted = tmp_path / "bin" / "tool"
+    planted.parent.mkdir()
+    planted.write_bytes(b"#!/usr/bin/env python3\nprint('planted')\n")
+    (tmp_path / "bin" / f"tool{ext}").write_bytes(b"")
+    assert compat.python_script(str(planted)) is None
+    assert compat.rewrite_argv([str(planted)], None, _config()) == [str(planted)]
+
+
 def test_rewrite_shell():
     cfg = _config(self_command=lambda: [sys.executable, "main.py"])
     pid = str(os.getpid())
@@ -554,9 +573,13 @@ def test_rewrite_shell():
         ([sys.executable, "main.py", "--compat-tool", "timedatectl", pid, "show", "-p", "NTP"], False)
     assert compat.rewrite_shell("date '+%Y %H'", None, cfg) == \
         ([sys.executable, "main.py", "--compat-tool", "date", pid, "+%Y %H"], False)
-    assert compat.rewrite_shell("openssl req -subj '/O=KDE Connect'", None, cfg) == ('openssl req -subj "/O=KDE Connect"', True)
+    # Anything else reaches cmd.exe exactly as written: quoting is never rewritten
+    assert compat.rewrite_shell("openssl req -subj '/O=KDE Connect'", None, cfg) == ("openssl req -subj '/O=KDE Connect'", True)
+    assert compat.rewrite_shell("powershell -Command 'x;Write-Output INJECTED'", None, cfg) == \
+        ("powershell -Command 'x;Write-Output INJECTED'", True)
     # The program in place of sudo can't be found: cmd.exe reports that as before, with an exit code
-    assert compat.rewrite_shell("sudo -u Me deckynothere 'a b'", None, cfg) == ('sudo -u Me deckynothere "a b"', True)
+    assert compat.rewrite_shell("sudo -u Me deckynothere 'a b'", None, cfg) == ("sudo -u Me deckynothere 'a b'", True)
+    assert compat.rewrite_shell("date /t", None, cfg) == ("date /t", True)
     assert compat.rewrite_shell("ping -n 1 host", None, cfg) == ("ping -n 1 host", True)
     assert compat.rewrite_shell("ps -e | findstr x", None, cfg) == ("ps -e | findstr x", True)
     assert compat.rewrite_shell(["ps"], None, cfg) == (["ps"], True)

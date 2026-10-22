@@ -7,8 +7,9 @@ Only processes in this tool's session that belong to the same Windows account ar
 csrss/winlogon/dwm or other users' programs; processes the token can't query are invisible too. Signals:
 STOP/TSTP/TTIN/TTOU suspend every thread (NtSuspendProcess), CONT resumes, INT/QUIT/TERM/KILL terminate at once
 (Windows has no graceful SIGTERM), 0 only checks. Others (HUP, USR1...) have no Windows equivalent and fail.
-Never signalled: this tool and the processes between it and the plugin host, the host's ancestors (the loader), and
-the Steam client (Decky's UI runs in it, and plugins' `steam` restart commands don't exist on Windows).
+Never signalled: this tool and the processes between it and the plugin host, the host's ancestors (the loader), the
+loader's other children (other plugins' hosts), any process running an installed Decky's own program, and the Steam
+client (Decky's UI runs in it, and plugins' `steam` restart commands don't exist on Windows).
 """
 import getopt
 import os
@@ -31,16 +32,24 @@ NOT_PERMITTED = "Operation not permitted"
 NOT_SUPPORTED = "Operation not supported"
 
 # Comm names (image name without .exe, lower case) that are never suspended or terminated
-PROTECTED_NAMES = frozenset({"steam", "steamwebhelper", "steamservice"})
-# NtResumeProcess lowers each thread's suspend count by one; SIGCONT must undo several SIGSTOP-like suspends
+PROTECTED_NAMES = frozenset({"steam", "steamwebhelper", "steamservice", "steamerrorreporter", "gameoverlayui",
+                             "steamhome"})
+# NtResumeProcess lowers each thread's suspend count by one; SIGCONT must undo several SIGSTOP-like suspends.
+# This can also undo a suspend someone else made (a debugger, another tool): SIGCONT on Linux resumes a stopped
+# process whoever stopped it, and Windows doesn't record who suspended a thread, so that is accepted.
 RESUME_TRIES = 8
+# killall -w gives up after this many seconds (psmisc waits forever)
+WAIT_TIMEOUT = 30.0
+# Control characters in names and command lines print as "?", as procps does
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
 class Proc:
     '''A visible process. `comm` is the image name without .exe, like Linux's comm.'''
     def __init__(self, pid: int, ppid: int, comm: str, create_time: float, stopped: bool,
                  cmdline: Callable[[], list[str]], cpu_seconds: Callable[[], float] = lambda: 0.0, handle: Any = None):
-        self.pid, self.ppid, self.comm, self.create_time, self.stopped = pid, ppid, comm, create_time, stopped
+        self.pid, self.ppid, self.create_time, self.stopped = pid, ppid, create_time, stopped
+        self.comm = _CONTROL.sub("?", comm)
         self._cmdline, self._cmdline_value = cmdline, None
         self.cpu_seconds = cpu_seconds
         self.handle = handle
@@ -49,7 +58,7 @@ class Proc:
     def cmdline(self) -> list[str]:
         if self._cmdline_value is None:
             try:
-                self._cmdline_value = list(self._cmdline())
+                self._cmdline_value = [_CONTROL.sub("?", a) for a in self._cmdline()]
             except Exception:
                 self._cmdline_value = []
         return self._cmdline_value
@@ -287,10 +296,48 @@ def own_and_protected(raw: list[RawProcess], me: int, host_pid: int) -> tuple[li
     return [me], chain
 
 
+def image_path(pid: int) -> str | None:
+    '''Full path of the program `pid` runs (QueryFullProcessImageNameW), or None.'''
+    import ctypes
+    from ctypes import wintypes
+    _, kernel32, _ = _api()
+    kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+    process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not process:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        return buf.value if kernel32.QueryFullProcessImageNameW(process, 0, buf, ctypes.byref(size)) else None
+    finally:
+        kernel32.CloseHandle(process)
+
+
+def decky_processes(raw: list[RawProcess], me: int, host_pid: int, image_of: Callable[[int], str | None]) -> list[int]:
+    '''Other parts of Decky, never signalled either: the loader's other children (the other plugin hosts) and, for an
+    installed Decky (its program under a "Decky Loader" folder), every process running that same program.'''
+    by_pid = {p.pid: p for p in raw}
+    found: list[int] = []
+    host = by_pid.get(host_pid)
+    loader = by_pid.get(host.ppid) if host is not None else None
+    if host is not None and loader is not None and loader.pid != 0 and loader.created <= host.created:
+        found.extend(p.pid for p in raw if p.ppid == loader.pid and p.created >= loader.created and p.pid != p.ppid)
+    own_image = image_of(me)
+    if own_image and "decky loader" in [part.lower() for part in os.path.normpath(own_image).split(os.sep)]:
+        name = os.path.basename(own_image).lower()
+        target = os.path.normcase(own_image)
+        found.extend(p.pid for p in raw if p.name.lower() == name and p.pid != me
+                     and os.path.normcase(image_of(p.pid) or "") == target)
+    # The plugin's own host stays signallable, as a plugin can end its own process on Linux
+    return [pid for pid in found if pid != host_pid]
+
+
 def real_context(host_pid: int) -> Context:
     table = WinProcessTable()
-    own, protected = own_and_protected(table.raw(), os.getpid(), host_pid)
-    return Context(table, own, protected)
+    raw = table.raw()
+    own, protected = own_and_protected(raw, os.getpid(), host_pid)
+    return Context(table, own, [*protected, *decky_processes(raw, os.getpid(), host_pid, image_path)])
 
 
 class UsageError(Exception):
@@ -660,7 +707,8 @@ def _name_matches(proc: Proc, name: str, regex: bool = False, icase: bool = True
     return proc.comm.lower() == comm_of(os.path.basename(name)).lower()
 
 
-def killall(args: list[str], ctx: Context, out: TextIO, err: TextIO, sleep: Callable[[float], None] = time.sleep) -> int:
+def killall(args: list[str], ctx: Context, out: TextIO, err: TextIO, sleep: Callable[[float], None] = time.sleep,
+            clock: Callable[[], float] = time.monotonic) -> int:
     signum = SIGNALS["TERM"]
     args = list(args)
     if args and args[0].startswith("-") and len(args[0]) > 1:
@@ -720,10 +768,17 @@ def killall(args: list[str], ctx: Context, out: TextIO, err: TextIO, sleep: Call
             status = 1
         signalled.extend(ok)
     if wait and ACTIONS.get(signum) == "terminate":
+        # By pid and creation time: a reused pid is a different process, not one still dying
+        pending = {(p.pid, p.create_time) for p in signalled}
+        deadline = clock() + WAIT_TIMEOUT
         while True:
-            alive = {p.pid for p in ctx.table.list()}
-            if not any(p.pid in alive for p in signalled):
+            pending &= {(p.pid, p.create_time) for p in ctx.table.list()}
+            if not pending:
                 break
+            if clock() >= deadline:
+                err.write(f"killall: gave up waiting after {WAIT_TIMEOUT:g} seconds for: "
+                          + ", ".join(str(pid) for pid, _ in sorted(pending)) + "\n")
+                return 1
             sleep(0.1)
     return status
 

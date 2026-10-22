@@ -7,7 +7,7 @@ never looked up on PATH. Output is UTF-8 with "\n" line ends, as on Linux.
 - ps, kill, pgrep, pkill, killall, pidof: winproctools
 - ping (only calls in iputils syntax; others keep Windows' ping.exe): winping
 - timedatectl, date: wintimedate
-- sudo, su, runuser: only reached when the wrapper can't simply be dropped (another user, or root from a plugin
+- sudo, su, runuser (and doas, pkexec, always): only reached when the wrapper can't simply be dropped (another user, or root from a plugin
   without administrator rights); they fail with an explanation instead of switching users or elevating.
 """
 import io
@@ -16,7 +16,7 @@ from typing import TextIO
 
 PROCESS_TOOLS = ("ps", "kill", "pgrep", "pkill", "killall", "pidof")
 TIME_TOOLS = ("timedatectl", "date")
-USER_SWITCH = ("sudo", "su", "runuser")
+USER_SWITCH = ("sudo", "su", "runuser", "doas", "pkexec")
 NAMES = frozenset(PROCESS_TOOLS + TIME_TOOLS + USER_SWITCH + ("ping",))
 
 

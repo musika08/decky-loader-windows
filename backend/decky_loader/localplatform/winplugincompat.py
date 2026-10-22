@@ -15,9 +15,10 @@ This module adds what can be faked cheaply inside the plugin process:
   then a few known install locations (Tailscale's CLI in Program Files)
 - list-form calls of Linux tools (ps, kill, pgrep, pkill, killall, pidof, ping in iputils syntax,
   timedatectl, date) run Decky's own versions (wincompattools); a leading sudo/su/runuser is dropped
-  when it wouldn't change the user, and refused otherwise; a Python script path runs on Decky's interpreter
-- shell=True commands: a simple command naming one of those tools runs as a list-form call, and
-  POSIX single quotes ('a b') become double quotes, which cmd.exe and programs understand
+  when it wouldn't change the user, and refused otherwise; in unelevated hosts, a Python script path
+  runs on Decky's interpreter
+- shell=True commands: a simple command naming one of those tools runs as a list-form call; any
+  other command reaches cmd.exe unchanged
 
 Not shimmed: /proc, /sys, /dev, systemctl, dbus, flatpak, pty/termios.
 Root plugins must not use /tmp (use DECKY_PLUGIN_RUNTIME_DIR): <SystemDrive>\tmp may be user-owned.
@@ -27,6 +28,7 @@ import ctypes
 import errno
 import msvcrt
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -453,7 +455,10 @@ def resolve_argv(args: Any, env: Mapping[Any, Any] | None, bin_dir: str = SHIM_B
 # --- Linux tools, user switches and scripts in subprocess calls --------------------------
 
 LINUX_BIN_DIRS = frozenset({"/bin", "/usr/bin", "/sbin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin"})
-USER_SWITCH = ("sudo", "su", "runuser")
+USER_SWITCH = ("sudo", "su", "runuser", "doas", "pkexec")
+UNWRAPPABLE = ("sudo", "su", "runuser") # doas and pkexec are always refused
+# A Windows-style switch argument (/t, /?, /all), as opposed to a Linux path or pattern
+_WINDOWS_SWITCH = re.compile(r"^/[^/\\\s]*$")
 # Shell syntax a command must not use to run as a list-form call instead
 _SHELL_SYNTAX = frozenset("|&;<>()$`\\*?[]{}~!#\n\r")
 
@@ -564,8 +569,11 @@ def unwrap_user_switch(argv: list[str], user: str, elevated: bool) -> list[str] 
             return None # VAR=value before the command
     elif name == "runuser":
         login_user: str | None = None
+        from_c = False
         while i < len(args):
             arg = args[i]
+            if from_c and (arg == "--" or not arg.startswith("-")):
+                return None # arguments for the user's shell after -c, as su refuses them
             if arg == "--":
                 command = args[i + 1:]
                 break
@@ -577,6 +585,7 @@ def unwrap_user_switch(argv: list[str], user: str, elevated: bool) -> list[str] 
                 command = split_simple_command(args[i + 1])
                 if command is None:
                     return None
+                from_c = True
                 i += 2
                 continue
             if arg in ("-m", "-p", "--preserve-environment", "-l", "-", "--login"):
@@ -625,7 +634,9 @@ def unwrap_user_switch(argv: list[str], user: str, elevated: bool) -> list[str] 
 
 def python_script(arg: Any) -> str | None:
     '''A Python script given by full path (drive or UNC): *.py/*.pyw, or a file without extension whose `#!` line
-    names python. CreateProcess can't run those; on Linux the kernel reads the `#!` line.'''
+    names python. CreateProcess can't run those; on Linux the kernel reads the `#!` line. For an extensionless
+    path, CreateProcess would run `<path>.exe` (or .com): when one exists, that stays the program.
+    Only for unelevated hosts (see rewrite_argv).'''
     if not isinstance(arg, (str, bytes, os.PathLike)):
         return None
     try:
@@ -635,13 +646,12 @@ def python_script(arg: Any) -> str | None:
         ext = os.path.splitext(path)[1].lower()
         if ext in (".py", ".pyw"):
             return path
-        if ext:
+        if ext or os.path.exists(path + ".exe") or os.path.exists(path + ".com"):
             return None
         with open(path, "rb") as f:
             first = f.readline(256)
     except (OSError, ValueError):
         return None
-    import re
     line = first.split(b"\n")[0].strip()
     return path if line.startswith(b"#!") and re.search(rb"(^#!|[/\s])python[0-9.]*(\s|$)", line) else None
 
@@ -669,19 +679,28 @@ def rewrite_argv(args: Any, env: Mapping[Any, Any] | None, config: CompatConfig)
             name = tool_name(argv[0])
             if name not in USER_SWITCH:
                 break
-            inner = unwrap_user_switch([os.fsdecode(a) for a in argv], config.user, config.elevated)
+            inner = unwrap_user_switch([os.fsdecode(a) for a in argv], config.user, config.elevated) \
+                if name in UNWRAPPABLE else None
             if inner is None:
                 _log.warning(f"refusing {name}: Decky can't run commands as another user on Windows")
                 return _tool_argv(config, name, argv[1:]) or argv
             argv = list(inner)
         name = tool_name(argv[0])
-        if name is not None and name not in USER_SWITCH:
+        if name in USER_SWITCH:
+            # Still a switch after three: never let one reach a real program (Windows' own sudo.exe)
+            _log.warning(f"refusing nested {name}")
+            return _tool_argv(config, name, argv[1:]) or argv
+        if name is not None:
             texts = [os.fsdecode(a) for a in argv[1:]]
-            if name != "ping" or is_linux_syntax(texts):
+            # `date /t` and the like are Windows commands: leave them to Windows
+            windows_style = any(_WINDOWS_SWITCH.match(t) for t in texts)
+            if not windows_style and (name != "ping" or is_linux_syntax(texts)):
                 tool = _tool_argv(config, name, texts)
                 if tool is not None:
                     return tool
-        script = python_script(argv[0])
+        # An elevated host never looks inside files: a medium-integrity process may have planted one next to the
+        # program the plugin meant (user-writable ProgramData folders)
+        script = None if config.elevated else python_script(argv[0])
         if script is not None:
             interpreter = config.interpreter()
             if interpreter:
@@ -700,57 +719,10 @@ def _startable(program: Any) -> bool:
     return name is not None and _found_as_exe(name)
 
 
-def translate_posix_quotes(command: str) -> str:
-    '''POSIX single-quoted words ('a b') as double-quoted ones ("a b") for cmd.exe and the program's argument parser,
-    which don't know single quotes. Unchanged when there are none, when they are unbalanced, or when a quoted part
-    holds something cmd.exe would still interpret inside double quotes (" % ! ^ and the like) or a control character.
-    Double-quoted POSIX text is left as it is.'''
-    if "'" not in command:
-        return command
-    out: list[str] = []
-    in_double = changed = False
-    i = 0
-    while i < len(command):
-        c = command[i]
-        if in_double:
-            out.append(c)
-            if c == "\\" and i + 1 < len(command):
-                out.append(command[i + 1])
-                i += 2
-                continue
-            in_double = c != '"'
-            i += 1
-            continue
-        if c == '"':
-            in_double = True
-            out.append(c)
-        elif c == "\\" and command[i + 1:i + 2] == "'":
-            out.append("'") # an escaped quote is a literal one
-            changed = True
-            i += 1
-        elif c == "'":
-            end = command.find("'", i + 1)
-            if end < 0:
-                return command
-            content = command[i + 1:end]
-            if any(ch in _CMD_SPECIAL or ord(ch) < 32 for ch in content):
-                return command
-            # Backslashes right before the closing quote would escape it for the program's argument parser
-            bare = content.rstrip("\\")
-            out.append('"' + bare + "\\" * (2 * (len(content) - len(bare))) + '"')
-            changed = True
-            i = end
-        else:
-            out.append(c)
-        i += 1
-    if in_double or not changed:
-        return command
-    return "".join(out)
-
-
 def rewrite_shell(command: Any, env: Mapping[Any, Any] | None, config: CompatConfig) -> tuple[Any, bool]:
     '''(args, shell) for a shell=True call: a simple command naming one of Decky's tools or a user switch runs as a
-    list-form call (no cmd.exe, which would also mangle its quoting); otherwise POSIX single quotes are translated.'''
+    list-form call (no cmd.exe, which would also mangle its quoting). Every other command goes to cmd.exe unchanged:
+    rewriting its quoting is not safe for programs that parse their command line again (powershell -Command).'''
     if not isinstance(command, str):
         return command, True
     try:
@@ -760,7 +732,7 @@ def rewrite_shell(command: Any, env: Mapping[Any, Any] | None, config: CompatCon
             # Only when the result surely starts: through cmd.exe a missing program is exit code 1, not an exception
             if argv != words and _startable(argv[0]):
                 return argv, False
-        return translate_posix_quotes(command), True
+        return command, True
     except Exception as e:
         _log.warning(f"shell command rewrite failed: {e}")
         return command, True
