@@ -6,6 +6,7 @@ import { FaBan, FaEyeSlash } from 'react-icons/fa';
 import { useDeckyState } from './DeckyState';
 import NotificationBadge from './NotificationBadge';
 import { useQuickAccessVisible } from './QuickAccessVisibleState';
+import SafeModeBanner from './SafeModeBanner';
 import TitleView from './TitleView';
 
 const PluginView: FC = () => {
@@ -51,6 +52,7 @@ const PluginView: FC = () => {
   return (
     <>
       <TitleView />
+      <SafeModeBanner />
       <div
         style={{
           paddingTop: '16px',

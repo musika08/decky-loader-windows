@@ -184,6 +184,9 @@
             "label": "Allow Remote CEF Debugging"
         }
     },
+    "SafeMode": {
+        "banner": "Safe mode: plugins are off"
+    },
     "SettingsDeveloperIndex": {
         "cef_console": {
             "button": "Open Console",

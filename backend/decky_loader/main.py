@@ -48,6 +48,14 @@ basicConfig(
 logger = getLogger("Main")
 plugin_path = path.join(get_privileged_path(), "plugins")
 
+def safe_mode_flag_path() -> str:
+    # Next to the settings directory (Windows installed mode: %ProgramData%\decky\safe-mode), so only an admin can set it there
+    return path.join(get_privileged_path(), "safe-mode")
+
+def safe_mode_enabled() -> bool:
+    # The file's content is ignored; its presence turns plugin loading off
+    return path.isfile(safe_mode_flag_path())
+
 def gamepadui_poll_seconds() -> float:
     # Windows: Big Picture can be opened at any time, so pick it up quickly. Linux keeps its original interval.
     return 1 if ON_WINDOWS else 5
@@ -204,7 +212,7 @@ class PluginManager:
         loop.default_exception_handler(context)
 
     def own_routes(self) -> list[RouteDef]: # pyright: ignore [reportUnknownParameterType]
-        return [get("/auth/token", self.get_auth_token), get("/status/frontend", self.get_frontend_status)] # pyright: ignore [reportUnknownVariableType, reportUnknownMemberType]
+        return [get("/auth/token", self.get_auth_token), get("/status/frontend", self.get_frontend_status), get("/status/safe-mode", self.get_safe_mode_status)] # pyright: ignore [reportUnknownVariableType, reportUnknownMemberType]
 
     async def get_auth_token(self, request: Request):
         return Response(text=get_csrf_token())
@@ -214,11 +222,18 @@ class PluginManager:
         since = self.frontend_loaded_since
         return json_response({"loaded": since is not None, "since": since}, headers={"Cache-Control": "no-store"}) # pyright: ignore [reportUnknownVariableType]
 
+    async def get_safe_mode_status(self, request: Request) -> Response: # pyright: ignore [reportUnknownParameterType]
+        # Unauthenticated (see csrf_middleware): only says whether the safe-mode flag file is present
+        return json_response({"safe_mode": safe_mode_enabled()}, headers={"Cache-Control": "no-store"}) # pyright: ignore [reportUnknownVariableType]
+
     def set_frontend_loaded(self, loaded: bool):
         self.frontend_loaded_since = time() if loaded else None
 
     async def load_plugins(self):
         # await self.wait_for_server()
+        if safe_mode_enabled():
+            logger.info("Safe mode: plugins not loaded")
+            return
         logger.debug("Loading plugins")
         # Before the scan: an update interrupted mid-swap may have left the previous version in its workspace.
         self.plugin_browser.recover_install_workspaces()
