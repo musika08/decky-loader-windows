@@ -252,34 +252,8 @@ def test_cwd_moves_to_system_drive(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 # --- PATH helpers ---
 
-def _dry_xdg_open(tmp_path: Path) -> str:
-    # Same script, but it echoes instead of opening anything
-    text = Path(compat.SHIM_BIN_DIR, "xdg-open.cmd").read_text()
-    assert 'start "" "!arg!"' in text
-    script = tmp_path / "xdg-open.cmd"
-    script.write_text(text.replace('start "" "!arg!"', 'echo OPEN "!arg!"'))
-    return str(script)
-
-
-# Args contain a space so subprocess quotes them and they reach the script intact
-@pytest.mark.parametrize("arg", ['a "b', "50 %", "a ^b", "https://x?a=1 &b=2", "a |b", "a <b", "a >b", ""])
-def test_xdg_open_refuses_cmd_syntax(tmp_path: Path, arg: str):
-    r = subprocess.run([_dry_xdg_open(tmp_path), arg], capture_output=True, text=True, timeout=30)
-    assert r.returncode != 0
-    assert "OPEN" not in r.stdout
-
-
-def test_xdg_open_passes_plain_urls(tmp_path: Path):
-    script = _dry_xdg_open(tmp_path)
-    for arg, opened in (("https://example.com/a?b=c=d", "https://example.com/a?b=c=d"),  # unquoted: cmd splits at "="
-                        ("'https://example.com/?q=1'", "https://example.com/?q=1"),
-                        (r"C:\Users\me\some file.txt", r"C:\Users\me\some file.txt")):
-        r = subprocess.run([script, arg], capture_output=True, text=True, timeout=30)
-        assert (r.returncode, r.stdout.strip()) == (0, f'OPEN "{opened}"')
-
-
-def test_shim_bin_dir_ships_both_scripts():
-    assert sorted(os.listdir(compat.SHIM_BIN_DIR)) == ["chmod.cmd", "xdg-open.cmd"]
+def test_shim_bin_dir_ships_only_chmod():
+    assert os.listdir(compat.SHIM_BIN_DIR) == ["chmod.cmd"]
 
 
 def test_prepend_shim_bin_once():

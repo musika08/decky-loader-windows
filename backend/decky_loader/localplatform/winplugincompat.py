@@ -9,7 +9,7 @@ This module adds what can be faked cheaply inside the plugin process:
 - `pwd` / `grp` describing the current user, and os.getuid & co. (0 elevated, else 1000)
 - unelevated hosts only: cwd on the system drive, `<SystemDrive>\tmp`, and
   `<SystemDrive>\home\<user>` and `\home\deck` junctions to the user profile
-- a bin dir on PATH with `xdg-open.cmd` and a no-op `chmod.cmd`
+- a bin dir on PATH with a no-op `chmod.cmd`
 
 Not shimmed: /proc, /sys, /dev, systemctl, dbus, flatpak, pty/termios.
 Root plugins must not use /tmp (use DECKY_PLUGIN_RUNTIME_DIR): <SystemDrive>\tmp may be user-owned.
