@@ -182,3 +182,32 @@ def test_status_route_needs_no_token_but_others_still_do(main_mod: Any):
             assert (await client.get("/methods/secret", headers={"X-Decky-Auth": get_csrf_token()})).status == 200
 
     asyncio.run(go())
+
+
+@pytest.mark.parametrize("raw", ["/status%2Ffrontend", "/status%2ffrontend", "/status/%66rontend", "/%73tatus/frontend",
+                                 "/status/frontend%2F", "/status%2Ffrontend?x=1", "/STATUS/frontend"])
+def test_status_exemption_needs_the_literal_path(main_mod: Any, monkeypatch: pytest.MonkeyPatch, raw: str):
+    from yarl import URL
+    from decky_loader.helpers import csrf_middleware, get_csrf_token
+    pm = _manager(main_mod)
+    reached: list[str] = []
+    real = pm.get_frontend_status
+
+    async def counting(request: Any) -> Any:
+        reached.append(request.raw_path)
+        return await real(request)
+
+    monkeypatch.setattr(pm, "get_frontend_status", counting)
+
+    async def go() -> None:
+        app = Application(middlewares=[csrf_middleware])
+        app.add_routes(pm.own_routes())
+        async with TestClient(TestServer(app)) as client:
+            url = URL(raw, encoded=True)
+            res = await client.get(url)
+            assert res.status in (403, 404), raw
+            assert reached == [], raw # never reaches a handler without the token
+            authed = await client.get(url, headers={"X-Decky-Auth": get_csrf_token()})
+            assert authed.status in (200, 404), raw # the token still works for whatever the router matches
+
+    asyncio.run(go())

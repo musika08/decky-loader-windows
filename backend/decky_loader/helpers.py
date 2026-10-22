@@ -36,7 +36,9 @@ def get_csrf_token():
 
 def is_public_status(request: Request) -> bool: # pyright: ignore [reportUnknownParameterType]
     '''Read-only status other local apps may poll without the token (see PluginManager.get_frontend_status).'''
-    return str(request.rel_url.path) == "/status/frontend" # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+    # The raw path too: a percent-encoded spelling (e.g. /status%2Ffrontend) must not be exempt
+    url = request.rel_url # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
+    return str(url.raw_path) == "/status/frontend" and str(url.path) == "/status/frontend" # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
 
 @middleware
 async def csrf_middleware(request: Request, handler: Handler):
