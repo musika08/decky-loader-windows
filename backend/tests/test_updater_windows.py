@@ -153,15 +153,16 @@ def test_spec_parses_noconsole_as_1_only():
     assert "bool(noconsole_str)" not in text
 
 
-# Installed mode (onedir in Program Files) is updated by re-running the installer, never in-app
+# Installed mode (the Python runtime and source in Program Files) is updated by re-running the installer, never in-app
 
 def _installed_layout(tmp_path: Path, monkeypatch: Any) -> Path:
     from decky_loader.localplatform import localplatformwin, wininstall
     app = tmp_path / "Program Files" / "Decky Loader"
-    (app / "_internal").mkdir(parents=True)
-    running = app / "PluginLoader.exe"
+    (app / "python").mkdir(parents=True)
+    running = app / "python" / "pythonw.exe"
     running.write_bytes(b"old")
     monkeypatch.setattr(sys, "executable", str(running))
+    monkeypatch.setattr(localplatformwin, "running_main_script", lambda: str(app / "app" / "main.py"))
     monkeypatch.setattr(wininstall, "known_program_files", lambda: str(tmp_path / "Program Files"))
     monkeypatch.setattr(localplatformwin, "known_program_data", lambda: str(tmp_path / "ProgramData"))
     monkeypatch.chdir(tmp_path)
@@ -183,6 +184,8 @@ def test_installed_mode_is_supported_without_the_in_app_updater(tmp_path: Path, 
     assert info["supported"] is True
     assert info["updater_available"] is False
     assert r"tools\update-decky.ps1" in str(info["updater_unavailable_reason"])
+    assert r"python\python.exe app\main.py --install" in str(info["updater_unavailable_reason"])
+    assert "PluginLoader.exe" not in str(info["updater_unavailable_reason"])
 
 
 def test_not_supported_for_a_onedir_build(tmp_path: Any, monkeypatch: Any):
@@ -214,6 +217,6 @@ def test_installed_mode_never_writes_a_new_file(tmp_path: Path, monkeypatch: Any
     running = _installed_layout(tmp_path, monkeypatch)
     with pytest.raises(Exception, match="not supported in installed mode"):
         _run(PAYLOAD, is_zip=False)
-    assert sorted(os.listdir(running.parent)) == ["PluginLoader.exe", "_internal"]
+    assert sorted(os.listdir(running.parent)) == ["pythonw.exe"]
     assert running.read_bytes() == b"old"
     assert not (tmp_path / ".loader.version").exists()

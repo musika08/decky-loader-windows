@@ -106,12 +106,16 @@ def attach_parent_console(kernel32: Any = None, opener: Callable[[str, str], Any
     sys.stdout, sys.stderr = out, err
     return True
 
-def self_command() -> list[str]:
-    '''Command that starts another copy of this program, without mode flags.'''
-    if getattr(sys, "frozen", False):
-        return [sys.executable]
-    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "main.py")
-    return [sys.executable, main_py]
+def self_command(*, executable: str | None = None, frozen: bool | None = None, package_file: str = __file__) -> list[str]:
+    r'''Command that starts another copy of this program, without mode flags.
+
+    A PyInstaller build is just its exe. From source (installed mode included), it is this interpreter running the
+    main.py next to the decky_loader package: `<dir>\python\pythonw.exe <dir>\app\main.py` when installed.'''
+    executable = executable or sys.executable
+    if getattr(sys, "frozen", False) if frozen is None else frozen:
+        return [executable]
+    main_py = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(package_file)))), "main.py")
+    return [executable, main_py]
 
 def next_backoff(prev: float, ran_for: float) -> float:
     if ran_for >= HEALTHY_RUN_SECONDS or prev <= 0:

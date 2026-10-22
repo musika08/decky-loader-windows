@@ -326,7 +326,7 @@
             "label": "Updates",
             "lat_version": "Up to date: running {{ver}}",
             "reloading": "Reloading",
-            "unavailable": "Decky can't update itself here. Updates are installed with tools\\update-decky.ps1, or by running PluginLoader.exe --install from a new installer zip.",
+            "unavailable": "Decky can't update itself here. Updates are installed with tools\\update-decky.ps1, or by running python\\python.exe app\\main.py --install from a new installer folder.",
             "updating": "Updating"
         }
     },

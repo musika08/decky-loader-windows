@@ -37,13 +37,13 @@ class TestingVersion(TypedDict):
 def windows_update_blocker() -> str | None:
     """Why the in-app updater must not update this Windows copy, or None if it may.
 
-    It only swaps a single `.new` exe in next to a portable onefile exe. Installed mode runs a onedir build from
-    Program Files, which is updated by running the new installer's `--install` instead."""
+    It only swaps a single `.new` exe in next to a portable onefile exe. Installed mode runs Decky from source on a
+    private Python runtime in Program Files, which is updated by running a new installer folder's `--install` instead."""
     from .localplatform.localplatformwin import installed_root
     from .localplatform.winsupervisor import is_onedir_build
     if installed_root() is not None:
         return ("In-app updates are not supported in installed mode. Updates are installed with tools\\update-decky.ps1, "
-                "or by running PluginLoader.exe --install from a new installer zip.")
+                "or by running python\\python.exe app\\main.py --install from a new installer folder.")
     if is_onedir_build():
         return "In-app updates are not supported for the onedir (installer) build. Use the installer zip, or the portable single-file exe."
     return None

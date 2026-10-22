@@ -44,6 +44,34 @@ def test_child_argv_is_self_command_plus_loader():
     assert spawn.calls[0] == ws.self_command() + ["--loader"]
 
 
+INSTALLED = r"C:\Program Files\Decky Loader"
+
+
+def test_self_command_in_installed_mode_is_the_runtime_on_app_main_py():
+    package_file = INSTALLED + r"\app\decky_loader\localplatform\winsupervisor.py"
+    for interpreter in ("pythonw.exe", "python.exe"):
+        exe = INSTALLED + "\\python\\" + interpreter
+        assert ws.self_command(executable=exe, frozen=False, package_file=package_file) == [exe, INSTALLED + r"\app\main.py"]
+
+
+def test_self_command_of_a_pyinstaller_build_is_the_exe_alone():
+    assert ws.self_command(executable=r"C:\p\PluginLoader-win.exe", frozen=True) == [r"C:\p\PluginLoader-win.exe"]
+
+
+def test_self_command_defaults_to_this_interpreter_and_the_checkout_main_py():
+    cmd = ws.self_command()
+    assert cmd[0] == sys.executable
+    assert os.path.normcase(cmd[1]) == os.path.normcase(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py"))
+
+
+def test_supervisor_from_source_spawns_the_loader_with_its_interpreter_and_main_py(monkeypatch: pytest.MonkeyPatch):
+    exe = INSTALLED + r"\python\pythonw.exe"
+    monkeypatch.setattr(sys, "executable", exe)
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    _, spawn, _, _ = run([43], exe=exe)
+    assert spawn.calls[0] == [exe, ws.self_command()[1], "--loader"]
+
+
 def test_crash_backs_off():
     _, _, sleeps, _ = run([1, 1, 43])
     assert sleeps == [1.0, 2.0]
