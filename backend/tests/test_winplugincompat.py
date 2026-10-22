@@ -270,6 +270,155 @@ def test_chmod_cmd_is_found_and_succeeds():
     r = subprocess.run("chmod +x somefile", shell=True, env=env, capture_output=True, timeout=30)
     assert r.returncode == 0
 
+# --- program lookup ---
+
+SYSTEM32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+
+
+@pytest.fixture
+def lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    '''Lets a test install the program lookup on subprocess.Popen; monkeypatch restores the original.'''
+    monkeypatch.setattr(subprocess.Popen, "_execute_child", _execute_child())
+
+
+def _execute_child() -> Any:
+    return getattr(subprocess.Popen, "_execute_child")
+
+
+def _shim_dir(tmp_path: Path, name: str = "winbin") -> Path:
+    d = tmp_path / name
+    d.mkdir(parents=True)
+    (d / "deckyshimtest.cmd").write_text("@echo off\r\necho shim:%*\r\nexit /b 7\r\n")
+    return d
+
+
+def _env(*dirs: Path | str) -> dict[str, str]:
+    env = dict(os.environ)
+    env["PATH"] = os.pathsep.join([*map(str, dirs), SYSTEM32])
+    return env
+
+
+def test_list_call_misses_cmd_without_lookup(tmp_path: Path):
+    d = _shim_dir(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(["deckyshimtest"], env=_env(d), capture_output=True, timeout=30)
+
+
+def test_list_call_finds_shim_cmd(tmp_path: Path, lookup: None):
+    d = _shim_dir(tmp_path, "Decky Loader/winbin")  # the installed path has a space
+    assert compat.install_program_lookup(bin_dir=str(d))
+    r = subprocess.run(["deckyshimtest", "+x", "a b.txt", "plain"], env=_env(d), capture_output=True, text=True, timeout=30)
+    assert r.returncode == 7
+    assert r.stdout.strip() == 'shim:+x "a b.txt" plain'
+
+
+def test_asyncio_exec_finds_shim_cmd(tmp_path: Path, lookup: None):
+    import asyncio
+    d = _shim_dir(tmp_path)
+    compat.install_program_lookup(bin_dir=str(d))
+
+    async def run() -> tuple[int | None, bytes]:
+        p = await asyncio.create_subprocess_exec("deckyshimtest", "x", env=_env(d), stdout=subprocess.PIPE)
+        out, _ = await p.communicate()
+        return p.returncode, out
+    code, out = asyncio.run(run())
+    assert code == 7 and out.strip() == b"shim:x"
+
+
+def test_install_is_idempotent(lookup: None):
+    assert compat.install_program_lookup()
+    wrapped = _execute_child()
+    assert not compat.install_program_lookup()
+    assert _execute_child() is wrapped
+
+
+def test_real_chmod_list_call_succeeds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lookup: None):
+    # A PATH without Git's chmod.exe, as in the plugin host; CreateProcess searches the process PATH
+    monkeypatch.setenv("PATH", SYSTEM32)
+    compat.prepend_shim_bin(os.environ)
+    compat.install_program_lookup()
+    f = tmp_path / "f"
+    f.write_text("")
+    assert subprocess.run(["chmod", "+x", str(f)], capture_output=True, timeout=30).returncode == 0
+
+
+def test_cmd_outside_shim_dir_is_not_run(tmp_path: Path, lookup: None):
+    shim, other = tmp_path / "winbin", _shim_dir(tmp_path, "other")
+    shim.mkdir()
+    compat.install_program_lookup(bin_dir=str(shim))
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(["deckyshimtest"], env=_env(shim, other), capture_output=True, timeout=30)
+
+
+@pytest.mark.parametrize("arg", ['a"b', "a&calc", "50%", "x|y", "a^b", "(a)", "a\nb", "!x!"])
+def test_shim_cmd_refuses_cmd_special_args(tmp_path: Path, lookup: None, arg: str):
+    d = _shim_dir(tmp_path)
+    compat.install_program_lookup(bin_dir=str(d))
+    with pytest.raises(FileNotFoundError):
+        subprocess.run(["deckyshimtest", arg], env=_env(d), capture_output=True, timeout=30)
+
+
+def test_com_found_anywhere_on_path(tmp_path: Path, lookup: None):
+    import shutil
+    d = tmp_path / "tools"
+    d.mkdir()
+    shutil.copy(os.path.join(SYSTEM32, "hostname.exe"), d / "deckyhosttest.com")
+    compat.install_program_lookup(bin_dir=str(tmp_path / "winbin"))
+    r = subprocess.run(["deckyhosttest"], env=_env(d), capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and r.stdout.strip()
+
+
+def test_shell_and_executable_calls_untouched(tmp_path: Path):
+    seen: list[Any] = []
+
+    class FakePopen:
+        def _execute_child(self, args: Any, executable: Any, *rest: Any) -> None:
+            seen.append(args)
+    d = _shim_dir(tmp_path)
+    compat.install_program_lookup(FakePopen, bin_dir=str(d))
+    env = _env(d)
+    child: Any = getattr(FakePopen(), "_execute_child")
+    child(["deckyshimtest"], None, None, True, (), None, env, None, 0, True)
+    child(["deckyshimtest"], "x.exe", None, True, (), None, env, None, 0, False)
+    child("deckyshimtest", None, None, True, (), None, env, None, 0, False)
+    child(("deckyshimtest", "a"), None, None, True, (), None, env, None, 0, False)
+    assert seen[:3] == [["deckyshimtest"], ["deckyshimtest"], "deckyshimtest"]
+    assert seen[3] == [str(d / "deckyshimtest.cmd"), "a"]
+
+
+@pytest.mark.parametrize("argv0", ["deckyshimtest.cmd", r".\deckyshimtest", "sub/deckyshimtest", "C:deckyshimtest", "deckyshimtest.", ""])
+def test_only_bare_names_are_resolved(tmp_path: Path, argv0: str):
+    d = _shim_dir(tmp_path)
+    assert compat.resolve_argv([argv0, "a"], _env(d), str(d)) == [argv0, "a"]
+
+
+def test_names_createprocess_finds_are_left_alone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    d = _shim_dir(tmp_path)
+    (d / "where.cmd").write_text("@exit /b 0\r\n")
+    assert compat.resolve_argv(["where"], _env(d), str(d)) == ["where"]  # System32\where.exe
+    def found(name: str) -> bool:
+        return True
+    monkeypatch.setattr(compat, "_found_as_exe", found)
+    assert compat.resolve_argv(["deckyshimtest"], _env(d), str(d)) == ["deckyshimtest"]
+
+
+def test_find_program_rules(tmp_path: Path):
+    shim, a, b = tmp_path / "winbin", tmp_path / "a", tmp_path / "b"
+    for d in (shim, a, b):
+        d.mkdir()
+    (a / "tool.cmd").write_text("")
+    (a / "tool.bat").write_text("")
+    (b / "tool.exe").write_text("")
+    (shim / "tool.cmd").write_text("")
+    env = {"Path": os.pathsep.join(["relative", str(a), str(b), str(shim)])}
+    assert compat.find_program("tool", env, str(shim)) == str(b / "tool.exe")
+    assert compat.find_program("tool", {"PATH": f'"{shim}"{os.pathsep}{b}'}, str(shim)) == str(shim / "tool.cmd")
+    (b / "tool.com").write_text("")
+    assert compat.find_program("tool", env, str(shim)) == str(b / "tool.com")  # PATHEXT order
+    assert compat.find_program("tool", dict(env, PATHEXT=".EXE;.COM"), str(shim)) == str(b / "tool.exe")
+    assert compat.find_program("tool", {"PATH": str(a)}, str(shim)) is None
+    assert compat.find_program("tool", {}, str(shim)) is None
+
 # --- entry point ---
 
 def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool) -> tuple[Path, dict[str, str], dict[str, Any]]:
@@ -284,7 +433,10 @@ def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool
         mods["uid"] = uid
     def no_chdir(*_a: object) -> None:
         pass
+    def install_program_lookup() -> None:
+        mods["lookup"] = True
     monkeypatch.setattr(compat, "install_modules", install_modules)
+    monkeypatch.setattr(compat, "install_program_lookup", install_program_lookup)
     monkeypatch.setattr(compat, "install_os_ids", install_os_ids)
     monkeypatch.setattr(compat, "ensure_cwd_on_drive", no_chdir)
     env = {"PATH": r"C:\Windows"}
@@ -296,6 +448,7 @@ def test_install_unelevated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, env, mods = _run_install(tmp_path, monkeypatch, False)
     assert {"fcntl", "pwd", "grp"} <= set(mods)
     assert mods["uid"] == 1000 and mods["pwd"].getpwnam("deck").pw_uid == 1000
+    assert mods["lookup"]
     assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
     assert (root / "tmp").is_dir() and os.path.isjunction(root / "home" / "deck")
 
@@ -303,6 +456,7 @@ def test_install_unelevated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_install_elevated_changes_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, env, mods = _run_install(tmp_path, monkeypatch, True)
     assert mods["uid"] == 0 and mods["pwd"].getpwuid(0).pw_name == "Me"
+    assert mods["lookup"]
     assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
     assert os.listdir(root) == []
 
@@ -310,7 +464,7 @@ def test_install_elevated_changes_no_files(tmp_path: Path, monkeypatch: pytest.M
 def test_install_never_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     def boom(*_a: object) -> None:
         raise RuntimeError("boom")
-    for name in ("install_modules", "install_os_ids", "prepend_shim_bin", "ensure_cwd_on_drive", "ensure_tmp", "ensure_home_links"):
+    for name in ("install_modules", "install_os_ids", "prepend_shim_bin", "install_program_lookup", "ensure_cwd_on_drive", "ensure_tmp", "ensure_home_links"):
         monkeypatch.setattr(compat, name, boom)
     monkeypatch.setattr(compat, "_is_elevated", boom)
     compat.install_plugin_compat()
