@@ -143,10 +143,10 @@ Plugins that depend on Linux-specific features (Proton, flatpak, SteamOS-only to
 
 Plugins are written for SteamOS. To let more of them load unchanged, Decky adds a few stand-ins inside each plugin's process:
 
-- `fcntl`: `flock` and `lockf` work as whole-file locks. Shared locks (`LOCK_SH`) are exclusive on Windows. `fcntl.fcntl` flag calls do nothing, and `ioctl` fails.
+- `fcntl`: `flock` and `lockf` work as whole-file locks. Shared locks (`LOCK_SH`) are exclusive on Windows, and `lockf` locks taken through two different file descriptors conflict even inside one process (on Linux they belong to the process). `fcntl.fcntl` flag calls do nothing, and `ioctl` fails.
 - `pwd` and `grp`: describe the current Windows user, with the user profile as home directory. `os.getuid()` and similar return 0 for `root` plugins running with administrator rights and 1000 otherwise. `os.chown` does nothing.
-- `/tmp` and `/home/deck`: for plugins without administrator rights, Decky creates `C:\tmp` and links `C:\home\deck` and `C:\home\<your user name>` to your user profile, if those names are free. Existing files and folders are never replaced. Plugins with administrator rights do not get these.
-- `xdg-open` (opens a file or link with its default program) and `chmod` (does nothing) are on the plugin's `PATH`. They are `.cmd` scripts, so they are found by `shell=True` commands and `shutil.which`, but not by a plain `subprocess.run(["chmod", ...])`.
+- `/tmp` and `/home/deck`: for plugins without administrator rights, Decky creates `C:\tmp` and links `C:\home\deck` and `C:\home\<your user name>` to your user profile, if those names are free. Existing files and folders are never replaced. Plugins with administrator rights do not get these, and should not use `/tmp` at all, because `C:	mp` may be owned by a standard user. Use `DECKY_PLUGIN_RUNTIME_DIR` instead.
+- `xdg-open` (opens a file or link with its default program) and `chmod` (does nothing) are on the plugin's `PATH`. They are `.cmd` scripts, so they are found by `shell=True` commands and `shutil.which`, but not by a plain `subprocess.run(["chmod", ...])`. `xdg-open` refuses arguments containing `"`, `%`, `^`, `&`, `|`, `<` or `>`. Like any `.cmd` script, it is run through `cmd.exe`, so a plugin must never pass it untrusted text.
 
 Not covered: `/proc`, `/sys`, `/dev`, `systemctl`, D-Bus, flatpak, `pty`/`termios`, and Linux programs bundled with a plugin. Plugins that need these must be ported.
 

@@ -12,12 +12,15 @@ This module adds what can be faked cheaply inside the plugin process:
 - a bin dir on PATH with `xdg-open.cmd` and a no-op `chmod.cmd`
 
 Not shimmed: /proc, /sys, /dev, systemctl, dbus, flatpak, pty/termios.
+Root plugins must not use /tmp (use DECKY_PLUGIN_RUNTIME_DIR): <SystemDrive>\tmp may be user-owned.
 Everything is best effort; a failing shim is logged and never stops a plugin from loading.
 """
 import errno
 import msvcrt
 import os
+import stat
 import sys
+import threading
 import time
 import types
 import _winapi  # pyright: ignore [reportMissingImports]
@@ -41,7 +44,8 @@ FD_CLOEXEC = 1
 # Lock one byte far past any real lock file's end so the file itself stays readable.
 _LOCK_OFFSET = 0x7FFFFFFE
 _RETRY_DELAY = 0.05
-_held: set[tuple[int, int]] = set()
+# Seek, lock, seek back must not interleave between threads sharing an fd
+_seek_lock = threading.Lock()
 
 
 def _fileno(f: Any) -> int:
@@ -53,47 +57,48 @@ def _fileno(f: Any) -> int:
     return int(fileno())
 
 
-def _key(fd: int) -> tuple[int, int]:
-    # The handle disambiguates a closed fd number that got reused for another file
-    return fd, msvcrt.get_osfhandle(fd)
-
-
 def _locking(fd: int, mode: int) -> None:
-    pos = os.lseek(fd, 0, os.SEEK_CUR)
+    with _seek_lock:
+        pos = os.lseek(fd, 0, os.SEEK_CUR)
+        try:
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, mode, 1)
+        finally:
+            os.lseek(fd, pos, os.SEEK_SET)
+
+
+def _try(fd: int, mode: int) -> bool:
     try:
-        os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
-        msvcrt.locking(fd, mode, 1)
-    finally:
-        os.lseek(fd, pos, os.SEEK_SET)
+        _locking(fd, mode)
+        return True
+    except OSError as e:
+        ok = (errno.EACCES, errno.EDEADLOCK) + ((errno.EINVAL,) if mode == msvcrt.LK_UNLCK else ())
+        if e.errno not in ok:
+            raise
+        return False
 
 
 def _lock(f: Any, operation: int) -> None:
     fd = _fileno(f)
-    key = _key(fd)
     if operation & LOCK_UN:
-        if key in _held:
-            _held.discard(key)
-            try:
-                _locking(fd, msvcrt.LK_UNLCK)
-            except OSError:
-                pass
+        # Unlocking something this handle doesn't hold is fine on Linux
+        _try(fd, msvcrt.LK_UNLCK)
         return
     if not operation & (LOCK_SH | LOCK_EX):
         raise OSError(errno.EINVAL, os.strerror(errno.EINVAL))
-    if key in _held:
-        # flock on an fd that already holds the lock just converts it on Linux
+    if _try(fd, msvcrt.LK_NBLCK):
+        return
+    # Conflict. Windows refuses a second lock from the same handle, while Linux treats it as a
+    # no-op; UnlockFile only succeeds for the handle that holds the lock, so that tells which it is.
+    # Nothing is remembered between calls: fd and handle numbers get reused after close.
+    if _try(fd, msvcrt.LK_UNLCK) and _try(fd, msvcrt.LK_NBLCK):
         return
     while True:
-        try:
-            _locking(fd, msvcrt.LK_NBLCK)
-            break
-        except OSError as e:
-            if e.errno not in (errno.EACCES, errno.EDEADLOCK):
-                raise
-            if operation & LOCK_NB:
-                raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable") from None
+        if operation & LOCK_NB:
+            raise BlockingIOError(errno.EAGAIN, "Resource temporarily unavailable")
         time.sleep(_RETRY_DELAY)
-    _held.add(key)
+        if _try(fd, msvcrt.LK_NBLCK):
+            return
 
 
 def flock(fd: Any, operation: int) -> None:
@@ -101,7 +106,8 @@ def flock(fd: Any, operation: int) -> None:
 
 
 def lockf(fd: Any, cmd: int, len: int = 0, start: int = 0, whence: int = 0) -> None:
-    '''Locks the whole file; len/start/whence are ignored.'''
+    '''Locks the whole file; len/start/whence are ignored. Unlike Linux, where lockf locks belong
+    to the process, two fds on the same file in one process conflict here (as with flock).'''
     _lock(fd, cmd)
 
 
@@ -229,7 +235,12 @@ def install_modules(modules: dict[str, Callable[[], types.ModuleType]],
 # --- Linux paths (unelevated hosts only) -----------------------------------------------
 
 def _is_link(path: str) -> bool:
-    return os.path.isjunction(path) or os.path.islink(path)
+    '''Junction, symlink or any other reparse point (os.path.isjunction needs Python 3.12).'''
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
 
 
 def _drive(path: str) -> str:
