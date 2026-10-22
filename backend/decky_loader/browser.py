@@ -9,6 +9,8 @@ from asyncio import Lock, TimeoutError, sleep
 from hashlib import sha256
 from io import BytesIO
 from logging import getLogger
+import os
+import stat
 from os import R_OK, W_OK, path, listdir, access, mkdir, rename
 from secrets import token_hex
 from shutil import rmtree
@@ -30,6 +32,39 @@ logger = getLogger("Browser")
 # Windows: how often to retry renaming a plugin directory that something still holds open
 RENAME_ATTEMPTS = 10
 RENAME_RETRY_DELAY = 0.5
+
+WORKSPACE_PREFIX = ".decky-install-"
+# Written next to the backup before the swap, so a startup sweep knows which plugin folder the backup came from
+BACKUP_FOLDER_MARKER = "previous.folder"
+# Characters Windows refuses in file names (plus both separators), and names it silently alters
+_ILLEGAL_FOLDER_CHARS = set('<>:"|?*/\\')
+
+def is_valid_plugin_folder(folder: str) -> bool:
+    """A single path component that names the same folder on Linux and Windows."""
+    return (
+        folder not in ("", ".", "..")
+        and not any(c in _ILLEGAL_FOLDER_CHARS or ord(c) < 32 for c in folder)
+        and not folder.endswith((".", " "))
+    )
+
+def _is_link(p: str) -> bool:
+    """Symlink, junction or any other reparse point. Never follows it."""
+    try:
+        st = os.lstat(p)
+    except OSError:
+        return False
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+
+def _remove_no_follow(p: str) -> None:
+    """Delete `p` without ever following a link: a link (or junction) is removed itself, never its target."""
+    if _is_link(p):
+        try:
+            os.rmdir(p) # a directory symlink or junction on Windows
+        except OSError:
+            os.unlink(p)
+        return
+    # rmtree never descends into symlinks, and on Windows unlinks junctions instead of walking them
+    rmtree(p)
 
 class PluginInstallType(IntEnum):
     INSTALL = 0
@@ -145,8 +180,15 @@ class PluginBrowser:
             return True
 
     async def uninstall_plugin(self, name: str):
-        if self.loader.watcher:
-            self.loader.watcher.disabled = True
+        # Never in the middle of an install's swap, which owns the plugin folder and the watcher.
+        async with self._install_lock:
+            await self._uninstall_plugin(name)
+
+    async def _uninstall_plugin(self, name: str):
+        watcher = self.loader.watcher
+        watcher_disabled = watcher.disabled if watcher else False
+        if watcher:
+            watcher.disabled = True
         plugin_folder = self.find_plugin_folder(name)
         assert plugin_folder is not None
         plugin_dir = path.join(self.plugin_path, plugin_folder)
@@ -175,8 +217,8 @@ class PluginBrowser:
             logger.error(f"Plugin {name} in {plugin_dir} was not uninstalled")
             logger.error(f"Error at {str(e)}", exc_info=e)
         finally:
-            if self.loader.watcher:
-                self.loader.watcher.disabled = False
+            if watcher:
+                watcher.disabled = watcher_disabled
 
     async def _install(self, artifact: str, name: str, version: str, hash: str):
         # Serialize swaps and watcher ownership, including concurrent install requests.
@@ -291,7 +333,7 @@ class PluginBrowser:
             raise ValueError("Expected exactly one top-level plugin.json")
 
         folder = manifests[0].split("/")[0]
-        if folder in ("", ".", "..") or "\\" in folder:
+        if not is_valid_plugin_folder(folder):
             raise ValueError("Invalid plugin directory")
 
         # Reject extra roots, traversal and symlinks before writing any files.
@@ -317,6 +359,13 @@ class PluginBrowser:
             raise ValueError("Plugin name does not match requested plugin")
 
         archive.extractall(staging)
+
+        # The plugin must have landed as a real directory inside staging, whatever the platform made of its name.
+        staged_plugin = path.join(staging, folder)
+        real_staging = path.realpath(staging)
+        if (not path.isdir(staged_plugin) or _is_link(staged_plugin)
+                or path.commonpath([path.realpath(staged_plugin), real_staging]) != real_staging):
+            raise ValueError("Invalid plugin directory")
         return folder, name
 
     async def _replace_plugin(
@@ -340,7 +389,6 @@ class PluginBrowser:
         if watcher:
             watcher.disabled = True
 
-        stopped = False
         swapped = False
 
         try:
@@ -354,11 +402,12 @@ class PluginBrowser:
             # Stop without uninstalling. Uninstall would run plugin cleanup hooks
             # and remove the user's disabled, hidden, frozen and ordering settings.
             if name in self.plugins:
-                stopped = True
                 await self.plugins[name].stop()
                 self.plugins.pop(name, None)
 
             if previous_folder:
+                with open(path.join(path.dirname(backup), BACKUP_FOLDER_MARKER), "w", encoding="utf-8") as marker:
+                    marker.write(previous_folder)
                 await self._rename_dir(target, backup)
 
             await self.loader.ws.emit(
@@ -372,7 +421,7 @@ class PluginBrowser:
             await self.loader.import_plugin(
                 path.join(target, "main.py"), target_folder, ensure_started=True
             )
-        except BaseException:
+        except BaseException as error:
             # Cancellation needs the same recovery as a failed load. Stop the new
             # backend before removing its files, then put the old directory back.
             failed_plugin = self.plugins.pop(name, None) if swapped else None
@@ -380,24 +429,30 @@ class PluginBrowser:
                 await failed_plugin.stop()
 
             if swapped:
-                if ON_WINDOWS:
-                    # A rename waits out a briefly held file like the swap did; the workspace cleanup removes it.
-                    await self._rename_dir(target, path.join(path.dirname(backup), "failed"))
-                else:
-                    rmtree(target)
+                await self._discard_failed_version(target, path.join(path.dirname(backup), "failed"))
 
+            restore_error: OSError | None = None
             if path.exists(backup):
-                await self._rename_dir(backup, target)
-                stopped = True
+                try:
+                    await self._rename_dir(backup, target)
+                except OSError as e:
+                    restore_error = e
+                    logger.error(f"Could not restore the previous version of {name} from {backup}: {e}")
 
-            if stopped and previous_folder:
+            # Start whatever plugin is now in place: normally the restored previous version.
+            if previous_folder and path.isfile(path.join(target, "plugin.json")):
                 try:
                     await self.loader.import_plugin(
                         path.join(target, "main.py"), target_folder, ensure_started=True
                     )
                 except Exception:
-                    logger.exception("Could not reload previous plugin %s; installation restored", name)
+                    logger.exception("Could not reload plugin %s after a failed update", name)
 
+            if restore_error is not None:
+                raise RuntimeError(
+                    f"Updating {name} failed ({error!r}) and the previous version could not be restored; "
+                    f"it is kept at {backup}"
+                ) from restore_error
             raise
         finally:
             # Restore the previous state, which may already have been disabled.
@@ -405,6 +460,89 @@ class PluginBrowser:
                 watcher.disabled = watcher_disabled
 
         return previous_folder is None
+
+    async def _discard_failed_version(self, target: str, aside: str) -> None:
+        """Get a failed new version out of `target`, best effort, so the previous one can go back."""
+        try:
+            if ON_WINDOWS:
+                # A rename waits out a briefly held file like the swap did; the workspace cleanup removes it.
+                await self._rename_dir(target, aside)
+            else:
+                rmtree(target)
+            return
+        except OSError as e:
+            logger.warning(f"Could not move the failed version out of {target}, deleting what can be deleted: {e}")
+        for attempt in range(RENAME_ATTEMPTS):
+            rmtree(target, ignore_errors=True)
+            if not path.lexists(target):
+                return
+            if attempt < RENAME_ATTEMPTS - 1:
+                await sleep(RENAME_RETRY_DELAY)
+        logger.error(f"Could not remove the failed version at {target}")
+
+    def _workspace_parent(self) -> str:
+        return self.plugin_path if ON_WINDOWS else path.dirname(path.realpath(self.plugin_path))
+
+    def recover_install_workspaces(self) -> None:
+        """Startup sweep: put back previous versions an interrupted update left behind, then drop the workspaces."""
+        parent = self._workspace_parent()
+        try:
+            entries = [e for e in listdir(parent) if e.startswith(WORKSPACE_PREFIX)]
+        except OSError as e:
+            logger.warning(f"Could not look for leftover install workspaces in {parent}: {e}")
+            return
+        for entry in entries:
+            workspace = path.join(parent, entry)
+            try:
+                if _is_link(workspace) or not path.isdir(workspace):
+                    logger.warning(f"Removing {workspace}, which is not an install workspace")
+                    _remove_no_follow(workspace)
+                    continue
+                if not self._recover_previous(workspace):
+                    continue # keep it: it holds the only copy of a plugin
+                _remove_no_follow(workspace)
+                logger.info(f"Removed leftover install workspace {workspace}")
+            except OSError as e:
+                logger.warning(f"Could not clean up install workspace {workspace}: {e}")
+
+    def _recover_previous(self, workspace: str) -> bool:
+        """Return True when nothing in `workspace` still needs to be kept."""
+        backup = path.join(workspace, "previous")
+        manifest = path.join(backup, "plugin.json")
+        if not path.lexists(backup):
+            return True
+        if _is_link(backup) or _is_link(manifest) or not path.isfile(manifest):
+            return True # not a backup this code made
+        try:
+            with open(manifest, "r", encoding="utf-8") as f:
+                plugin_name = json.load(f)["name"]
+            assert isinstance(plugin_name, str) and plugin_name.strip()
+        except Exception as e:
+            logger.error(f"Keeping {backup}: its plugin.json is unreadable ({e})")
+            return False
+        if self.find_plugin_folder(plugin_name) is not None:
+            logger.info(f"{plugin_name} is installed, dropping the stale backup in {workspace}")
+            return True
+
+        folder = None
+        try:
+            with open(path.join(workspace, BACKUP_FOLDER_MARKER), "r", encoding="utf-8") as f:
+                folder = f.read().strip()
+        except OSError:
+            pass
+        if folder is None or not is_valid_plugin_folder(folder):
+            folder = plugin_name if is_valid_plugin_folder(plugin_name) else None
+        target = path.join(self.plugin_path, folder) if folder else None
+        if target is None or path.lexists(target):
+            logger.error(f"Keeping {backup}: no free folder to restore {plugin_name} into")
+            return False
+        try:
+            rename(backup, target)
+        except OSError as e:
+            logger.error(f"Keeping {backup}: could not restore {plugin_name} to {target}: {e}")
+            return False
+        logger.warning(f"Restored {plugin_name} to {target} after an interrupted update")
+        return True
 
     def _make_install_workspace(self) -> str:
         if ON_WINDOWS:
@@ -415,7 +553,7 @@ class PluginBrowser:
             # The live-reload watcher and the plugin scan skip it: neither looks below a top-level folder
             # without a plugin.json.
             for _ in range(100):
-                workspace = path.join(self.plugin_path, f".decky-install-{token_hex(8)}")
+                workspace = path.join(self.plugin_path, f"{WORKSPACE_PREFIX}{token_hex(8)}")
                 try:
                     mkdir(workspace)
                 except FileExistsError:
@@ -426,8 +564,8 @@ class PluginBrowser:
         # A sibling of the plugin root stays on the same filesystem without exposing
         # staged main.py/dist files to the recursive live-reload watcher.
         return mkdtemp(
-            prefix=".decky-install-",
-            dir=path.dirname(path.realpath(self.plugin_path)),
+            prefix=WORKSPACE_PREFIX,
+            dir=self._workspace_parent(),
         )
 
     async def _rename_dir(self, src: str, dst: str) -> None:
@@ -479,10 +617,23 @@ class PluginBrowser:
 
     async def confirm_plugin_install(self, request_id: str):
         requestOrRequests = self.install_requests.pop(request_id)
-        if isinstance(requestOrRequests, list):
-            [await self._install(req.artifact, req.name, req.version, req.hash) for req in requestOrRequests]
-        else:
-            await self._install(requestOrRequests.artifact, requestOrRequests.name, requestOrRequests.version, requestOrRequests.hash)
+        requests = requestOrRequests if isinstance(requestOrRequests, list) else [requestOrRequests]
+        # One failed plugin must not stop the others; the caller still learns about every failure.
+        failures: List[tuple[str, Exception]] = []
+        for req in requests:
+            try:
+                await self._install(req.artifact, req.name, req.version, req.hash)
+            except Exception as e:
+                logger.error(f"Installing {req.name} ({req.version}) failed: {e}", exc_info=e)
+                failures.append((req.name, e))
+                try:
+                    await self.loader.ws.emit("loader/plugin_download_error", req.name, str(e))
+                except Exception:
+                    logger.exception("Could not report the failed install of %s", req.name)
+        if len(requests) == 1 and failures:
+            raise failures[0][1]
+        if failures:
+            raise RuntimeError("Could not install " + "; ".join(f"{name}: {e}" for name, e in failures))
 
     def cancel_plugin_install(self, request_id: str):
         self.install_requests.pop(request_id)

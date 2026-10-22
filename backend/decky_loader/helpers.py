@@ -1,3 +1,4 @@
+import ipaddress
 import re
 import ssl
 import uuid
@@ -10,6 +11,7 @@ import certifi
 from aiohttp.web import Request, Response, middleware
 from aiohttp.typedefs import Handler
 from typing import Any
+from urllib.parse import urlsplit
 from aiohttp import ClientSession
 from .localplatform import localplatform
 from .enums import UserType
@@ -207,6 +209,31 @@ async def stop_systemd_unit(unit_name: str) -> bool:
 
 async def start_systemd_unit(unit_name: str) -> bool:
     return await localplatform.service_start(unit_name)
+
+def is_loopback_url(url: str) -> bool:
+    """True for URLs on this machine: localhost (and *.localhost) or a loopback address."""
+    try:
+        host = urlsplit(url).hostname # lowercased, IPv6 brackets stripped
+    except ValueError:
+        return False
+    if not host:
+        return False
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback
+    return ip.is_loopback
+
+def get_plugin_session(url: str, **kwargs: Any) -> ClientSession:
+    """Session for a plugin's request to `url`: the system proxy for remote hosts, never for loopback ones.
+
+    With trust_env, urllib on Windows falls back to the Internet Options proxy, which has no implicit loopback
+    bypass, so a plugin talking to its own local server would otherwise be sent through that proxy."""
+    return ClientSession(trust_env=not is_loopback_url(url), **kwargs)
 
 def get_session(**kwargs: Any) -> ClientSession:
     '''A ClientSession for internet requests that honours the system proxy settings (HTTP(S)_PROXY / NO_PROXY; on Windows also the Internet Options proxy).'''

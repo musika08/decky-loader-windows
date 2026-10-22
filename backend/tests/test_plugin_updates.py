@@ -287,8 +287,11 @@ class PluginUpdateTests(PluginUpdateFixture):
             rename(source, target)
         self.loader.import_plugin.side_effect = RuntimeError('load failed')
         with patch('decky_loader.browser.rename', side_effect=fail_restore):
-            with self.assertRaisesRegex(OSError, 'restore failed'):
+            # One clear error that names the original failure and keeps the restore error as its cause.
+            with self.assertRaisesRegex(RuntimeError, 'could not be restored') as raised:
                 await self.update()
+        self.assertIn('load failed', str(raised.exception))
+        self.assertIsInstance(raised.exception.__cause__, OSError)
         backups = self.workspaces('/previous/main.py')
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_text(), 'old version')
