@@ -139,6 +139,17 @@ In installed mode, plugins without the `root` flag run with standard user rights
 
 Plugins that depend on Linux-specific features (Proton, flatpak, SteamOS-only tools) do not apply on Windows.
 
+**Plugin compatibility on Windows**
+
+Plugins are written for SteamOS. To let more of them load unchanged, Decky adds a few stand-ins inside each plugin's process:
+
+- `fcntl`: `flock` and `lockf` work as whole-file locks. Shared locks (`LOCK_SH`) are exclusive on Windows. `fcntl.fcntl` flag calls do nothing, and `ioctl` fails.
+- `pwd` and `grp`: describe the current Windows user, with the user profile as home directory. `os.getuid()` and similar return 0 for `root` plugins running with administrator rights and 1000 otherwise. `os.chown` does nothing.
+- `/tmp` and `/home/deck`: for plugins without administrator rights, Decky creates `C:\tmp` and links `C:\home\deck` and `C:\home\<your user name>` to your user profile, if those names are free. Existing files and folders are never replaced. Plugins with administrator rights do not get these.
+- `xdg-open` (opens a file or link with its default program) and `chmod` (does nothing) are on the plugin's `PATH`. They are `.cmd` scripts, so they are found by `shell=True` commands and `shutil.which`, but not by a plain `subprocess.run(["chmod", ...])`.
+
+Not covered: `/proc`, `/sys`, `/dev`, `systemctl`, D-Bus, flatpak, `pty`/`termios`, and Linux programs bundled with a plugin. Plugins that need these must be ported.
+
 ## 🚀 Getting Started
 
 Now that you have Decky Loader installed, you can start using plugins. Each plugin is maintained by a different developer and has its own uses, but most follow a general structure outlined below.
