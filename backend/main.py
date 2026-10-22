@@ -58,6 +58,10 @@ if __name__ == "__main__":
     elif sys.argv[1:2] == ["--plugin-host"] and len(sys.argv) == 3:
         from decky_loader.plugin.plugin_host import main as plugin_host_main
         plugin_host_main(sys.argv[2])
+    elif sys.argv[1:2] == ["--compat-tool"] and len(sys.argv) >= 4:
+        # A Linux tool (ps, kill, ping...) that a plugin host's subprocess call was redirected to (winplugincompat)
+        from decky_loader.localplatform.wincompattools import main as compat_tool_main
+        sys.exit(compat_tool_main(sys.argv[2], sys.argv[3], sys.argv[4:]))
     elif sys.argv[1:2] == ["--check-imports"] and len(sys.argv) > 2:
         cli_console()
         import importlib
