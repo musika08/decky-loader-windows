@@ -20,8 +20,8 @@ class UnixSocket:
         self.socket_addr = f"/tmp/plugin_socket_{time.time()}"
         self.on_new_message = None
         self.socket = None
-        self.reader = None
-        self.writer = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
         self.server_writer = None
         self.open_lock = asyncio.Lock()
         self.active = True

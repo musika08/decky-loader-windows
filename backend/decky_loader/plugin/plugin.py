@@ -4,6 +4,7 @@ from logging import getLogger
 import logging
 import os
 import signal
+import sys
 from os import environ, path
 from multiprocessing import Process
 from time import time
@@ -22,6 +23,11 @@ if TYPE_CHECKING:
     from ..localplatform.winprocess import PluginProcess
 
 EmittedEventCallbackType = Callable[[str, Any], Coroutine[Any, Any, Any]]
+
+# How long an update waits for the new plugin backend before rolling back. On Windows each refused connect to the
+# not-yet-listening plugin host takes about 2 s plus PortSocket's 2 s retry delay, and the host is a fresh
+# PluginLoader.exe, so 20 s would roll back plugins that start fine.
+STARTUP_TIMEOUT = 60 if ON_WINDOWS else 20
 
 _held_locks: List[Any] = []
 
@@ -42,7 +48,7 @@ def _after_fork_in_child():
         if signal.getsignal(sig) != signal.SIG_IGN:
             signal.signal(sig, signal.SIG_DFL)
 
-if hasattr(os, "register_at_fork"):
+if sys.platform != "win32": # no fork on Windows, and no os.register_at_fork
     os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent, after_in_child=_after_fork_in_child)
 
 class PluginWrapper:
@@ -211,6 +217,24 @@ class PluginWrapper:
         proc = winprocess.PluginProcess(self_command() + ["--plugin-host", encode_params(self.sandboxed_plugin, sock.port)], env, elevated)
         proc.start()
         return proc
+
+    async def wait_started(self):
+        """Wait for backend initialization and its IPC server, bounded to STARTUP_TIMEOUT seconds."""
+        if self.passive or self.disabled:
+            return
+
+        deadline = time() + STARTUP_TIMEOUT
+
+        while time() < deadline:
+            if self.proc is None or not self.proc.is_alive():
+                raise RuntimeError(f"Plugin {self.name} exited during startup")
+
+            # The response listener opens the connection once initialization completes.
+            if self._socket.writer is not None:
+                return
+            await sleep(0.1)
+
+        raise TimeoutError(f"Plugin {self.name} did not initialize within {STARTUP_TIMEOUT} seconds")
 
     async def stop(self, uninstall: bool = False):
         try:
