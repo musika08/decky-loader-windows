@@ -181,6 +181,14 @@ jobs:
             mv "$source"/PluginLoader$ext "$dest"
           done
 
+          # The Windows onedir installer zips (build.yml uploads each as an artifact named like its zip)
+          INSTALLERS=("PluginLoader-win-installer" "PluginLoader-win-arm64-installer")
+
+          for installer in "${INSTALLERS[@]}"; do
+            echo "naming $installer"
+            mv "./temp_artifacts/$installer/$installer.zip" "./$installer.zip"
+          done
+
       - name: Pre-release 📦
         if: github.event.inputs.release == 'prerelease'
         uses: softprops/action-gh-release@v3
