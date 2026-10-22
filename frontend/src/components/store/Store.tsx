@@ -6,6 +6,7 @@ import {
   SteamSpinner,
   Tabs,
   TextField,
+  ToggleField,
   findModule,
 } from '@decky/ui';
 import { Dispatch, FC, SetStateAction, useEffect, useMemo, useState } from 'react';
@@ -14,11 +15,18 @@ import { useTranslation } from 'react-i18next';
 import logo from '../../../assets/plugin_store.png';
 import Logger from '../../logger';
 import { SortDirections, SortOptions, Store, StorePlugin, getPluginList, getStore } from '../../store';
+import { useSetting } from '../../utils/hooks/useSetting';
 import { useDeckyState } from '../DeckyState';
 import ExternalLink from '../ExternalLink';
 import PluginCard from './PluginCard';
+import { getWindowsCompat, isWindowsPlatform, windowsCompatRank } from './WindowsCompatBadge';
 
 const logger = new Logger('Store');
+
+// Client-side sort by the Windows compatibility survey (Windows only); the store server has no such sort
+const WINDOWS_COMPAT_SORT = 'windows_compat';
+type StoreSortOption = SortOptions | typeof WINDOWS_COMPAT_SORT;
+const windowsCompatSortData: [StoreSortOption, SortDirections] = [WINDOWS_COMPAT_SORT, SortDirections.ascending];
 
 const StorePage: FC<{}> = () => {
   const [currentTabRoute, setCurrentTabRoute] = useState<string>('browse');
@@ -81,8 +89,24 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
     [],
   );
 
+  const { installedPlugins, versionInfo } = useDeckyState();
+  const isWindows = isWindowsPlatform(versionInfo?.platform);
+  // Persisted in Decky's settings; hides tier D (Linux-only) plugins. Default on.
+  const [hideWindowsIncompatible, setHideWindowsIncompatible] = useSetting<boolean>(
+    'store.windows.hide_incompatible',
+    true,
+  );
+
+  const sortOptions = useMemo(
+    (): DropdownOption[] =>
+      isWindows
+        ? [...dropdownSortOptions, { data: windowsCompatSortData, label: t('Store.store_sort.windows_compat') }]
+        : dropdownSortOptions,
+    [isWindows, dropdownSortOptions],
+  );
+
   // const filterOptions = useMemo((): DropdownOption[] => [{ data: 1, label: 'All' }], []);
-  const [selectedSort, setSort] = useState<[SortOptions, SortDirections]>(dropdownSortOptions[0].data);
+  const [selectedSort, setSort] = useState<[StoreSortOption, SortDirections]>(dropdownSortOptions[0].data);
   // const [selectedFilter, setFilter] = useState<number>(filterOptions[0].data);
   const [searchFieldValue, setSearchValue] = useState<string>('');
   const [pluginList, setPluginList] = useState<StorePlugin[] | null>(null);
@@ -90,12 +114,34 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
 
   useEffect(() => {
     (async () => {
-      const res = await getPluginList(selectedSort[0], selectedSort[1]);
+      const [sortBy, sortDirection] = selectedSort;
+      let res: StorePlugin[];
+      if (sortBy === WINDOWS_COMPAT_SORT) {
+        // fetch A to Z, then stable-sort by tier so each tier stays alphabetical
+        res = await getPluginList(SortOptions.name, SortDirections.ascending);
+        res = res
+          .map((plugin, index) => ({ plugin, index, rank: windowsCompatRank(plugin.name, plugin.id) }))
+          .sort((a, b) => a.rank - b.rank || a.index - b.index)
+          .map(({ plugin }) => plugin);
+      } else {
+        res = await getPluginList(sortBy, sortDirection);
+      }
       logger.debug('got data!', res);
       setPluginList(res);
-      setPluginCount(res.length);
     })();
   }, [selectedSort]);
+
+  const visiblePlugins = useMemo(
+    () =>
+      pluginList && isWindows && hideWindowsIncompatible
+        ? pluginList.filter((plugin) => getWindowsCompat(plugin.name, plugin.id).tier !== 'D')
+        : pluginList,
+    [pluginList, isWindows, hideWindowsIncompatible],
+  );
+
+  useEffect(() => {
+    if (visiblePlugins) setPluginCount(visiblePlugins.length);
+  }, [visiblePlugins]);
 
   useEffect(() => {
     (async () => {
@@ -104,8 +150,6 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
       setIsTesting(storeRes === Store.Testing);
     })();
   }, []);
-
-  const { installedPlugins } = useDeckyState();
 
   return (
     <>
@@ -174,7 +218,7 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
             <span className="DialogLabel">{t('Store.store_sort.label')}</span>
             <Dropdown
               menuLabel={t('Store.store_sort.label') as string}
-              rgOptions={dropdownSortOptions}
+              rgOptions={sortOptions}
               strDefaultLabel={t('Store.store_sort.label_def') as string}
               selectedOption={selectedSort}
               onChange={(e) => setSort(e.data)}
@@ -182,6 +226,16 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
           </div>
         </Focusable>
       </PanelSectionRow>
+      {isWindows && (
+        <PanelSectionRow>
+          <ToggleField
+            label={t('Store.store_filter.hide_windows_incompatible')}
+            description={t('Store.store_filter.hide_windows_incompatible_desc')}
+            checked={hideWindowsIncompatible}
+            onChange={(checked) => setHideWindowsIncompatible(checked)}
+          />
+        </PanelSectionRow>
+      )}
       <div style={{ justifyContent: 'center', display: 'flex' }}>
         <Focusable style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
           <div style={{ width: '100%' }}>
@@ -224,12 +278,12 @@ const BrowseTab: FC<{ setPluginCount: Dispatch<SetStateAction<number | null>> }>
         </div>
       )}
       <div>
-        {!pluginList ? (
+        {!visiblePlugins ? (
           <div style={{ height: '100%' }}>
             <SteamSpinner background="transparent" />
           </div>
         ) : (
-          pluginList
+          visiblePlugins
             .filter((plugin: StorePlugin) => {
               return (
                 plugin.name.toLowerCase().includes(searchFieldValue.toLowerCase()) ||

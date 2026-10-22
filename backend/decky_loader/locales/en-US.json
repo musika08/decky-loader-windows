@@ -256,6 +256,8 @@
             "label": "Contributing"
         },
         "store_filter": {
+            "hide_windows_incompatible": "Hide plugins that can't work on Windows",
+            "hide_windows_incompatible_desc": "Hides plugins rated Linux only by the Windows compatibility survey.",
             "label": "Filter",
             "label_def": "All"
         },
@@ -264,7 +266,8 @@
         },
         "store_sort": {
             "label": "Sort",
-            "label_def": "Last Updated (Newest)"
+            "label_def": "Last Updated (Newest)",
+            "windows_compat": "Windows compatibility"
         },
         "store_source": {
             "desc": "All plugin source code is available on SteamDeckHomebrew/decky-plugin-database repository on GitHub.",

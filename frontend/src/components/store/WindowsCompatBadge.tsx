@@ -34,6 +34,19 @@ export function getWindowsCompat(name: string, id?: number): WindowsCompat {
   return entry ? { tier: entry.tier, reason: entry.reason } : { tier: null, reason: null };
 }
 
+// Store sort order for the "Windows compatibility" sort: A, B, C, untested, D
+const tierRank: Record<WindowsCompatTier | 'unknown', number> = {
+  A: 0,
+  B: 1,
+  C: 2,
+  unknown: 3,
+  D: 4,
+};
+
+export function windowsCompatRank(name: string, id?: number): number {
+  return tierRank[getWindowsCompat(name, id).tier ?? 'unknown'];
+}
+
 const tierColors: Record<WindowsCompatTier | 'unknown', string> = {
   A: '#59bf40',
   B: '#a4d007',
