@@ -13,7 +13,9 @@ import { FaArrowDown, FaArrowUp, FaCheck, FaDownload, FaRecycle } from 'react-ic
 
 import { DisabledPlugin, InstallType, Plugin } from '../../plugin';
 import { StorePlugin, requestPluginInstall } from '../../store';
+import { useDeckyState } from '../DeckyState';
 import ExternalLink from '../ExternalLink';
+import WindowsCompatBadge, { isWindowsPlatform } from './WindowsCompatBadge';
 
 interface PluginCardProps {
   storePlugin: StorePlugin;
@@ -37,6 +39,10 @@ const PluginCard: FC<PluginCardProps> = ({ storePlugin, installedPlugin }) => {
   const root = storePlugin.tags.some((tag) => tag === 'root');
 
   const { t } = useTranslation();
+  const { versionInfo } = useDeckyState();
+  const showWindowsCompat = isWindowsPlatform(versionInfo?.platform);
+  // the Windows badge row takes a line from the description
+  const descriptionLines = (root ? 2 : 3) - (showWindowsCompat ? 1 : 0);
 
   return (
     <div
@@ -102,12 +108,17 @@ const PluginCard: FC<PluginCardProps> = ({ storePlugin, installedPlugin }) => {
           >
             {storePlugin.author}
           </span>
+          <WindowsCompatBadge
+            pluginName={storePlugin.name}
+            pluginId={storePlugin.id}
+            platform={versionInfo?.platform}
+          />
           <span
             className="deckyStoreCardDescription"
             style={{
               fontSize: '13px',
               color: '#969696',
-              WebkitLineClamp: root ? '2' : '3',
+              WebkitLineClamp: String(descriptionLines),
               WebkitBoxOrient: 'vertical',
               overflow: 'hidden',
               display: '-webkit-box',

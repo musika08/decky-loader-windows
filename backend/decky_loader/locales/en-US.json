@@ -333,5 +333,13 @@
         "desc_zip": "The Decky Loader team has not reviewed this plugin. It may contain malware, such as software to steal your Steam account or harm your device. By installing this plugin, you agree you have assumed all risks to your device.",
         "title_repo": "Third-Party Store Selection",
         "title_zip": "Third-Party Plugin Installation"
+    },
+    "WindowsCompat": {
+        "tier_a": "Works on Windows",
+        "tier_b": "Mostly works",
+        "tier_c": "Partial on Windows",
+        "tier_d": "Linux only",
+        "untested": "Untested on Windows",
+        "untested_desc": "This plugin has not been checked on Windows yet."
     }
 }

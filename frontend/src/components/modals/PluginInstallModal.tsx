@@ -3,6 +3,7 @@ import { FC, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { InstallType, InstallTypeTranslationMapping } from '../../plugin';
+import WindowsCompatBadge from '../store/WindowsCompatBadge';
 import PluginInstallProgress from './PluginInstallProgress';
 
 interface PluginInstallModalProps {
@@ -11,6 +12,7 @@ interface PluginInstallModalProps {
   hash: string;
   installType: InstallType;
   disabled?: boolean;
+  platform?: string; // backend sys.platform, for the Windows compatibility badge
   onOK(): void;
   onCancel(): void;
   closeModal?(): void;
@@ -22,6 +24,7 @@ const PluginInstallModal: FC<PluginInstallModalProps> = ({
   hash,
   installType,
   disabled,
+  platform,
   onOK,
   onCancel,
   closeModal,
@@ -118,6 +121,7 @@ const PluginInstallModal: FC<PluginInstallModalProps> = ({
           disabled ? `${description} ${t('PluginInstallModal.disabled')}` : description
         }
       </div>
+      <WindowsCompatBadge pluginName={artifact} platform={platform} detailed />
       {hash == 'False' && <span style={{ color: 'red' }}>{t('PluginInstallModal.no_hash')}</span>}
       {loading && <PluginInstallProgress percentage={percentage} operationText={downloadInfo} />}
     </ConfirmModal>
