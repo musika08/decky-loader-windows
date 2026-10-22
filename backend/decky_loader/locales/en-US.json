@@ -323,6 +323,7 @@
             "label": "Updates",
             "lat_version": "Up to date: running {{ver}}",
             "reloading": "Reloading",
+            "unavailable": "Decky can't update itself here. Updates are installed with tools\\update-decky.ps1.",
             "updating": "Updating"
         }
     },

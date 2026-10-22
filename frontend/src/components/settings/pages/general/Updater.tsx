@@ -118,6 +118,22 @@ export default function UpdaterSettings() {
     showModal(<PatchNotesModal versionInfo={versionInfo} />);
   }, [versionInfo]);
 
+  // Windows installed mode is updated by the installer, so don't offer an updater that would refuse to run
+  if (versionInfo?.updater_available === false) {
+    return (
+      <Field
+        label={t('Updater.updates.label')}
+        description={
+          <span style={{ whiteSpace: 'pre-line' }}>
+            {t('Updater.updates.cur_version', { ver: versionInfo.current }) +
+              '\n' +
+              (versionInfo.updater_unavailable_reason || t('Updater.updates.unavailable'))}
+          </span>
+        }
+      />
+    );
+  }
+
   return (
     <>
       <Field

@@ -42,10 +42,26 @@ def windows_update_blocker() -> str | None:
     from .localplatform.localplatformwin import installed_root
     from .localplatform.winsupervisor import is_onedir_build
     if installed_root() is not None:
-        return "In-app updates are not supported in installed mode. Download the new installer zip and run PluginLoader.exe --install from it."
+        return ("In-app updates are not supported in installed mode. Updates are installed with tools\\update-decky.ps1, "
+                "or by running PluginLoader.exe --install from a new installer zip.")
     if is_onedir_build():
         return "In-app updates are not supported for the onedir (installer) build. Use the installer zip, or the portable single-file exe."
     return None
+
+def windows_installed() -> bool:
+    from .localplatform.localplatformwin import installed_root
+    return installed_root() is not None
+
+def windows_updater_state(supervised: bool) -> tuple[bool, bool, str | None]:
+    '''(installation supported, in-app updater available, why the updater is not available) for this Windows copy.
+
+    Installed mode is a supported installation whose updates come from the installer (tools\\update-decky.ps1
+    rebuilds and reinstalls a source checkout), so only the in-app updater is off there.'''
+    blocker = windows_update_blocker()
+    if blocker is None and not supervised:
+        blocker = "In-app updates need the Decky supervisor. Start PluginLoader.exe without any arguments."
+    available = blocker is None
+    return available or windows_installed(), available, blocker
 
 class Updater:
     def __init__(self, context: PluginManager) -> None:
@@ -54,7 +70,13 @@ class Updater:
         self.remoteVer: RemoteVer | None = None
         self.allRemoteVers: List[RemoteVer] = []
         self.localVer = helpers.get_loader_version()
-        self.isSupported: bool = ON_LINUX or (ON_WINDOWS and getenv("DECKY_SUPERVISED") == "1" and windows_update_blocker() is None)
+        self.isSupported: bool = ON_LINUX
+        # Other platforms keep offering the in-app updater as before
+        self.updaterAvailable: bool = True
+        self.updaterUnavailableReason: str | None = None
+        if ON_WINDOWS:
+            self.isSupported, self.updaterAvailable, self.updaterUnavailableReason = \
+                windows_updater_state(getenv("DECKY_SUPERVISED") == "1")
         self.repo = getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')
         self.git_branch = getenv('DECKY_BRANCH', 'dirty')
 
@@ -115,6 +137,9 @@ class Updater:
             "all": self.allRemoteVers,
             "updatable": self.localVer != "unknown" and self.localVer != "dev",
             "supported": self.isSupported,
+            # False where the in-app updater must not be used (Windows installed mode); the reason says what to do instead
+            "updater_available": self.updaterAvailable,
+            "updater_unavailable_reason": self.updaterUnavailableReason,
             # lets the frontend show Windows-specific UI such as the store compatibility badges
             "platform": sys.platform,
         }

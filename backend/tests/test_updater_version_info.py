@@ -1,6 +1,7 @@
 import asyncio, sys
 from typing import Any
 from unittest.mock import MagicMock
+import pytest
 
 
 def _updater() -> Any:
@@ -29,3 +30,17 @@ def test_version_info_reports_platform(monkeypatch: Any):
 def test_version_info_keeps_existing_keys():
     info = asyncio.run(_updater().get_version_info())
     assert {"current", "repo", "gitBranch", "remote", "all", "updatable", "supported"} <= set(info)
+
+
+def test_version_info_reports_updater_state():
+    info = asyncio.run(_updater().get_version_info())
+    assert isinstance(info["updater_available"], bool)
+    assert info["updater_unavailable_reason"] is None or isinstance(info["updater_unavailable_reason"], str)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="non-Windows behaviour")
+def test_updater_unchanged_off_windows():
+    u = _updater()
+    assert u.updaterAvailable is True
+    assert u.updaterUnavailableReason is None
+    assert u.isSupported is sys.platform.startswith("linux")

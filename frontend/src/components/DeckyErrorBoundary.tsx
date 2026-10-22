@@ -313,14 +313,16 @@ const DeckyErrorBoundary: FunctionComponent<DeckyErrorBoundaryProps> = ({ error,
               </div>
               {
                 <div className={joinClassNames(classes.rowItem, classes.buttonDescRow)}>
-                  {updateProgress > -1
-                    ? 'Update in progress... ' + updateProgress + '%'
-                    : updateProgress == -2
-                      ? 'Update complete. Restarting...'
-                      : 'Check for Decky updates'}
+                  {versionInfo?.updater_available === false
+                    ? versionInfo.updater_unavailable_reason || 'Decky cannot update itself here.'
+                    : updateProgress > -1
+                      ? 'Update in progress... ' + updateProgress + '%'
+                      : updateProgress == -2
+                        ? 'Update complete. Restarting...'
+                        : 'Check for Decky updates'}
                   {
                     <div className={classes.flexRowWGap}>
-                      {updateProgress == -1 && (
+                      {updateProgress == -1 && versionInfo?.updater_available !== false && (
                         <>
                           <select
                             onChange={async (e) => {
@@ -396,7 +398,9 @@ const DeckyErrorBoundary: FunctionComponent<DeckyErrorBoundaryProps> = ({ error,
                       addLogLine('Enabling CEF debugger forwarding...');
                       await starrCEFForwarding();
                       addLogLine('Enabling SSH...');
-                      await startSSH();
+                      // Windows returns why SSH could not be started (e.g. OpenSSH Server is not installed)
+                      const ssh = await startSSH();
+                      if (typeof ssh === 'string') addLogLine(ssh);
                       addLogLine('Ready for debugging!');
                       if (window?.SystemNetworkStore?.wirelessNetworkDevice?.ip4?.addresses?.[0]?.ip) {
                         const ip = ipToString(window.SystemNetworkStore.wirelessNetworkDevice.ip4.addresses[0].ip);
