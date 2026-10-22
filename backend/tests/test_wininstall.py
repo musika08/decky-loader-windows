@@ -832,7 +832,41 @@ def test_terminate_image_keeps_going_when_one_kill_fails():
             raise PermissionError("gone")
         killed.append(pid)
 
-    assert wi.terminate_image(EXE, processes=lambda: [(100, EXE), (300, EXE)], terminate=terminate) == [300]
+    assert wi.terminate_image(EXE, processes=lambda: [(100, EXE), (300, EXE)], terminate=terminate,
+                              wait_exit=lambda _pid: False) == [300]
+
+
+def test_terminate_image_counts_a_process_that_was_already_exiting(caplog: pytest.LogCaptureFixture):
+    def terminate(_pid: int) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    with caplog.at_level("WARNING"):
+        assert wi.terminate_image(EXE, processes=lambda: [(100, EXE)], terminate=terminate,
+                                  wait_exit=lambda _pid: True) == [100]
+    assert "Could not stop" not in caplog.text
+
+
+def test_terminate_image_warns_when_a_denied_process_keeps_running(caplog: pytest.LogCaptureFixture):
+    def terminate(_pid: int) -> None:
+        raise PermissionError(13, "Access is denied")
+
+    with caplog.at_level("WARNING"):
+        assert wi.terminate_image(EXE, processes=lambda: [(100, EXE)], terminate=terminate,
+                                  wait_exit=lambda _pid: False) == []
+    assert "Could not stop process 100" in caplog.text
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_wait_pid_exit_on_real_processes():
+    import subprocess
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    assert wi.wait_pid_exit(p.pid, 2000)
+    q = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert not wi.wait_pid_exit(q.pid, 100)
+    finally:
+        q.kill()
 
 
 def test_list_processes_sees_this_process():

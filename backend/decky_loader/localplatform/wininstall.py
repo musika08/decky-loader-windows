@@ -300,6 +300,8 @@ PROCESS_TERMINATE = 0x0001
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 SYNCHRONIZE = 0x00100000
 TERMINATE_WAIT_MS = 5000
+WAIT_OBJECT_0 = 0
+ERROR_INVALID_PARAMETER = 87
 
 def process_snapshot() -> list[tuple[int, int]]:
     '''(pid, parent pid) for every process, from one Toolhelp snapshot. Raises OSError if the snapshot fails.'''
@@ -390,6 +392,22 @@ def terminate_pid(pid: int) -> None:
     finally:
         k.CloseHandle(h)
 
+def wait_pid_exit(pid: int, timeout_ms: int = TERMINATE_WAIT_MS) -> bool:
+    '''True once `pid` has exited (or no longer exists) within `timeout_ms`.'''
+    k = _kernel32()
+    from ctypes import wintypes
+    k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k.OpenProcess.restype = ctypes.c_void_p
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    k.WaitForSingleObject.restype = wintypes.DWORD
+    h = k.OpenProcess(SYNCHRONIZE, False, pid)
+    if not h:
+        return ctypes.get_last_error() == ERROR_INVALID_PARAMETER
+    try:
+        return k.WaitForSingleObject(h, timeout_ms) == WAIT_OBJECT_0
+    finally:
+        k.CloseHandle(h)
+
 def own_ancestry(pid: int, processes: list[tuple[int, int]]) -> set[int]:
     '''`pid` and every ancestor of it that `processes` (pid, parent pid) still knows about.'''
     parents = dict(processes)
@@ -401,7 +419,8 @@ def own_ancestry(pid: int, processes: list[tuple[int, int]]) -> set[int]:
 
 def terminate_image(exe: str, *, processes: Callable[[], list[tuple[int, str | None]]] = list_processes,
                     terminate: Callable[[int], None] = terminate_pid,
-                    snapshot: Callable[[], list[tuple[int, int]]] = process_snapshot) -> list[int]:
+                    snapshot: Callable[[], list[tuple[int, int]]] = process_snapshot,
+                    wait_exit: Callable[[int], bool] = wait_pid_exit) -> list[int]:
     '''Kill every process running from `exe` (supervisor, loader, root plugin hosts), except this one and its
     parent chain (the onefile bootloader, and whatever started it). `schtasks /End` only ends the task's own
     process, not what it started. Failing to list processes is logged and skipped rather than raised.'''
@@ -423,7 +442,12 @@ def terminate_image(exe: str, *, processes: Callable[[], list[tuple[int, str | N
             terminate(pid)
             killed.append(pid)
         except OSError as e:
-            logger.warning("Could not stop process %s: %s", pid, e)
+            # Ending the task closes the job, so copies may already be exiting; TerminateProcess then fails with
+            # access denied. Only warn about a process that is still running afterwards.
+            if wait_exit(pid):
+                killed.append(pid)
+            else:
+                logger.warning("Could not stop process %s: %s", pid, e)
     return killed
 
 
