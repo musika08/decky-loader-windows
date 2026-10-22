@@ -110,6 +110,8 @@ class SandboxedPlugin:
             sys.modules["decky_plugin"] = decky
 
             if ON_WINDOWS:
+                from ..localplatform.winplugincompat import install_plugin_compat
+                install_plugin_compat()
                 from ..localplatform.winsymlink import install_symlink_fallback
                 install_symlink_fallback()
                 from ..localplatform.winsteamlinks import setup_steam_home_links, steam_install_dir

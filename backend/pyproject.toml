@@ -10,7 +10,8 @@ packages = [
 ]
 include = [
   "decky_loader/locales/*",
-  "decky_loader/static/*"
+  "decky_loader/static/*",
+  "decky_loader/localplatform/winbin/*"
 ]
 
 [tool.poetry.dependencies]
