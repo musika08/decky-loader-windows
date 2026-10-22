@@ -88,7 +88,7 @@ Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 # Checks the runtime's PSF signature and version, copies it and the dependency closure, precompiles, smoke-tests
 & $python (Join-Path $repo 'tools\build_win_runtime.py') --out $work
 if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 'building the installer folder failed (see above)' }
-& (Join-Path $work 'python\python.exe') (Join-Path $work 'app\main.py') --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi winreg
+& (Join-Path $work 'python\python.exe') -I (Join-Path $work 'app\main.py') --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi winreg
 if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 'the installer folder is missing modules (--check-imports)' }
 
 try {
@@ -102,10 +102,24 @@ Write-Host "Installer staged at $staged (previous one kept as DeckyLoader.prev)"
 
 if (-not $NoInstall) {
     Step 'Installing (admin prompt)'
-    # Start-Process joins -ArgumentList with spaces, so the script path (it may contain spaces) is quoted here
+    # Start-Process joins -ArgumentList with spaces, so the script path (it may contain spaces) is quoted here.
+    # -I: the runtime ignores PYTHON* environment variables (main.py refuses to run without it).
     $main = Join-Path $staged 'app\main.py'
-    $p = Start-Process (Join-Path $staged 'python\python.exe') -ArgumentList "`"$main`"", '--install' -Verb RunAs -Wait -PassThru
-    if ($p.ExitCode -ne 0) { Fail 3 "install exited with $($p.ExitCode)" }
+    $started = Get-Date
+    $p = Start-Process (Join-Path $staged 'python\python.exe') -ArgumentList '-I', "`"$main`"", '--install' -Verb RunAs -Wait -PassThru
+    if ($p.ExitCode -ne 0) {
+        # The elevated install ran in its own console, which closed; it logged why it failed
+        $logs = @(Join-Path $env:ProgramData 'decky\logs\install.log') +
+                @(Get-ChildItem (Join-Path $env:TEMP 'decky-install-*.log') -ErrorAction SilentlyContinue |
+                  Where-Object { $_.LastWriteTime -ge $started } | ForEach-Object FullName)
+        foreach ($log in $logs) {
+            if ((Test-Path $log) -and (Get-Item $log).LastWriteTime -ge $started) {
+                Write-Host "`n-- $log (last 40 lines):" -ForegroundColor Yellow
+                Get-Content $log -Tail 40 | Write-Host
+            }
+        }
+        Fail 3 "install exited with $($p.ExitCode)"
+    }
     Write-Host 'Installed. Decky restarted with the new version.'
 }
 

@@ -48,8 +48,12 @@ class BuildError(Exception):
     pass
 
 
-def _run(argv: list[str], **kw: Any) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(argv, capture_output=True, text=True, timeout=600, **kw)
+def _run(argv: list[str], timeout: float = 600, **kw: Any) -> "subprocess.CompletedProcess[str]":
+    # No stdin: an interpreter that falls into a REPL (PYTHONINSPECT) gets EOF instead of hanging the build
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL, **kw)
+    except subprocess.TimeoutExpired:
+        raise BuildError(f"Timed out after {timeout:.0f} s: {subprocess.list2cmdline(argv)}") from None
 
 
 # Base runtime
@@ -122,10 +126,13 @@ def authenticode(paths: list[str], run: CommandRunner = _run, system_dir: Callab
     proc = run([powershell, "-NoProfile", "-NonInteractive", "-Command", _SIGNATURE_SCRIPT], env=env)
     if proc.returncode != 0:
         raise BuildError(f"Get-AuthenticodeSignature failed: {proc.stderr.strip()}")
-    parsed: Any = json.loads(proc.stdout)
-    # ConvertTo-Json -InputObject keeps a one-item array an array, but accept a bare object too
-    rows = cast(list[dict[str, str]], parsed if isinstance(parsed, list) else [parsed])
-    return {r["Path"]: (r["Status"], r["Subject"]) for r in rows}
+    try:
+        parsed: Any = json.loads(proc.stdout)
+        # ConvertTo-Json -InputObject keeps a one-item array an array, but accept a bare object too
+        rows = cast(list[dict[str, str]], parsed if isinstance(parsed, list) else [parsed])
+        return {str(r["Path"]): (str(r["Status"]), str(r["Subject"] or "")) for r in rows}
+    except (ValueError, KeyError, TypeError) as e:
+        raise BuildError(f"Unexpected Get-AuthenticodeSignature output ({e!r}): {proc.stdout[:500]!r}") from None
 
 
 def subject_cn(subject: str) -> str | None:
@@ -151,9 +158,25 @@ def signature_problems(results: dict[str, tuple[str, str]], psf: Iterable[str], 
     return problems
 
 
+# Binaries in DLLs\ that may carry another signer (or none). Empty: in python.org 3.13 every .dll and .pyd there
+# (OpenSSL, libffi, SQLite, zlib included) is PSF-signed. Add a name here only with the reason next to it.
+DLLS_SIGNATURE_EXCEPTIONS: frozenset[str] = frozenset()
+
+
+def extension_binaries(folder: str) -> list[str]:
+    r'''Every .dll and .pyd in `<folder>\DLLs` that copy_runtime keeps, minus DLLS_SIGNATURE_EXCEPTIONS.'''
+    dlls = os.path.join(folder, "DLLs")
+    names = sorted(os.listdir(dlls)) if os.path.isdir(dlls) else []
+    skipped = dlls_ignore(dlls, names)
+    return [os.path.join(dlls, n) for n in names
+            if n.lower().endswith((".dll", ".pyd")) and n not in skipped and n.lower() not in DLLS_SIGNATURE_EXCEPTIONS]
+
+
 def check_signed(folder: str, version: tuple[int, int], run: CommandRunner = _run,
                  system_dir: Callable[[], str] = _system_directory) -> dict[str, tuple[str, str]]:
-    psf = [os.path.join(folder, n) for n in psf_files(version)]
+    '''python.exe, pythonw.exe, the core DLLs and every extension binary in DLLs\\ must be validly PSF-signed, the
+    VC runtime validly signed.'''
+    psf = [os.path.join(folder, n) for n in psf_files(version)] + extension_binaries(folder)
     others = [os.path.join(folder, n) for n in ("vcruntime140.dll", "vcruntime140_1.dll") if os.path.isfile(os.path.join(folder, n))]
     results = authenticode(psf + others, run=run, system_dir=system_dir)
     problems = signature_problems(results, psf, others)
@@ -304,31 +327,58 @@ def copy_app(backend: str, dest: str, own_dist: Any, deps: list[Any], site_packa
 ISOLATION_PROBE = ("import json, sys; print(json.dumps({'path': sys.path, 'isolated': sys.flags.isolated, "
                    "'no_user_site': sys.flags.no_user_site, 'safe_path': sys.flags.safe_path, "
                    "'ignore_environment': sys.flags.ignore_environment, 'site_imported': 'site' in sys.modules, "
+                   "'inspect': sys.flags.inspect, 'dev_mode': sys.flags.dev_mode, 'utf8_mode': sys.flags.utf8_mode, "
+                   "'dont_write_bytecode': sys.flags.dont_write_bytecode, 'pycache_prefix': sys.pycache_prefix, "
+                   "'warnoptions': sys.warnoptions, 'stdout_encoding': sys.stdout.encoding, "
                    "'executable': sys.executable, 'prefix': sys.prefix}))")
+# Every flag the environment could flip if -I were missing, as they must come out
+ISOLATED_FLAGS: dict[str, Any] = {"inspect": 0, "dev_mode": False, "utf8_mode": 0, "dont_write_bytecode": 0,
+                                  "pycache_prefix": None, "warnoptions": [], "site_imported": False, "isolated": 1}
+PROBE_TIMEOUT = 60
+
+
+def hostile_env(elsewhere: str) -> dict[str, str]:
+    '''The current environment plus PYTHON* variables that would each change the interpreter if honoured.'''
+    return {**os.environ, "PYTHONPATH": elsewhere, "PYTHONHOME": elsewhere, "PYTHONINSPECT": "1", "PYTHONDEVMODE": "1",
+            "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1", "PYTHONWARNINGS": "default",
+            "PYTHONPYCACHEPREFIX": os.path.join(elsewhere, "pycache"), "PYTHONIOENCODING": "iso8859-1",
+            "PYTHONSTARTUP": os.path.join(elsewhere, "startup.py"), "PYTHONMALLOC": "debug"}
 
 
 def isolation_report(folder: str, run: CommandRunner = _run) -> dict[str, Any]:
-    '''sys.path and flags of the staged runtime, started from an unrelated directory with PYTHONPATH set: every path
-    must be inside `folder`.'''
+    r'''sys.path and flags of the staged runtime started the way Decky starts it (-I), from an unrelated directory,
+    with hostile PYTHON* variables set: sys.path must be exactly python\Lib, python\DLLs and app, and no flag may
+    have followed the environment.'''
     python = os.path.join(folder, RUNTIME_DIR, "python.exe")
     with tempfile.TemporaryDirectory() as elsewhere:
-        env = {**os.environ, "PYTHONPATH": elsewhere}
-        proc = run([python, "-c", ISOLATION_PROBE], cwd=elsewhere, env=env)
+        marker = os.path.join(elsewhere, "startup-ran")
+        with open(os.path.join(elsewhere, "startup.py"), "w", encoding="utf-8") as f:
+            f.write(f"open({marker!r}, 'w').close()\n")
+        proc = run([python, "-I", "-c", ISOLATION_PROBE], cwd=elsewhere, env=hostile_env(elsewhere), timeout=PROBE_TIMEOUT)
+        startup_ran = os.path.exists(marker)
     if proc.returncode != 0:
         raise BuildError(f"The staged runtime does not start: {proc.stderr.strip()}")
-    report: dict[str, Any] = json.loads(proc.stdout)
-    outside = [p for p in report["path"] if not p or not _inside(p, folder)]
-    if outside:
-        raise BuildError(f"The staged runtime's sys.path reaches outside {folder}: {outside}")
-    if report["site_imported"]:
-        raise BuildError("The staged runtime imported site")
+    try:
+        report: dict[str, Any] = json.loads(proc.stdout)
+        path = [str(p) for p in report["path"]]
+    except (ValueError, KeyError, TypeError) as e:
+        raise BuildError(f"Unexpected isolation probe output ({e!r}): {proc.stdout[:500]!r}") from None
+    expected = [os.path.join(folder, RUNTIME_DIR, "Lib"), os.path.join(folder, RUNTIME_DIR, "DLLs"), os.path.join(folder, APP_DIR)]
+    norm: Callable[[str], str] = lambda p: os.path.normcase(os.path.abspath(p)) if p else ""
+    if [norm(p) for p in path] != [norm(p) for p in expected]:
+        raise BuildError(f"The staged runtime's sys.path is {path}, expected exactly {expected}")
+    wrong = {k: report.get(k) for k, v in ISOLATED_FLAGS.items() if report.get(k) != v}
+    if startup_ran:
+        wrong["PYTHONSTARTUP"] = "ran"
+    if wrong:
+        raise BuildError(f"The staged runtime followed the environment: {wrong}")
     return report
 
 
 def compile_folder(folder: str, run: CommandRunner = _run) -> None:
     # checked-hash: the bytecode stays valid whatever timestamps the copy into Program Files ends up with
     python = os.path.join(folder, RUNTIME_DIR, "python.exe")
-    proc = run([python, "-m", "compileall", "-q", "-j", "0", "--invalidation-mode", "checked-hash",
+    proc = run([python, "-I", "-m", "compileall", "-q", "-j", "0", "--invalidation-mode", "checked-hash",
                 os.path.join(folder, RUNTIME_DIR, "Lib"), os.path.join(folder, APP_DIR)])
     if proc.returncode != 0:
         raise BuildError(f"compileall failed:\n{proc.stdout}{proc.stderr}")
@@ -336,16 +386,41 @@ def compile_folder(folder: str, run: CommandRunner = _run) -> None:
 
 def smoke_test(folder: str, run: CommandRunner = _run) -> str:
     '''--check-imports with the plugin module list and with the loader's own entry points, then the version the
-    loader will report (from the copied decky_loader metadata). Returns that version.'''
+    loader will report (from the copied decky_loader metadata). Returns that version. Run like Decky runs, with -I.'''
     python, main_py = os.path.join(folder, RUNTIME_DIR, "python.exe"), os.path.join(folder, APP_DIR, "main.py")
     for modules in (CHECK_IMPORTS, LOADER_IMPORTS):
-        proc = run([python, main_py, "--check-imports", *modules])
+        proc = run([python, "-I", main_py, "--check-imports", *modules])
         if proc.returncode != 0:
             raise BuildError(f"--check-imports failed: {proc.stdout.strip()} {proc.stderr.strip()}")
-    proc = run([python, "-c", "import importlib.metadata as m; print(m.version('decky_loader'))"])
+    proc = run([python, "-I", "-c", "import importlib.metadata as m; print(m.version('decky_loader'))"])
     if proc.returncode != 0:
         raise BuildError(f"The staged copy has no decky_loader metadata: {proc.stderr.strip()}")
     return proc.stdout.strip()
+
+
+def check_refuses_without_isolation(folder: str, run: CommandRunner = _run) -> None:
+    '''main.py on the staged runtime must refuse to run without -I.'''
+    python, main_py = os.path.join(folder, RUNTIME_DIR, "python.exe"), os.path.join(folder, APP_DIR, "main.py")
+    proc = run([python, main_py, "--check-imports", "os"], timeout=PROBE_TIMEOUT)
+    if proc.returncode != 2 or "must be started with -I" not in proc.stderr:
+        raise BuildError(f"main.py ran without -I (exit {proc.returncode}): {proc.stdout.strip()} {proc.stderr.strip()}")
+
+
+BUILD_CONFIG = "build_config.json"
+
+
+def build_config(environ: dict[str, str] | None = None) -> dict[str, str]:
+    '''What PyInstaller's runtime hook (pyinstaller.spec writes build_config.py) sets, with the same sources and
+    defaults. DECKY_NOCONSOLE is 1: the task runs pythonw.exe, like the windowed onedir build it replaces.'''
+    env = os.environ if environ is None else environ
+    return {"DECKY_PACKAGED_BUILD": "1", "DECKY_REPO": env.get("DECKY_REPO", "SteamDeckHomebrew/decky-loader"),
+            "DECKY_BRANCH": env.get("DECKY_BRANCH", "main"), "DECKY_NOCONSOLE": "1"}
+
+
+def write_build_config(app_dir: str, environ: dict[str, str] | None = None) -> None:
+    with open(os.path.join(app_dir, BUILD_CONFIG), "w", encoding="utf-8") as f:
+        json.dump(build_config(environ), f, indent=2)
+        f.write("\n")
 
 
 def folder_size(folder: str) -> int:
@@ -374,10 +449,12 @@ def build(out: str, venv: str = sys.prefix, backend: str = BACKEND, run: Command
     os.makedirs(out, exist_ok=True)
     copy_runtime(base, os.path.join(out, RUNTIME_DIR), version)
     copy_app(backend, os.path.join(out, APP_DIR), own, deps, site_packages)
+    write_build_config(os.path.join(out, APP_DIR))
     compile_folder(out, run)
     signatures = check_signed(os.path.join(out, RUNTIME_DIR), version, run)
     isolation = isolation_report(out, run)
     loader_version = smoke_test(out, run)
+    check_refuses_without_isolation(out, run)
     return {"folder": out, "base": base, "version": platform.python_version(), "loader_version": loader_version,
             "dependencies": [f"{d.metadata['Name']} {d.version}" for d in deps], "signatures": signatures,
             "isolation": isolation, "size": folder_size(out)}
@@ -398,8 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     for path, (status, subject) in result["signatures"].items():
         print(f"Signature {os.path.basename(path)}: {status}, {subject}")
     print("Staged sys.path: " + json.dumps(result["isolation"]["path"]))
-    print("Staged flags: " + ", ".join(f"{k}={result['isolation'][k]}" for k in
-                                        ("isolated", "no_user_site", "safe_path", "ignore_environment", "site_imported")))
+    print("Staged flags with -I and hostile PYTHON* variables: " + ", ".join(
+        f"{k}={result['isolation'][k]}" for k in ("isolated", "no_user_site", "safe_path", "ignore_environment", "site_imported",
+                                                  "inspect", "dev_mode", "utf8_mode", "dont_write_bytecode", "pycache_prefix",
+                                                  "warnoptions", "stdout_encoding")))
+    print("main.py refuses to run on the staged runtime without -I")
     return 0
 
 

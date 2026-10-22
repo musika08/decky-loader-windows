@@ -249,21 +249,77 @@ def test_versions_must_agree():
 
 # Checks on the staged folder
 
-def test_isolation_report_rejects_paths_outside_the_folder(tmp_path: Path):
-    def run_with(path: list[str], site: bool = False) -> Any:
-        def run(argv: list[str], **kw: Any) -> Any:
-            assert kw["env"]["PYTHONPATH"] == kw["cwd"]  # started elsewhere, with PYTHONPATH pointing there
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"path": path, "site_imported": site}), "")
-        return run
+def _good_report(folder: Path) -> dict[str, Any]:
+    return {"path": [str(folder / "python" / "Lib"), str(folder / "python" / "DLLs"), str(folder / "app")],
+            "isolated": 1, "site_imported": False, "inspect": 0, "dev_mode": False, "utf8_mode": 0,
+            "dont_write_bytecode": 0, "pycache_prefix": None, "warnoptions": [], "stdout_encoding": "cp1252"}
 
-    inside = [str(tmp_path / "python" / "Lib"), str(tmp_path / "app")]
-    assert bw.isolation_report(str(tmp_path), run=run_with(inside))["path"] == inside
-    with pytest.raises(bw.BuildError, match="outside"):
-        bw.isolation_report(str(tmp_path), run=run_with(inside + [r"C:\Users\me\site-packages"]))
-    with pytest.raises(bw.BuildError, match="outside"):
-        bw.isolation_report(str(tmp_path), run=run_with([""] + inside))
-    with pytest.raises(bw.BuildError, match="imported site"):
-        bw.isolation_report(str(tmp_path), run=run_with(inside, site=True))
+
+def test_isolation_report_runs_with_dash_i_and_a_hostile_environment(tmp_path: Path):
+    seen: list[tuple[list[str], dict[str, Any]]] = []
+
+    def run(argv: list[str], **kw: Any) -> Any:
+        seen.append((argv, kw))
+        return subprocess.CompletedProcess(argv, 0, json.dumps(_good_report(tmp_path)), "")
+
+    assert bw.isolation_report(str(tmp_path), run=run)["path"] == _good_report(tmp_path)["path"]
+    argv, kw = seen[0]
+    assert argv[:3] == [str(tmp_path / "python" / "python.exe"), "-I", "-c"]
+    env = kw["env"]
+    assert env["PYTHONPATH"] == kw["cwd"] and env["PYTHONHOME"] == kw["cwd"]  # started elsewhere, pointing there
+    for key, value in {"PYTHONINSPECT": "1", "PYTHONDEVMODE": "1", "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1",
+                       "PYTHONWARNINGS": "default", "PYTHONIOENCODING": "iso8859-1", "PYTHONMALLOC": "debug"}.items():
+        assert env[key] == value, key
+    assert env["PYTHONSTARTUP"].endswith("startup.py") and env["PYTHONPYCACHEPREFIX"].startswith(kw["cwd"])
+    assert kw["timeout"] == bw.PROBE_TIMEOUT
+
+
+@pytest.mark.parametrize("change", [
+    {"path": "outside"}, {"path": "missing DLLs"}, {"path": "empty entry"}, {"inspect": 1}, {"dev_mode": True},
+    {"utf8_mode": 1}, {"dont_write_bytecode": 1}, {"pycache_prefix": r"C:\pcp"}, {"warnoptions": ["default"]},
+    {"site_imported": True}, {"isolated": 0}])
+def test_isolation_report_rejects_anything_the_environment_changed(tmp_path: Path, change: dict[str, Any]):
+    report = _good_report(tmp_path)
+    if change.get("path") == "outside":
+        report["path"] = report["path"] + [r"C:\Users\me\site-packages"]
+    elif change.get("path") == "missing DLLs":
+        report["path"] = [report["path"][0], report["path"][2]]
+    elif change.get("path") == "empty entry":
+        report["path"] = [""] + report["path"]
+    else:
+        report.update(change)
+
+    def run(argv: list[str], **kw: Any) -> Any:
+        return subprocess.CompletedProcess(argv, 0, json.dumps(report), "")
+
+    with pytest.raises(bw.BuildError, match="sys.path|followed the environment"):
+        bw.isolation_report(str(tmp_path), run=run)
+
+
+def test_isolation_report_notices_pythonstartup_running(tmp_path: Path):
+    def run(argv: list[str], **kw: Any) -> Any:
+        startup = kw["env"]["PYTHONSTARTUP"]
+        exec(Path(startup).read_text(encoding="utf-8"))  # what an interpreter honouring it would do
+        return subprocess.CompletedProcess(argv, 0, json.dumps(_good_report(tmp_path)), "")
+
+    with pytest.raises(bw.BuildError, match="PYTHONSTARTUP"):
+        bw.isolation_report(str(tmp_path), run=run)
+
+
+def test_isolation_report_wraps_bad_output(tmp_path: Path):
+    def run(argv: list[str], **kw: Any) -> Any:
+        return subprocess.CompletedProcess(argv, 0, ">>> ", "")
+
+    with pytest.raises(bw.BuildError, match="Unexpected isolation probe output"):
+        bw.isolation_report(str(tmp_path), run=run)
+
+
+def test_run_never_waits_on_stdin_and_times_out(tmp_path: Path):
+    # An interpreter dropped into a REPL gets EOF at once instead of waiting for input
+    proc = bw._run([sys.executable, "-I", "-c", "import sys; print(repr(sys.stdin.read()))"])  # pyright: ignore [reportPrivateUsage]
+    assert proc.stdout.strip() == "''"
+    with pytest.raises(bw.BuildError, match="Timed out"):
+        bw._run([sys.executable, "-I", "-c", "import time; time.sleep(30)"], timeout=1)  # pyright: ignore [reportPrivateUsage]
 
 
 def test_smoke_test_runs_check_imports_with_the_staged_runtime(tmp_path: Path):
@@ -275,8 +331,9 @@ def test_smoke_test_runs_check_imports_with_the_staged_runtime(tmp_path: Path):
 
     assert bw.smoke_test(str(tmp_path), run=run) == "3.3.0"
     py, main = str(tmp_path / "python" / "python.exe"), str(tmp_path / "app" / "main.py")
-    assert calls[0] == [py, main, "--check-imports", *bw.CHECK_IMPORTS]
-    assert calls[1] == [py, main, "--check-imports", *bw.LOADER_IMPORTS]
+    assert calls[0] == [py, "-I", main, "--check-imports", *bw.CHECK_IMPORTS]
+    assert calls[1] == [py, "-I", main, "--check-imports", *bw.LOADER_IMPORTS]
+    assert calls[2][:3] == [py, "-I", "-c"]
     assert "psutil" in bw.CHECK_IMPORTS and "aiohttp" in bw.CHECK_IMPORTS and "winreg" in bw.CHECK_IMPORTS
 
     def failing(argv: list[str], **kw: Any) -> Any:
@@ -284,6 +341,74 @@ def test_smoke_test_runs_check_imports_with_the_staged_runtime(tmp_path: Path):
 
     with pytest.raises(bw.BuildError, match="missing: psutil"):
         bw.smoke_test(str(tmp_path), run=failing)
+
+
+def test_compile_uses_dash_i(tmp_path: Path):
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kw: Any) -> Any:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    bw.compile_folder(str(tmp_path), run=run)
+    assert calls[0][:4] == [str(tmp_path / "python" / "python.exe"), "-I", "-m", "compileall"]
+    assert "checked-hash" in calls[0]
+
+
+def test_staged_main_must_refuse_to_run_without_dash_i(tmp_path: Path):
+    def run_with(rc: int, err: str) -> Any:
+        def run(argv: list[str], **kw: Any) -> Any:
+            assert "-I" not in argv
+            return subprocess.CompletedProcess(argv, rc, "", err)
+        return run
+
+    bw.check_refuses_without_isolation(str(tmp_path), run=run_with(2, "Decky's Python runtime must be started with -I"))
+    with pytest.raises(bw.BuildError, match="ran without -I"):
+        bw.check_refuses_without_isolation(str(tmp_path), run=run_with(0, ""))
+
+
+def test_build_config_mirrors_the_pyinstaller_runtime_hook(tmp_path: Path):
+    assert bw.build_config({}) == {"DECKY_PACKAGED_BUILD": "1", "DECKY_REPO": "SteamDeckHomebrew/decky-loader",
+                                   "DECKY_BRANCH": "main", "DECKY_NOCONSOLE": "1"}
+    assert bw.build_config({"DECKY_REPO": "me/fork", "DECKY_BRANCH": "win"})["DECKY_REPO"] == "me/fork"
+    bw.write_build_config(str(tmp_path), {"DECKY_BRANCH": "win"})
+    data = json.loads((tmp_path / "build_config.json").read_text(encoding="utf-8"))
+    assert data["DECKY_BRANCH"] == "win"
+    # The same keys and defaults as pyinstaller.spec's hook, and the name main.py reads
+    spec = (Path(__file__).resolve().parents[1] / "pyinstaller.spec").read_text(encoding="utf-8")
+    assert "os.getenv('DECKY_REPO', 'SteamDeckHomebrew/decky-loader')" in spec and "os.getenv('DECKY_BRANCH', 'main')" in spec
+    from decky_loader.localplatform import winsupervisor
+    assert bw.BUILD_CONFIG == winsupervisor.BUILD_CONFIG and set(data) == set(winsupervisor.BUILD_CONFIG_KEYS)
+
+
+def test_every_extension_binary_is_signature_checked(tmp_path: Path):
+    base = _fake_base(tmp_path)
+    _touch(base, r"DLLs\py.ico", r"DLLs\python_lib.cat")
+    names = sorted(os.path.basename(p) for p in bw.extension_binaries(str(base)))
+    # Every .dll and .pyd that copy_runtime keeps; tcl/tk and test modules are not shipped, icons are not code
+    assert names == ["_socket.pyd", "_ssl.pyd", "libssl-3.dll", "sqlite3.dll"]
+    assert bw.DLLS_SIGNATURE_EXCEPTIONS == frozenset()
+    seen: list[str] = []
+
+    def run(argv: list[str], **kw: Any) -> Any:
+        paths = kw["env"]["DECKY_SIGNED_PATHS"].split("|")
+        seen.extend(paths)
+        out = [{"Path": p, "Status": "NotSigned" if p.endswith("sqlite3.dll") else "Valid",
+                "Subject": MS if "vcruntime" in p else PSF} for p in paths]
+        return subprocess.CompletedProcess(argv, 0, json.dumps(out), "")
+
+    with pytest.raises(bw.BuildError, match="sqlite3.dll: NotSigned"):
+        bw.check_signed(str(base), (3, 13), run=run, system_dir=lambda: r"C:\S")
+    assert str(base / "DLLs" / "_ssl.pyd") in seen
+
+
+@pytest.mark.parametrize("stdout", ["", "not json", '[{"Path": "a"}]', "42"])
+def test_authenticode_wraps_unexpected_output(stdout: str):
+    def run(argv: list[str], **kw: Any) -> Any:
+        return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+    with pytest.raises(bw.BuildError, match="Unexpected Get-AuthenticodeSignature output"):
+        bw.authenticode([r"C:\a.exe"], run=run, system_dir=lambda: r"C:\S")
 
 
 def test_build_refuses_a_non_empty_output_folder(tmp_path: Path):

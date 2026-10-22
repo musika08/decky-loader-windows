@@ -98,7 +98,7 @@ Decky Loader also runs on Windows, next to the Steam client. It is not installed
 
 1. Build the installer folder from a checkout of this repository: `powershell -ExecutionPolicy Bypass -File tools\update-decky.ps1 -Rebuild -NoInstall` (it builds the frontend, runs the backend tests and calls `tools\build_win_runtime.py`). This makes `build\installer\DeckyLoader` next to the checkout, with a `python` folder (a private copy of the Python runtime the backend venv was made from, which must be the python.org build signed by the Python Software Foundation; the build checks the signature) and an `app` folder (Decky's source and its dependencies). Installed mode does not use a PyInstaller exe; the single-file `.exe` builds are for portable mode and cannot be installed.
 1. If you were running a portable copy of Decky, close it first. Both use port 1337, so the installed copy cannot start while it runs.
-1. From any terminal, in the installer folder, run `python\python.exe app\main.py --install` (`tools\update-decky.ps1` without `-NoInstall` does this for you). Windows will ask for administrator approval if needed. This copies the `python` and `app` folders to `%ProgramFiles%\Decky Loader` and registers a scheduled task named `Decky Loader`, which runs `%ProgramFiles%\Decky Loader\python\pythonw.exe "%ProgramFiles%\Decky Loader\app\main.py"` at every logon, without a window, and starts it right away. The runtime there only loads code from its own `Lib`, `DLLs` and `..\app` folders (a `python313._pth` file), never from `PYTHONPATH` or the current directory. It also creates the empty file `.cef-enable-remote-debugging` in your Steam folder if it is missing, which turns on Steam's debugger that Decky connects to (restart Steam once for it to take effect). Uninstalling leaves that file in place. You can delete the extracted folder afterwards.
+1. From any terminal, in the installer folder, run `python\python.exe -I app\main.py --install` (`tools\update-decky.ps1` without `-NoInstall` does this for you). Windows will ask for administrator approval if needed. This copies the `python` and `app` folders to `%ProgramFiles%\Decky Loader` and registers a scheduled task named `Decky Loader`, which runs `%ProgramFiles%\Decky Loader\python\pythonw.exe -I "%ProgramFiles%\Decky Loader\app\main.py"` at every logon, without a window, and starts it right away. The runtime there only loads code from its own `Lib`, `DLLs` and `..\app` folders (a `python313._pth` file), never from `PYTHONPATH` or the current directory, and `-I` makes it ignore every other `PYTHON*` environment variable too (Decky refuses to start on that runtime without `-I`). The elevated install runs in a console window of its own that closes when it finishes; if it fails, the reason is in `%ProgramData%\decky\logs\install.log` (or a `%TEMP%\decky-install-*.log` file when that folder is not there yet), and `tools\update-decky.ps1` prints it. It also creates the empty file `.cef-enable-remote-debugging` in your Steam folder if it is missing, which turns on Steam's debugger that Decky connects to (restart Steam once for it to take effect). Uninstalling leaves that file in place. You can delete the extracted folder afterwards.
 1. Open Steam in Big Picture mode. The Decky tab appears in the Quick Access menu.
 1. Install plugins from Decky's built-in store.
 
@@ -112,7 +112,7 @@ The program is in `%ProgramFiles%\Decky Loader` (`python` is its Python runtime,
 
 **Updating**
 
-Decky's built-in updater is not available in installed mode; its Updates page says so instead of offering an update. To update, run `tools\update-decky.ps1`, or build a new installer folder and run `python\python.exe app\main.py --install` from it again. This stops the running Decky, replaces `%ProgramFiles%\Decky Loader`, and starts the new version. Plugins and settings are kept.
+Decky's built-in updater is not available in installed mode; its Updates page says so instead of offering an update. To update, run `tools\update-decky.ps1`, or build a new installer folder and run `python\python.exe -I app\main.py --install` from it again. This stops the running Decky, replaces `%ProgramFiles%\Decky Loader`, and starts the new version. Plugins and settings are kept.
 
 **Developer options**
 
@@ -126,7 +126,7 @@ Plugins in `%USERPROFILE%\homebrew\plugins` from portable mode are not moved to 
 
 **Uninstall**
 
-Run the installed copy: `"%ProgramFiles%\Decky Loader\python\python.exe" "%ProgramFiles%\Decky Loader\app\main.py" --uninstall`, and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramFiles%\Decky Loader` (and any `%ProgramData%\decky\services` or `tmp` left by an older build). Files that are still in use are deleted at the next restart. Plugins and settings in `%ProgramData%\decky` are left in place.
+Run the installed copy: `"%ProgramFiles%\Decky Loader\python\python.exe" -I "%ProgramFiles%\Decky Loader\app\main.py" --uninstall`, and approve the Windows administrator prompt. This removes the scheduled task and `%ProgramFiles%\Decky Loader` (and any `%ProgramData%\decky\services` or `tmp` left by an older build). Files that are still in use are deleted at the next restart. Plugins and settings in `%ProgramData%\decky` are left in place.
 
 **Portable mode**
 

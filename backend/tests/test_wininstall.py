@@ -139,8 +139,8 @@ def test_install_points_task_at_the_program_files_runtime(tmp_path: Path):
     app_dir = str(tmp_path / "Program Files" / "Decky Loader")
     task = ET.fromstring(xmls[0].encode("utf-16"))
     assert task.findtext("t:Actions/t:Exec/t:Command", namespaces=NS) == os.path.join(app_dir, "python", "pythonw.exe")
-    # "Program Files" has a space, so the script path is quoted
-    assert task.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == '"' + os.path.join(app_dir, "app", "main.py") + '"'
+    # -I first (PYTHON* variables ignored); "Program Files" has a space, so the script path is quoted
+    assert task.findtext("t:Actions/t:Exec/t:Arguments", namespaces=NS) == '-I "' + os.path.join(app_dir, "app", "main.py") + '"'
     assert task.findtext("t:Actions/t:Exec/t:WorkingDirectory", namespaces=NS) == app_dir
 
 
@@ -615,8 +615,8 @@ def test_install_non_admin_elevates_the_same_runtime_and_script_for_current_sid(
     assert hwnd is None and verb == "runas" and show == 1
     stage = tmp_path / "src" / "Decky Loader installer"
     assert file == str(stage / "python" / "python.exe")
-    # The script path has spaces, so it is quoted, and it comes before the arguments
-    assert params == f'"{stage / "app" / "main.py"}" --install --for-sid {SID}'
+    # -I right after the interpreter; the script path has spaces, so it is quoted, and it comes before the arguments
+    assert params == f'-I "{stage / "app" / "main.py"}" --install --for-sid {SID}'
 
 
 def test_install_non_admin_account_refused_without_elevating(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -729,13 +729,24 @@ def test_uninstall_removes_a_link_at_the_program_dir_without_following_it(tmp_pa
 def test_uninstall_non_admin_elevates(tmp_path: Path):
     calls: list[Any] = []
     rec = Recorder()
-    rc = wi.uninstall(is_admin=lambda: False, run=rec, shell_execute=lambda *a: calls.append(a) or 33,
-                      exe=r"C:\Program Files\Decky Loader\python\python.exe", script=r"C:\Program Files\Decky Loader\app\main.py",
+    app = _app_dir(tmp_path)
+    _write_tree(app, STAGE_TREE)
+    exe, script = str(app / "python" / "python.exe"), str(app / "app" / "main.py")
+    rc = wi.uninstall(is_admin=lambda: False, run=rec, shell_execute=lambda *a: calls.append(a) or 33, exe=exe, script=script,
                       frozen=lambda: False, program_data=str(tmp_path), program_files=str(tmp_path), rmtree=lambda p: None)
     assert rc == 0 and rec.runs == []
     assert calls[0][1] == "runas"
-    assert calls[0][2] == r"C:\Program Files\Decky Loader\python\python.exe"
-    assert calls[0][3] == r'"C:\Program Files\Decky Loader\app\main.py" --uninstall'
+    assert calls[0][2] == exe
+    assert calls[0][3] == f'-I "{script}" --uninstall'
+
+
+def test_uninstall_from_a_checkout_elevates_without_isolation(tmp_path: Path):
+    # A development venv is not our runtime: -I would drop the checkout from sys.path
+    calls: list[Any] = []
+    rc = wi.uninstall(is_admin=lambda: False, run=Recorder(), shell_execute=lambda *a: calls.append(a) or 33,
+                      exe=r"C:\src\backend\.venv\Scripts\python.exe", script=r"C:\src\backend\main.py", frozen=lambda: False,
+                      program_data=str(tmp_path), program_files=str(tmp_path))
+    assert rc == 0 and calls[0][3] == r"C:\src\backend\main.py --uninstall"
 
 
 def test_uninstall_non_admin_elevates_a_portable_exe_without_a_script(tmp_path: Path):
@@ -1448,3 +1459,142 @@ def test_steam_dir_falls_back_to_the_machine_install(tmp_path: Path):
         return r"relative\steam"
     assert wi.steam_dir_for_sid(SID, read=nothing) is None
     assert wi.steam_dir_for_sid(SID, read=relative) is None
+
+
+# -I on every launch of our runtime
+
+def test_self_invocation_isolates_only_our_runtime(tmp_path: Path):
+    stage = _fake_env(tmp_path)
+    exe, script = str(stage / "python" / "pythonw.exe"), str(stage / "app" / "main.py")
+    assert wi.self_invocation(exe, script) == [exe, "-I", script]
+    assert wi.self_invocation(r"C:\venv\python.exe", r"C:\src\main.py") == [r"C:\venv\python.exe", r"C:\src\main.py"]
+    assert wi.self_invocation("x.exe", "m.py", our_runtime=True) == ["x.exe", "-I", "m.py"]
+
+
+@pytest.mark.parametrize("argv, isolated", [
+    (["py.exe", "-I", "main.py"], True),
+    (["py.exe", "-B", "-I", "main.py", "--install"], True),
+    (["py.exe", "-IB", "main.py"], True),
+    (["py.exe", "-X", "utf8", "-I", "main.py"], True),
+    (["py.exe", "main.py", "-I"], False),             # a script argument, not an interpreter option
+    (["py.exe", "main.py"], False),
+    (["py.exe", "-c", "-I"], False),
+    (["py.exe", "-m", "x", "-I"], False),
+    (["py.exe", "-X", "I", "main.py"], False),         # the value of -X, not -I
+    (["py.exe", "-W", "Ignore", "main.py"], False),
+    (["py.exe", "--check-hash-based-pycs", "always", "main.py"], False),
+    (["py.exe"], False),
+])
+def test_launched_isolated_reads_only_interpreter_options(argv: list[str], isolated: bool):
+    assert wi.launched_isolated(argv) is isolated
+
+
+def test_isolation_error_only_for_our_runtime_without_dash_i(tmp_path: Path):
+    stage = _fake_env(tmp_path)
+    exe, script = str(stage / "python" / "python.exe"), str(stage / "app" / "main.py")
+    assert wi.isolation_error(exe, script, [exe, "-I", script]) is None
+    message = wi.isolation_error(exe, script, [exe, script, "--install"])
+    assert message is not None and "must be started with -I" in message
+    # A development checkout is never refused
+    assert wi.isolation_error(r"C:\venv\python.exe", r"C:\src\main.py", [r"C:\venv\python.exe", r"C:\src\main.py"]) is None
+
+
+def test_main_py_checks_isolation_before_dispatching():
+    import ast
+    main_py = Path(__file__).resolve().parent.parent / "main.py"
+    source = main_py.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    calls = sorted((n.lineno, ast.unparse(n.func)) for n in ast.walk(tree) if isinstance(n, ast.Call))
+    names = [c for _, c in calls]
+    first_dispatch = min(i for i, c in enumerate(names) if c in ("main", "finish_update", "winsupervisor.setup_logging"))
+    assert names.index("wininstall.isolation_error") < first_dispatch
+    assert "run_logged" in source  # install and uninstall failures are logged
+
+
+# Copying refuses links
+
+def test_copy_tree_plain_refuses_a_junction_inside_the_stage(tmp_path: Path):
+    src = tmp_path / "src"
+    _write_tree(src, STAGE_TREE)
+    secret = tmp_path / "secret"
+    secret.mkdir()
+    (secret / "token.txt").write_bytes(b"x")
+    _junction(src / "app" / "decky_loader" / "link", secret)
+    with pytest.raises(wi.ReparsePointError, match="junction or symbolic link"):
+        wi.copy_tree_plain(str(src), str(tmp_path / "dst"))
+    assert not (tmp_path / "dst" / "app" / "decky_loader" / "link").exists()
+
+
+def test_copy_tree_plain_refuses_a_junction_as_the_source(tmp_path: Path):
+    real = tmp_path / "real"
+    _write_tree(real, {"a.txt": b"a"})
+    _junction(tmp_path / "link", real)
+    with pytest.raises(wi.ReparsePointError):
+        wi.copy_tree_plain(str(tmp_path / "link"), str(tmp_path / "dst"))
+    assert not (tmp_path / "dst").exists()
+
+
+def test_install_fails_cleanly_on_a_link_in_the_stage(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    src = _fake_env(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _junction(src / "python" / "Lib" / "evil", elsewhere)
+    rec = Recorder()
+    assert _install(tmp_path, src, run=rec) == 1
+    assert "junction or symbolic link" in capsys.readouterr().err
+    assert not any(r[1:2] == ["/Create"] for r in rec.runs)
+    assert os.listdir(tmp_path / "Program Files") == []  # the half-staged copy is removed
+
+
+# Install failures are logged (the elevated console closes)
+
+def test_run_logged_writes_output_and_traceback_on_failure(capsys: pytest.CaptureFixture[str]):
+    logs: list[str] = []
+
+    def work() -> int:
+        print("Could not replace the program folder", file=sys.stderr)
+        raise RuntimeError("boom")
+
+    rc = wi.run_logged("install", ["py.exe", "-I", "main.py", "--install"], work, elevated=lambda: True,
+                       write_log=lambda text: logs.append(text) or r"C:\pd\decky\logs\install.log",
+                       now=lambda: datetime.datetime(2026, 1, 2, 3, 4, 5))
+    assert rc == 1 and len(logs) == 1
+    assert "2026-01-02T03:04:05 install failed (exit code 1)" in logs[0]
+    assert "command: py.exe -I main.py --install" in logs[0]
+    assert "Could not replace the program folder" in logs[0] and "RuntimeError: boom" in logs[0]
+    err = capsys.readouterr().err
+    assert "Could not replace the program folder" in err and r"Details: C:\pd\decky\logs\install.log" in err
+
+
+def test_run_logged_keeps_the_exit_code_and_logs_nothing_on_success():
+    logs: list[str] = []
+    assert wi.run_logged("uninstall", ["x"], lambda: 0, elevated=lambda: True, write_log=logs.append) == 0
+    assert wi.run_logged("uninstall", ["x"], lambda: 3, elevated=lambda: True,
+                         write_log=lambda t: logs.append(t) or None) == 3
+    assert len(logs) == 1 and "exit code 3" in logs[0]
+    assert sys.stdout is not None and not isinstance(sys.stdout, wi._Tee)  # pyright: ignore [reportPrivateUsage]
+
+
+def test_run_logged_unelevated_runs_plainly():
+    logs: list[str] = []
+    assert wi.run_logged("install", ["x"], lambda: 1, elevated=lambda: False, write_log=logs.append) == 1
+    assert logs == []
+
+
+def test_write_install_log_appends_in_the_log_dir(tmp_path: Path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    assert wi.write_install_log("one\n", log_dir=lambda: str(logs)) == str(logs / "install.log")
+    assert wi.write_install_log("two\n", log_dir=lambda: str(logs)) == str(logs / "install.log")
+    assert (logs / "install.log").read_text(encoding="utf-8") == "one\ntwo\n"
+
+
+def test_write_install_log_falls_back_to_a_new_temp_file(tmp_path: Path):
+    def broken() -> str | None:
+        raise OSError("denied")
+    for log_dir in (lambda: None, broken):
+        path = wi.write_install_log("why\n", log_dir=log_dir, temp_dir=lambda: str(tmp_path))
+        assert path is not None and os.path.dirname(path) == str(tmp_path)
+        assert os.path.basename(path).startswith("decky-install-") and path.endswith(".log")
+        assert Path(path).read_text(encoding="utf-8") == "why\n"
+    assert len(list(tmp_path.glob("decky-install-*.log"))) == 2

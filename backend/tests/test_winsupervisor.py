@@ -19,11 +19,11 @@ class Spawner:
         return self.codes.pop(0)
 
 
-def run(codes: list[int], exe: str = "C:/x/PluginLoader.exe"):
+def run(codes: list[int], exe: str = "C:/x/PluginLoader.exe", self_update: bool | None = None):
     spawn = Spawner(codes)
     sleeps: list[float] = []
     detached: list[list[str]] = []
-    rc = ws.run_supervisor(spawn, sleeps.append, exe, detached.append)
+    rc = ws.run_supervisor(spawn, sleeps.append, exe, detached.append, self_update=self_update)
     return rc, spawn, sleeps, detached
 
 
@@ -47,11 +47,70 @@ def test_child_argv_is_self_command_plus_loader():
 INSTALLED = r"C:\Program Files\Decky Loader"
 
 
-def test_self_command_in_installed_mode_is_the_runtime_on_app_main_py():
+def test_self_command_in_installed_mode_is_the_isolated_runtime_on_app_main_py():
     package_file = INSTALLED + r"\app\decky_loader\localplatform\winsupervisor.py"
     for interpreter in ("pythonw.exe", "python.exe"):
         exe = INSTALLED + "\\python\\" + interpreter
-        assert ws.self_command(executable=exe, frozen=False, package_file=package_file) == [exe, INSTALLED + r"\app\main.py"]
+        assert ws.self_command(executable=exe, frozen=False, package_file=package_file, our_runtime=True) == [
+            exe, "-I", INSTALLED + r"\app\main.py"]
+
+
+def test_self_command_detects_our_runtime_from_the_layout(tmp_path: Path):
+    # python\ and app\ side by side (an installer folder, or the installed copy): -I right after the interpreter
+    for sub in ("python", r"app\decky_loader\localplatform"):
+        (tmp_path / sub).mkdir(parents=True)
+    exe = str(tmp_path / "python" / "pythonw.exe")
+    package_file = str(tmp_path / "app" / "decky_loader" / "localplatform" / "winsupervisor.py")
+    assert ws.self_command(executable=exe, frozen=False, package_file=package_file) == [exe, "-I", str(tmp_path / "app" / "main.py")]
+    # The same interpreter name elsewhere (a development venv) gets no -I: it would drop the checkout from sys.path
+    venv = str(tmp_path / ".venv" / "Scripts" / "python.exe")
+    assert ws.self_command(executable=venv, frozen=False, package_file=package_file) == [venv, str(tmp_path / "app" / "main.py")]
+
+
+def test_child_env_drops_every_python_variable_only():
+    env = {"PYTHONINSPECT": "1", "PythonPath": "x", "PYTHONSTARTUP": "s", "PYTHONHOME": "h", "PATH": "p",
+           "DECKY_SUPERVISED": "1", "MY_PYTHONISH": "keep", "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    assert ws.child_env(env) == {"PATH": "p", "DECKY_SUPERVISED": "1", "MY_PYTHONISH": "keep",
+                                 "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+
+
+def test_spawned_loader_gets_no_python_variables(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("PYTHONINSPECT", "1")
+    monkeypatch.setenv("PYTHONWARNINGS", "default")
+    seen: list[dict[str, str] | None] = []
+
+    def run(argv: list[str], env: dict[str, str] | None, cwd: str | None) -> int:
+        seen.append(env)
+        return 43
+
+    ws.make_spawn(r"C:\d\python\pythonw.exe", run=run)(["a", "--loader"])
+    assert seen[0] is not None and not [k for k in seen[0] if k.upper().startswith("PYTHON")]
+    assert seen[0]["DECKY_SUPERVISED"] == "1"
+
+
+def test_apply_build_config_sets_only_the_hook_keys(tmp_path: Path):
+    path = tmp_path / "build_config.json"
+    path.write_text('{"DECKY_REPO": "me/fork", "DECKY_BRANCH": "win", "DECKY_PACKAGED_BUILD": "1", '
+                    '"DECKY_NOCONSOLE": "1", "PATH": "evil", "DECKY_X": 5}', encoding="utf-8")
+    env: dict[str, str] = {"DECKY_REPO": "old", "PATH": "p"}
+    applied = ws.apply_build_config(str(path), env)
+    assert env == {"DECKY_REPO": "me/fork", "DECKY_BRANCH": "win", "DECKY_PACKAGED_BUILD": "1", "DECKY_NOCONSOLE": "1", "PATH": "p"}
+    assert applied == {k: env[k] for k in ws.BUILD_CONFIG_KEYS}
+
+
+def test_apply_build_config_without_or_with_a_broken_file_changes_nothing(tmp_path: Path):
+    env: dict[str, str] = {}
+    assert ws.apply_build_config(str(tmp_path / "missing.json"), env) == {} and env == {}
+    (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
+    assert ws.apply_build_config(str(tmp_path / "bad.json"), env) == {} and env == {}
+    (tmp_path / "list.json").write_text('["DECKY_REPO"]', encoding="utf-8")
+    assert ws.apply_build_config(str(tmp_path / "list.json"), env) == {} and env == {}
+
+
+def test_build_config_keys_match_the_pyinstaller_runtime_hook():
+    spec = (Path(__file__).resolve().parent.parent / "pyinstaller.spec").read_text(encoding="utf-8")
+    for key in ws.BUILD_CONFIG_KEYS:
+        assert f"os.environ['{key}']" in spec, key
 
 
 def test_self_command_of_a_pyinstaller_build_is_the_exe_alone():
@@ -88,20 +147,32 @@ def test_backoff_is_capped():
 
 
 @pytest.mark.parametrize("frozen", [True, False])
-def test_restart_with_pending_update_hands_off(tmp_path, monkeypatch, frozen):
+def test_restart_with_pending_update_hands_off(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, frozen: bool):
     monkeypatch.setattr(sys, "frozen", frozen, raising=False)
     exe = tmp_path / "PluginLoader.exe"
     new = tmp_path / "PluginLoader.exe.new"
     exe.write_bytes(b"old")
     new.write_bytes(b"new")
-    rc, spawn, _, detached = run([42], str(exe))
+    rc, spawn, _, detached = run([42], str(exe), self_update=True)
     assert rc == 0
     assert len(spawn.calls) == 1
     waited = os.getppid() if frozen else os.getpid()
     assert detached == [[str(new), "--finish-update", str(exe), str(waited)]]
 
 
-def test_failed_handoff_discards_new_and_keeps_supervising(tmp_path):
+def test_from_source_a_pending_update_is_never_swapped_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # From source `exe` is the Python interpreter: a stray python.exe.new must not replace it
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    exe = tmp_path / "python.exe"
+    new = tmp_path / "python.exe.new"
+    exe.write_bytes(b"python")
+    new.write_bytes(b"not python")
+    rc, spawn, _, detached = run([42, 43], str(exe))
+    assert rc == 0 and len(spawn.calls) == 2 and detached == []
+    assert new.read_bytes() == b"not python" and exe.read_bytes() == b"python"
+
+
+def test_failed_handoff_discards_new_and_keeps_supervising(tmp_path: Path):
     exe = tmp_path / "PluginLoader.exe"
     new = tmp_path / "PluginLoader.exe.new"
     exe.write_bytes(b"old")
@@ -111,7 +182,7 @@ def test_failed_handoff_discards_new_and_keeps_supervising(tmp_path):
     def boom(_argv: list[str]) -> None:
         raise OSError("not a valid exe")
 
-    rc = ws.run_supervisor(spawn, lambda _s: None, str(exe), boom)
+    rc = ws.run_supervisor(spawn, lambda _s: None, str(exe), boom, self_update=True)
     assert rc == 0
     assert len(spawn.calls) == 2
     assert not new.exists()

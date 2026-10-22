@@ -161,7 +161,7 @@ class PluginWrapper:
     def _start_windows(self) -> "PluginProcess":
         '''Start the plugin host as its own program: elevated for root plugins, restricted otherwise.'''
         from ..localplatform import winprocess
-        from ..localplatform.winsupervisor import self_command
+        from ..localplatform.winsupervisor import child_env, self_command
         from .plugin_host import TOKEN_ENV, encode_params
 
         sock = self._socket
@@ -169,7 +169,7 @@ class PluginWrapper:
         elevated = "root" in self.flags
         if elevated and not winprocess.is_elevated():
             self.log.warning(f"Plugin {self.get_display_name()} requests root, but the loader is unelevated. Starting it with the loader's privileges.")
-        env = dict(environ)
+        env = child_env(dict(environ)) # No PYTHON* variables: the host runs on our runtime with -I anyway
         env[TOKEN_ENV] = sock.token
         # A onefile child must own its PyInstaller extraction directory, since it may outlive this loader.
         # A onedir build extracts nothing and ignores it.
