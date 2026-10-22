@@ -10,7 +10,7 @@ import shutil, sys
 from typing import List, TYPE_CHECKING, TypedDict
 import zipfile
 
-from aiohttp import ClientSession
+from .helpers import get_session
 
 from . import helpers
 from .settings import SettingsManager
@@ -147,7 +147,7 @@ class Updater:
     async def check_for_updates(self):
         logger.debug("checking for updates")
         selectedBranch = self.get_branch(self.context.settings)
-        async with ClientSession() as web:
+        async with get_session() as web:
             async with web.request("GET", f"https://api.github.com/repos/{self.repo}/releases", headers={'X-GitHub-Api-Version': '2022-11-28'}, ssl=helpers.get_ssl_context()) as res:
                 remoteVersions: List[RemoteVer] = await res.json()
                 if selectedBranch == 0:
@@ -241,7 +241,7 @@ class Updater:
         if size_in_bytes == None:
             size_in_bytes = 35000000 # 35MiB, a reasonable overestimate (30.00 MiB as of 2026/10/05)
 
-        async with ClientSession() as web:
+        async with get_session() as web:
             logger.debug("Downloading binary")
             async with web.request("GET", download_url, ssl=helpers.get_ssl_context(), allow_redirects=True) as res:
                 total = int(res.headers.get('content-length', size_in_bytes))
@@ -318,7 +318,7 @@ class Updater:
         service_url = self.get_service_url()
         logger.debug("Retrieved service URL")
 
-        async with ClientSession() as web:
+        async with get_session() as web:
             if ON_LINUX and not get_keep_systemd_service():
                 logger.debug("Downloading systemd service")
                 # download the relevant systemd service depending upon branch
@@ -356,7 +356,7 @@ class Updater:
 
     async def get_testing_versions(self) -> List[TestingVersion]:
         result: List[TestingVersion] = []
-        async with ClientSession() as web:
+        async with get_session() as web:
             async with web.request("GET", f"https://api.github.com/repos/{self.repo}/pulls", 
                     headers={'X-GitHub-Api-Version': '2022-11-28'}, params={'state':'open'}, ssl=helpers.get_ssl_context()) as res:
                 open_prs = await res.json()
@@ -372,7 +372,7 @@ class Updater:
     async def download_testing_version(self, pr_id: int, sha_id: str):
         down_id = ''
         #Get all the associated workflow run for the given sha_id code hash
-        async with ClientSession() as web:
+        async with get_session() as web:
             async with web.request("GET", f"https://api.github.com/repos/{self.repo}/actions/runs", 
                     headers={'X-GitHub-Api-Version': '2022-11-28'}, params={'head_sha': sha_id}, ssl=helpers.get_ssl_context()) as res:
                 works = await res.json()
@@ -395,7 +395,7 @@ class Updater:
                 break
         
         if down_id != '':
-            async with ClientSession() as web:
+            async with get_session() as web:
                 async with web.request("GET", f"https://api.github.com/repos/{self.repo}/actions/runs/{down_id}/artifacts",
                         headers={'X-GitHub-Api-Version': '2022-11-28'}, ssl=helpers.get_ssl_context()) as res:
                     jresp = await res.json()

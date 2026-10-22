@@ -9,6 +9,7 @@ import importlib.metadata
 import certifi
 from aiohttp.web import Request, Response, middleware
 from aiohttp.typedefs import Handler
+from typing import Any
 from aiohttp import ClientSession
 from .localplatform import localplatform
 from .enums import UserType
@@ -125,7 +126,7 @@ async def download_remote_binary_to_path(url: str, binHash: str, path: str) -> b
     rv = False
     try:
         if os.access(os.path.dirname(path), os.W_OK):
-            async with ClientSession() as client:
+            async with get_session() as client:
                 res = await client.get(url, ssl=get_ssl_context())
                 if res.status == 200:
                     logger.debug("Download attempt of URL: " + url)
@@ -206,3 +207,7 @@ async def stop_systemd_unit(unit_name: str) -> bool:
 
 async def start_systemd_unit(unit_name: str) -> bool:
     return await localplatform.service_start(unit_name)
+
+def get_session(**kwargs: Any) -> ClientSession:
+    '''A ClientSession for internet requests that honours the system proxy settings (HTTP(S)_PROXY / NO_PROXY; on Windows also the Internet Options proxy).'''
+    return ClientSession(trust_env=True, **kwargs)

@@ -20,7 +20,7 @@ from typing import Dict, List, TypedDict
 # Local modules
 from .localplatform.localplatform import chown, chmod, get_chown_plugin_path
 from .loader import Loader, Plugins
-from .helpers import get_ssl_context, download_remote_binary_to_path, get_loader_version
+from .helpers import get_session, get_ssl_context, download_remote_binary_to_path, get_loader_version
 from .enums import UserType
 from .settings import SettingsManager
 
@@ -200,7 +200,7 @@ class PluginBrowser:
             logger.info(f"Installing {name} from URL (Version: {version})")
             await self.loader.ws.emit("loader/plugin_download_info", 10, "Store.download_progress_info.download_zip")
 
-            async with ClientSession() as client:
+            async with get_session() as client:
                 logger.debug(f"Fetching {artifact}")
                 res = await client.get(artifact, ssl=get_ssl_context())
                 #TODO track progress of this download in chunks like with decky updates
@@ -223,7 +223,7 @@ class PluginBrowser:
             logger.info(f"Incrementing installs for {name} from URL {storeUrl} (version {version})")
             # A failed download-count request should not prevent installation.
             try:
-                async with ClientSession() as client:
+                async with get_session() as client:
                     res = await client.post(
                         storeUrl + f"/{name}/versions/{version}/increment?isUpdate={isInstalled}",
                         headers={"X-Decky-Version": get_loader_version()},
