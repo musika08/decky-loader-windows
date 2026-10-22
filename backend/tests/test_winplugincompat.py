@@ -434,6 +434,237 @@ def test_find_program_skips_rooted_entries_without_drive(tmp_path: Path, monkeyp
     unc = r"\\server\share\bin"
     assert compat.find_program("tool", {"PATH": unc}, str(tmp_path / "winbin")) is not None
 
+# --- Linux tools, user switches, scripts ---
+
+def _nothing_known(name: str) -> str | None:
+    return None
+
+
+def _config(**kw: Any) -> Any:
+    defaults: dict[str, Any] = {"user": "Me", "self_command": lambda: ["DECKY", "main.py"],
+                                "interpreter": lambda: ["PY", "-I"], "known": _nothing_known}
+    return compat.CompatConfig(**{**defaults, **kw})
+
+
+def _tool(name: str, *args: str) -> list[str]:
+    return ["DECKY", "main.py", "--compat-tool", name, str(os.getpid()), *args]
+
+
+@pytest.mark.parametrize("arg,name", [("ps", "ps"), ("/usr/bin/ps", "ps"), ("/bin/kill", "kill"), (b"pgrep", "pgrep"),
+                                      ("/usr/sbin/sudo", "sudo"), ("/opt/bin/ps", None), ("C:/usr/bin/ps", None),
+                                      ("PS", None), ("ps.exe", None), ("chmod", None), (None, None)])
+def test_tool_name(arg: Any, name: str | None):
+    assert compat.tool_name(arg) == name
+
+
+@pytest.mark.parametrize("argv,elevated,inner", [
+    (["sudo", "-u", "Me", "-E", r"C:\p\cp.py", "-p", "1"], False, [r"C:\p\cp.py", "-p", "1"]), # DeckyParty
+    (["sudo", "-u", "deck", "steam", "steam://x"], False, ["steam", "steam://x"]),            # Quick User Switcher
+    (["sudo", "-ume", "x"], False, ["x"]),
+    (["sudo", "--user=ME", "x"], False, ["x"]),
+    (["sudo", "-u", "#1000", "x"], False, ["x"]),
+    (["sudo", "-nE", "-u", "Me", "--", "-x"], False, ["-x"]),
+    (["sudo", "x"], False, None),                        # root without administrator rights
+    (["sudo", "x"], True, ["x"]),
+    (["sudo", "-u", "root", "x"], True, ["x"]),
+    (["sudo", "-u", "#0", "x"], True, ["x"]),
+    (["sudo", "-u", "Me", "x"], True, None),             # an elevated host never drops to the user here
+    (["sudo", "-u", "bob", "x"], False, None),
+    (["sudo", "-i"], False, None),
+    (["sudo", "-u", "Me", "-s", "x"], False, None),
+    (["sudo", "-u", "Me"], False, None),
+    (["sudo", "-u", "Me", "A=1", "x"], False, None),
+    (["runuser", "-u", "Me", "--", "x", "a"], False, ["x", "a"]),
+    (["runuser", "-l", "Me", "-c", "x a 'b c'"], False, ["x", "a", "b c"]),
+    (["runuser", "-u", "bob", "x"], False, None),
+    (["runuser", "root", "-c", "x", "extra"], True, None),       # arguments for the shell after -c
+    (["runuser", "-l", "Me", "-c", "x", "--", "value"], False, None),
+    (["su", "Me", "-c", "steam steam://open/games"], False, ["steam", "steam://open/games"]),
+    (["su", "-", "deck", "-c", "x"], False, ["x"]),
+    (["su", "-c", "x | grep y", "Me"], False, None),     # needs a shell
+    (["su", "-", "Me"], False, None),                    # interactive
+    (["su", "-c", "x"], False, None),
+    (["su", "-c", "x"], True, ["x"]),
+    (["su", "-s", "/bin/sh", "Me", "-c", "x"], False, None),
+    (["ls", "-l"], False, ["ls", "-l"]),
+])
+def test_unwrap_user_switch(argv: list[str], elevated: bool, inner: list[str] | None):
+    assert compat.unwrap_user_switch(argv, "Me", elevated) == inner
+
+
+@pytest.mark.parametrize("command,words", [
+    ("date '+%Y-%m-%d %H:%M:%S'", ["date", "+%Y-%m-%d %H:%M:%S"]),
+    ('timedatectl show -p "NTP"', ["timedatectl", "show", "-p", "NTP"]),
+    ("ps aux | grep x", None), ("echo $HOME", None), ("x 'open", None), ("", None), (r"C:\x", None), ("ls *", None),
+])
+def test_split_simple_command(command: str, words: list[str] | None):
+    assert compat.split_simple_command(command) == words
+
+
+def test_rewrite_argv_tools():
+    cfg = _config()
+    assert compat.rewrite_argv(["ps", "--ppid", "1", "-o", "pid="], None, cfg) == _tool("ps", "--ppid", "1", "-o", "pid=")
+    assert compat.rewrite_argv(("/usr/bin/timedatectl", "show"), None, cfg) == _tool("timedatectl", "show")
+    assert compat.rewrite_argv([b"kill", b"-STOP", b"5"], None, cfg) == _tool("kill", "-STOP", "5")
+    assert compat.rewrite_argv(["ping", "-c", "3", "-W", "2", "8.8.8.8"], None, cfg) == _tool("ping", "-c", "3", "-W", "2", "8.8.8.8")
+    assert compat.rewrite_argv(["ping", "-n", "1", "host"], None, cfg) == ["ping", "-n", "1", "host"] # System32 ping.exe
+    assert compat.rewrite_argv(["sudo", "-u", "Me", "kill", "-STOP", "5"], None, cfg) == _tool("kill", "-STOP", "5")
+    assert compat.rewrite_argv(["sudo", "-u", "bob", "ls"], None, cfg) == _tool("sudo", "-u", "bob", "ls")
+    assert compat.rewrite_argv([], None, cfg) == []
+    assert compat.rewrite_argv("ps -e", None, cfg) == "ps -e"
+    # Windows-style switches belong to Windows' own programs (cmd's date /t); Linux patterns still go to Decky's
+    assert compat.rewrite_argv(["date", "/t"], None, cfg) == ["date", "/t"]
+    assert compat.rewrite_argv(["kill", "/?"], None, cfg) == ["kill", "/?"]
+    assert compat.rewrite_argv(["pgrep", "--full", r"/reaper\s.*\bAppId=1\b"], None, cfg) == \
+        _tool("pgrep", "--full", r"/reaper\s.*\bAppId=1\b")
+
+
+def test_nested_and_unknown_user_switches_are_refused():
+    root = _config(elevated=True)
+    assert compat.rewrite_argv(["sudo", "sudo", "sudo", "ps"], None, root) == _tool("ps")
+    assert compat.rewrite_argv(["sudo", "sudo", "sudo", "sudo", "ps"], None, root) == _tool("sudo", "ps")
+    assert compat.rewrite_argv(["sudo", "su", "-c", "sudo ps"], None, root) == _tool("ps")
+    assert compat.rewrite_argv(["sudo", "su", "-c", "sudo sudo ps"], None, root) == _tool("sudo", "ps")
+    for switch in ("doas", "pkexec", "/usr/bin/pkexec"):
+        assert compat.rewrite_argv([switch, "ps"], None, root) == _tool(switch.rpartition("/")[2], "ps")
+    assert compat.rewrite_argv(["sudo", "doas", "ps"], None, root) == _tool("doas", "ps")
+
+
+def test_rewrite_argv_python_scripts(tmp_path: Path):
+    cfg = _config()
+    script, shebang, bash = tmp_path / "copyparty-sfx.py", tmp_path / "tool", tmp_path / "run"
+    script.write_text("print(1)")
+    shebang.write_bytes(b"#!/usr/bin/env python3 -u\nprint(1)\n")
+    bash.write_bytes(b"#!/bin/bash\nexec \"$@\"\n")
+    assert compat.rewrite_argv(["sudo", "-u", "Me", "-E", str(script), "-p", "3923"], None, cfg) == ["PY", "-I", str(script), "-p", "3923"]
+    assert compat.rewrite_argv([str(shebang)], None, cfg) == ["PY", "-I", str(shebang)]
+    assert compat.rewrite_argv([str(bash)], None, cfg) == [str(bash)]
+    assert compat.rewrite_argv(["copyparty-sfx.py"], None, cfg) == ["copyparty-sfx.py"] # not a full path
+    assert compat.rewrite_argv([str(tmp_path / "missing.py")], None, cfg) == [str(tmp_path / "missing.py")]
+    frozen = _config(interpreter=lambda: None)
+    assert compat.rewrite_argv([str(script)], None, frozen) == [str(script)]
+
+
+def test_elevated_hosts_never_run_scripts(tmp_path: Path):
+    root = _config(elevated=True)
+    script, shebang = tmp_path / "x.py", tmp_path / "tool"
+    script.write_text("print(1)")
+    shebang.write_bytes(b"#!/usr/bin/python3\n")
+    assert compat.rewrite_argv([str(script), "a"], None, root) == [str(script), "a"]
+    assert compat.rewrite_argv([str(shebang)], None, root) == [str(shebang)]
+    assert compat.rewrite_argv(["sudo", str(shebang)], None, root) == [str(shebang)]
+
+
+@pytest.mark.parametrize("ext", [".exe", ".com"])
+def test_script_planted_next_to_a_program_is_ignored(tmp_path: Path, ext: str):
+    # CreateProcess runs `tool.exe` for `...\tool`; a `tool` file planted beside it must not win
+    planted = tmp_path / "bin" / "tool"
+    planted.parent.mkdir()
+    planted.write_bytes(b"#!/usr/bin/env python3\nprint('planted')\n")
+    (tmp_path / "bin" / f"tool{ext}").write_bytes(b"")
+    assert compat.python_script(str(planted)) is None
+    assert compat.rewrite_argv([str(planted)], None, _config()) == [str(planted)]
+
+
+def test_rewrite_shell():
+    cfg = _config(self_command=lambda: [sys.executable, "main.py"])
+    pid = str(os.getpid())
+    assert compat.rewrite_shell("timedatectl show -p NTP", None, cfg) == \
+        ([sys.executable, "main.py", "--compat-tool", "timedatectl", pid, "show", "-p", "NTP"], False)
+    assert compat.rewrite_shell("date '+%Y %H'", None, cfg) == \
+        ([sys.executable, "main.py", "--compat-tool", "date", pid, "+%Y %H"], False)
+    # Anything else reaches cmd.exe exactly as written: quoting is never rewritten
+    assert compat.rewrite_shell("openssl req -subj '/O=KDE Connect'", None, cfg) == ("openssl req -subj '/O=KDE Connect'", True)
+    assert compat.rewrite_shell("powershell -Command 'x;Write-Output INJECTED'", None, cfg) == \
+        ("powershell -Command 'x;Write-Output INJECTED'", True)
+    # The program in place of sudo can't be found: cmd.exe reports that as before, with an exit code
+    assert compat.rewrite_shell("sudo -u Me deckynothere 'a b'", None, cfg) == ("sudo -u Me deckynothere 'a b'", True)
+    assert compat.rewrite_shell("date /t", None, cfg) == ("date /t", True)
+    assert compat.rewrite_shell("ping -n 1 host", None, cfg) == ("ping -n 1 host", True)
+    assert compat.rewrite_shell("ps -e | findstr x", None, cfg) == ("ps -e | findstr x", True)
+    assert compat.rewrite_shell(["ps"], None, cfg) == (["ps"], True)
+
+
+def test_known_programs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    exe = tmp_path / "Tailscale" / "tailscale.exe"
+    exe.parent.mkdir()
+    exe.write_text("")
+    assert compat.known_program("tailscale", lambda: str(tmp_path)) == str(exe)
+    assert compat.known_program("tailscale", lambda: str(tmp_path / "none")) is None
+    assert compat.known_program("other", lambda: str(tmp_path)) is None
+    assert compat.known_program("tailscale", lambda: None) is None
+    def not_found(name: str) -> bool:
+        return False
+    monkeypatch.setattr(compat, "_found_as_exe", not_found)
+    def known(name: str) -> str | None:
+        return compat.known_program(name, lambda: str(tmp_path))
+    assert compat.resolve_argv(["tailscale", "status"], {"PATH": SYSTEM32}, known=known) == [str(exe), "status"]
+    other = tmp_path / "onpath"
+    other.mkdir()
+    (other / "tailscale.exe").write_text("")
+    assert compat.resolve_argv(["tailscale", "up"], {"PATH": str(other)}, known=known) == [str(other / "tailscale.exe"), "up"]
+
+
+def test_program_files_dir_is_the_real_one(monkeypatch: pytest.MonkeyPatch):
+    real = compat.program_files_dir()
+    assert real and os.path.isdir(real)
+    monkeypatch.setenv("ProgramFiles", r"C:\Users\Public\fake")
+    assert compat.program_files_dir() == real
+
+# --- the tools through real subprocess calls ---
+
+@pytest.fixture
+def tools(lookup: None) -> None:
+    compat.install_program_lookup(config=compat.CompatConfig(user=os.environ.get("USERNAME", "")))
+
+
+def test_ps_call_runs_deckys_ps(tools: None):
+    r = subprocess.run(["ps", "--pid", str(os.getpid()), "-o", "ppid="], capture_output=True, text=True, timeout=60)
+    assert (r.returncode, r.stdout.strip()) == (0, str(os.getppid())), r.stderr
+
+
+def test_shell_date_and_asyncio_timedatectl(tools: None):
+    import asyncio, datetime
+    r = subprocess.run("date '+%Y-%m'", shell=True, capture_output=True, text=True, timeout=60)
+    assert r.stdout == datetime.date.today().strftime("%Y-%m") + "\n", r.stderr
+
+    async def run() -> bytes:
+        p = await asyncio.create_subprocess_exec("timedatectl", "show", "-p", "Timezone", stdout=subprocess.PIPE)
+        out, _ = await p.communicate()
+        return out
+    assert asyncio.run(run()).startswith(b"Timezone=")
+
+
+def test_sudo_python_script_and_refusal(tools: None, tmp_path: Path):
+    import json
+    script = tmp_path / "args.py"
+    script.write_text("import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+    r = subprocess.run(["sudo", "-u", os.environ["USERNAME"], "-E", str(script), "a b", 'c"d'], capture_output=True,
+                       text=True, timeout=60)
+    assert json.loads(r.stdout) == ["a b", 'c"d'], r.stderr
+    r = subprocess.run(["sudo", "-u", "someone-else", "whoami"], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 1 and "another user" in r.stderr
+
+
+def test_kill_stop_cont_through_subprocess(tools: None):
+    from decky_loader.localplatform import winproctools
+    python = getattr(sys, "_base_executable", sys.executable)
+    child = subprocess.Popen([python, "-c", "import time\nend = time.time() + 60\nwhile time.time() < end: time.sleep(0.05)"])
+    try:
+        time.sleep(0.5)
+        def stopped() -> bool:
+            return next(p.stopped for p in winproctools.snapshot() if p.pid == child.pid)
+        assert subprocess.run(["kill", "-SIGSTOP", str(child.pid)], timeout=60).returncode == 0
+        assert stopped()
+        r = subprocess.run(["ps", "--ppid", str(os.getpid()), "-o", "pid=", "-o", "stat="], capture_output=True, text=True, timeout=60)
+        assert f"{child.pid} T" in [" ".join(line.split()) for line in r.stdout.splitlines()]
+        assert subprocess.run(["kill", "-SIGCONT", str(child.pid)], timeout=60).returncode == 0
+        assert not stopped()
+        assert subprocess.run(["pkill", "-9", "-P", str(os.getpid()), "-f", "time.sleep"], timeout=60).returncode == 0
+        assert child.wait(timeout=10) == 1
+    finally:
+        child.kill()
+
 # --- entry point ---
 
 def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool) -> tuple[Path, dict[str, str], dict[str, Any]]:
@@ -448,8 +679,8 @@ def _run_install(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elevated: bool
         mods["uid"] = uid
     def no_chdir(*_a: object) -> None:
         pass
-    def install_program_lookup() -> None:
-        mods["lookup"] = True
+    def install_program_lookup(config: Any = None) -> None:
+        mods["lookup"] = config
     monkeypatch.setattr(compat, "install_modules", install_modules)
     monkeypatch.setattr(compat, "install_program_lookup", install_program_lookup)
     monkeypatch.setattr(compat, "install_os_ids", install_os_ids)
@@ -463,7 +694,7 @@ def test_install_unelevated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, env, mods = _run_install(tmp_path, monkeypatch, False)
     assert {"fcntl", "pwd", "grp"} <= set(mods)
     assert mods["uid"] == 1000 and mods["pwd"].getpwnam("deck").pw_uid == 1000
-    assert mods["lookup"]
+    assert (mods["lookup"].elevated, mods["lookup"].user) == (False, "Me")
     assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
     assert (root / "tmp").is_dir() and os.path.isjunction(root / "home" / "deck")
 
@@ -471,7 +702,7 @@ def test_install_unelevated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def test_install_elevated_changes_no_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     root, env, mods = _run_install(tmp_path, monkeypatch, True)
     assert mods["uid"] == 0 and mods["pwd"].getpwuid(0).pw_name == "Me"
-    assert mods["lookup"]
+    assert (mods["lookup"].elevated, mods["lookup"].user) == (True, "Me")
     assert env["PATH"].startswith(compat.SHIM_BIN_DIR)
     assert os.listdir(root) == []
 
