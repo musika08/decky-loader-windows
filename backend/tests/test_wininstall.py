@@ -197,7 +197,7 @@ def _install(tmp_path, src_exe, dirs=None, **over):
               exe=str(src_exe), program_data=str(tmp_path / "ProgramData"), program_files=str(tmp_path / "Program Files"),
               sleep=lambda s: None, defer_delete=lambda p: True,
               open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create, kill_running=lambda exe: [],
-              system_dir=lambda: r"C:\Sys32")
+              system_dir=lambda: r"C:\Sys32", cef_debug=lambda sid: None)
     kw.update(over)
     return wi.install(SID, **kw)
 
@@ -1094,3 +1094,162 @@ def test_uninstall_with_the_real_check_refuses_a_user_made_root(tmp_path: Path, 
                               system_dir=lambda: r"C:\Sys32")
     assert wi.uninstall(**kw) == 0
     assert (root / "services" / "PluginLoader.exe").is_file()
+
+
+# Steam's CEF debugger marker (<Steam>\.cef-enable-remote-debugging)
+
+def test_install_enables_cef_debugging_for_the_target_user(tmp_path: Path):
+    src_exe = _fake_env(tmp_path)
+    sids: list[str] = []
+    assert _install(tmp_path, src_exe, cef_debug=sids.append) == 0
+    assert sids == [SID]
+
+
+def test_failed_install_does_not_touch_steam(tmp_path: Path):
+    src_exe = _fake_env(tmp_path)
+    sids: list[str] = []
+    def broken(src: str, dst: str) -> None:
+        raise OSError("x")
+    assert _install(tmp_path, src_exe, cef_debug=sids.append, copytree=broken) == 1
+    assert sids == []
+
+
+def test_uninstall_leaves_the_marker(tmp_path: Path):
+    steam = tmp_path / "Steam"
+    steam.mkdir()
+    (steam / wi.CEF_DEBUG_MARKER).write_bytes(b"")
+    assert _uninstall(tmp_path) == 0
+    assert (steam / wi.CEF_DEBUG_MARKER).exists()
+
+
+def _steam(tmp_path: Path) -> Path:
+    steam = tmp_path / "Steam"
+    steam.mkdir()
+    (steam / "steam.exe").write_bytes(b"exe")
+    return steam
+
+
+def _enable(steam_dir: Path | None, **over: Any) -> Any:
+    def find(sid: str) -> str | None:
+        return None if steam_dir is None else str(steam_dir)
+    kw: dict[str, Any] = dict(steam_dir=find)
+    kw.update(over)
+    return wi.enable_cef_remote_debugging(SID, **kw)
+
+
+def test_cef_marker_created_empty(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    steam = _steam(tmp_path)
+    assert _enable(steam) == str(steam / wi.CEF_DEBUG_MARKER)
+    assert (steam / wi.CEF_DEBUG_MARKER).read_bytes() == b""
+    assert "next time Steam starts" in capsys.readouterr().out
+
+
+def test_cef_marker_existing_file_is_left_alone(tmp_path: Path):
+    steam = _steam(tmp_path)
+    (steam / wi.CEF_DEBUG_MARKER).write_bytes(b"keep")
+    assert _enable(steam) is None
+    assert (steam / wi.CEF_DEBUG_MARKER).read_bytes() == b"keep"
+
+
+def test_cef_marker_link_is_not_followed(tmp_path: Path):
+    steam = _steam(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    _junction(steam / wi.CEF_DEBUG_MARKER, elsewhere)
+    assert _enable(steam) is None
+    assert os.listdir(elsewhere) == []
+
+
+def test_cef_marker_refused_when_steam_is_a_junction(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    real = _steam(tmp_path)
+    link = tmp_path / "SteamLink"
+    _junction(link, real)
+    assert _enable(link) is None
+    assert not (real / wi.CEF_DEBUG_MARKER).exists()
+    assert "junction" in capsys.readouterr().out
+
+
+def test_cef_marker_refused_when_a_parent_is_a_junction(tmp_path: Path):
+    real_parent = tmp_path / "real"
+    real_parent.mkdir()
+    _steam(real_parent)
+    _junction(tmp_path / "games", real_parent)
+    assert _enable(tmp_path / "games" / "Steam") is None
+    assert not (real_parent / "Steam" / wi.CEF_DEBUG_MARKER).exists()
+
+
+def _handle_events(events: list[str], attrs: int) -> dict[str, Any]:
+    def opener(p: str) -> str:
+        events.append("open")
+        return p
+    def query(h: str) -> tuple[int, str, int]:
+        return attrs, "", 0
+    def closer(h: str) -> None:
+        events.append("close")
+    return dict(opener=opener, query=query, closer=closer)
+
+
+def test_cef_marker_checks_the_held_handle(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    # Swapped for a link after the path check: the attributes read from the open handle refuse it
+    steam = _steam(tmp_path)
+    events: list[str] = []
+    rc = _enable(steam, **_handle_events(events, DIR_ATTR | REPARSE_ATTR))
+    assert rc is None and events == ["open", "close"]
+    assert not (steam / wi.CEF_DEBUG_MARKER).exists()
+    assert "not a plain folder" in capsys.readouterr().out
+
+
+def test_cef_marker_created_while_the_folder_is_held(tmp_path: Path):
+    steam = _steam(tmp_path)
+    events: list[str] = []
+    def create(p: str) -> None:
+        events.append("create")
+    _enable(steam, create=create, **_handle_events(events, DIR_ATTR))
+    assert events == ["open", "create", "close"]
+
+
+def test_cef_marker_without_steam_prints_a_note(capsys: pytest.CaptureFixture[str]):
+    assert _enable(None) is None
+    assert "Steam was not found" in capsys.readouterr().out
+
+
+def test_cef_marker_errors_never_raise(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    steam = _steam(tmp_path)
+    def denied(p: str) -> None:
+        raise PermissionError("denied")
+    assert _enable(steam, create=denied) is None
+    assert "Could not create" in capsys.readouterr().out
+
+
+def test_steam_dir_prefers_the_target_users_hive(tmp_path: Path):
+    import winreg
+    user_steam, machine_steam = tmp_path / "user", tmp_path / "machine"
+    for d in (user_steam, machine_steam):
+        d.mkdir()
+        (d / "steam.exe").write_bytes(b"exe")
+    reads: list[tuple[int, str, str]] = []
+    def read(hive: int, key: str, value: str) -> str | None:
+        reads.append((hive, key, value))
+        if hive == winreg.HKEY_USERS:
+            return str(user_steam).replace("\\", "/")  # Steam stores SteamPath with forward slashes
+        return str(machine_steam)
+    assert wi.steam_dir_for_sid(SID, read=read) == str(user_steam)
+    assert reads[0] == (winreg.HKEY_USERS, SID + r"\Software\Valve\Steam", "SteamPath")
+
+
+def test_steam_dir_falls_back_to_the_machine_install(tmp_path: Path):
+    import winreg
+    machine_steam = tmp_path / "machine"
+    machine_steam.mkdir()
+    (machine_steam / "steam.exe").write_bytes(b"exe")
+    def read(hive: int, key: str, value: str) -> str | None:
+        if hive == winreg.HKEY_USERS:
+            return str(tmp_path / "no-steam-here")
+        return str(machine_steam) if "WOW6432Node" in key else None
+    assert wi.steam_dir_for_sid(SID, read=read) == str(machine_steam)
+    def nothing(hive: int, key: str, value: str) -> str | None:
+        return None
+    def relative(hive: int, key: str, value: str) -> str | None:
+        return r"relative\steam"
+    assert wi.steam_dir_for_sid(SID, read=nothing) is None
+    assert wi.steam_dir_for_sid(SID, read=relative) is None
