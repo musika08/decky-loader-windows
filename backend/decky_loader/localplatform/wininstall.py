@@ -512,21 +512,42 @@ def remove_legacy_layout(root: str, **remove_kw: Any) -> list[str]:
         failed += remove_tree(os.path.join(root, sub), **remove_kw)
     return failed
 
+def stale_copies(app_dir: str, *, listdir: Callable[[str], list[str]] = os.listdir) -> list[str]:
+    '''Staging (`<app_dir>.installing-*`) and previous (`<app_dir>.old-*`) copies left next to `app_dir` by
+    earlier installs that were interrupted or could not delete them.'''
+    parent, name = os.path.split(app_dir)
+    prefixes = (f"{name}.installing-".lower(), f"{name}.old-".lower())
+    try:
+        entries = listdir(parent)
+    except OSError:
+        return []
+    return [os.path.join(parent, e) for e in entries if e.lower().startswith(prefixes)]
+
 def stage_and_swap(src_exe: str, app_dir: str, *, copyfile: Callable[[str, str], object] = shutil.copyfile,
                    copytree: Callable[[str, str], object] = shutil.copytree, mkdir: Callable[[str], None] = os.mkdir,
                    rename: Callable[[str, str], None] = os.rename, sleep: Callable[[float], None] = time.sleep,
-                   discard: Callable[[str], list[str]] = remove_tree,
+                   discard: Callable[[str], list[str]] = remove_tree, listdir: Callable[[str], list[str]] = os.listdir,
                    token: Callable[[], str] = lambda: secrets.token_hex(8)) -> bool:
     '''Copy the onedir build (`src_exe` and the `_internal` folder next to it) into a new sibling of `app_dir`, then
     swap it in: the current `app_dir` is renamed aside, the staged copy renamed into place, and the old copy deleted.
     Nothing in an existing `app_dir` is written in place. On failure prints why, keeps (or restores) the current
-    `app_dir`, and returns False.'''
+    `app_dir`, and returns False. Copies left behind by earlier installs are removed first, best effort (`discard`
+    removes a link as a link only).'''
+    for leftover in stale_copies(app_dir, listdir=listdir):
+        for p in discard(leftover):
+            logger.warning("Could not remove a copy left by an earlier install: %s", p)
+
     parent, name = os.path.split(app_dir)
     tag = token()
     staged = os.path.join(parent, f"{name}.installing-{tag}")
     old = os.path.join(parent, f"{name}.old-{tag}")
     try:
         mkdir(staged) # Raises if it already exists
+    except OSError as e:
+        # Not ours to delete: it was not created by this run
+        print(f"Could not create {staged}: {e}", file=sys.stderr)
+        return False
+    try:
         copyfile(src_exe, os.path.join(staged, EXE_NAME))
         copytree(os.path.join(os.path.dirname(src_exe), ONEDIR_CONTENTS), os.path.join(staged, ONEDIR_CONTENTS))
     except OSError as e:
@@ -623,13 +644,14 @@ def install(for_sid: str | None, *, is_admin: Callable[[], bool] = is_admin, run
             print(f"Could not prepare {root}: {e}", file=sys.stderr)
             return 1
 
-        for p in remove_legacy_layout(root, **remove_kw):
-            print(f"Could not remove {p} from the earlier install layout", file=sys.stderr)
-
         if not (os.path.exists(installed_exe) and _same_file(exe, installed_exe)):
             if not stage_and_swap(exe, app_dir, copyfile=copyfile, copytree=copytree, mkdir=mkdir, rename=rename,
                                   sleep=sleep, discard=lambda p: remove_tree(p, **remove_kw)):
                 return 1
+
+        # Only once the new program is in place: a failed install leaves the earlier layout working
+        for p in remove_legacy_layout(root, **remove_kw):
+            print(f"Could not remove {p} from the earlier install layout", file=sys.stderr)
 
         # The task XML lives in the protected root, not a user-writable temp directory
         fd, xml_path = tempfile.mkstemp(suffix=".xml", dir=root)
@@ -658,7 +680,8 @@ def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any
               defer_delete: Callable[[str], bool] = move_on_reboot,
               kill_running: Callable[[str], list[int]] = terminate_image,
               system_dir: Callable[[], str] = system_directory, reparse: Callable[[str], bool] = is_reparse_point,
-              rmdir: Callable[[str], None] = os.rmdir) -> int:
+              rmdir: Callable[[str], None] = os.rmdir, open_trusted: Callable[[str], Any] = open_trusted_dir,
+              close_dir: Callable[[Any], None] = close_handle) -> int:
     if not is_admin():
         return _elevate("--uninstall", shell_execute, exe or sys.executable)
 
@@ -672,7 +695,19 @@ def uninstall(*, is_admin: Callable[[], bool] = is_admin, run: Callable[..., Any
 
     # Plugins and settings in the root are left alone
     remove_kw: dict[str, Any] = dict(rmtree=rmtree, defer_delete=defer_delete, reparse=reparse, rmdir=rmdir)
-    failed = remove_tree(app_dir, **remove_kw) + remove_legacy_layout(root, **remove_kw)
+    failed = remove_tree(app_dir, **remove_kw)
+    if os.path.lexists(root):
+        # Same check as install: never delete inside a root that is not admin-owned and protected (it could be a
+        # junction or a directory a user prepared). The handle stays open so the root cannot be swapped meanwhile.
+        root_handle = open_trusted(root)
+        if root_handle is None:
+            print(f"Not removing the earlier install layout from {root}: it is not owned and protected by administrators",
+                  file=sys.stderr)
+        else:
+            try:
+                failed += remove_legacy_layout(root, **remove_kw)
+            finally:
+                close_dir(root_handle)
 
     if failed:
         print("Could not remove: " + ", ".join(failed), file=sys.stderr)
