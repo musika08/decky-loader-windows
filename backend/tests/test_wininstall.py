@@ -191,13 +191,17 @@ class Dirs:
         return wi.open_trusted_dir(p, opener=self.open, query=self.query, closer=self.close)
 
 
+def _no_cef_debug(sid: str) -> None:
+    pass  # never touch the real Steam folder
+
+
 def _install(tmp_path, src_exe, dirs=None, **over):
     dirs = dirs or Dirs()
     kw = dict(is_admin=lambda: True, run=Recorder(), shell_execute=lambda *a: None, onedir=lambda: True,
               exe=str(src_exe), program_data=str(tmp_path / "ProgramData"), program_files=str(tmp_path / "Program Files"),
               sleep=lambda s: None, defer_delete=lambda p: True,
               open_trusted=dirs.open_trusted, close_dir=dirs.close, create_dir=dirs.create, kill_running=lambda exe: [],
-              system_dir=lambda: r"C:\Sys32", cef_debug=lambda sid: None)
+              system_dir=lambda: r"C:\Sys32", cef_debug=_no_cef_debug)
     kw.update(over)
     return wi.install(SID, **kw)
 
