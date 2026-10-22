@@ -20,8 +20,8 @@ class UnixSocket:
         self.socket_addr = f"/tmp/plugin_socket_{time.time()}"
         self.on_new_message = None
         self.socket = None
-        self.reader = None
-        self.writer = None
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
         self.server_writer = None
         self.open_lock = asyncio.Lock()
         self.active = True
@@ -41,7 +41,7 @@ class UnixSocket:
                 try:
                     self.reader, self.writer = await asyncio.open_unix_connection(self.socket_addr, limit=BUFFER_LIMIT)
                     return True
-                except:
+                except Exception:
                     await asyncio.sleep(2)
                     retries += 1
             return False
@@ -87,7 +87,7 @@ class UnixSocket:
 
         await self._write_single_line(writer, message)
 
-    async def _read_single_line(self, reader: asyncio.StreamReader) -> str:
+    async def _read_single_line(self, reader: asyncio.StreamReader) -> str|None:
         line = bytearray()
         while self.active:
             try:
@@ -95,9 +95,8 @@ class UnixSocket:
             except asyncio.LimitOverrunError:
                 line.extend(await reader.read(reader._limit)) # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType, reportAttributeAccessIssue]
                 continue
-            except asyncio.IncompleteReadError as err:
-                line.extend(err.partial)
-                break
+            except (asyncio.IncompleteReadError, OSError):
+                return None
             except asyncio.CancelledError:
                 raise
             else:
@@ -127,6 +126,8 @@ class UnixSocket:
                     asyncio.create_task(self._write_single_line(writer, res))
 
             line = await self._read_single_line(reader)
+            if line is None:
+                break
             asyncio.create_task(self.on_new_message(line)).add_done_callback(_)
             
 class PortSocket (UnixSocket):

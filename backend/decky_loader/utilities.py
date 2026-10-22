@@ -188,7 +188,7 @@ class Utilities:
         # JS engine for it to do the decompression. Otherwise we need need to clear
         # the Content-Encoding header in the response headers, however that would
         # defeat the point of this proxy.
-        async with ClientSession(auto_decompress=False) as web:
+        async with helpers.get_plugin_session(url, auto_decompress=False) as web:
             async with web.request(req.method, url, headers=headers, data=body, ssl=helpers.get_ssl_context()) as web_res:
                 # Whenever the aiohttp_cors is used, it expects a near complete control over whatever headers are needed
                 # for `aiohttp_cors.ResourceOptions`. As a server, if you delegate CORS handling to aiohttp_cors,
@@ -216,7 +216,7 @@ class Utilities:
         return res
 
     async def http_request_legacy(self, method: str, url: str, extra_opts: Any = {}, timeout: int | None = None):
-        async with ClientSession() as web:
+        async with helpers.get_plugin_session(url) as web:
             res = await web.request(method, url, ssl=helpers.get_ssl_context(), timeout=timeout, **extra_opts) # type: ignore
             text = await res.text()
         return {
@@ -333,10 +333,14 @@ class Utilities:
                             page: int = 1,
                             max: int = 1000):
         
-        if path == None:
+        if path == None or path == "":
             path = get_home_path()
 
         path_obj = Path(path).resolve()
+
+        if path_obj.is_file():
+            path_obj = path_obj.parent
+            path = str(path_obj)
 
         files: List[FilePickerObj] = []
         folders: List[FilePickerObj] = []

@@ -1,6 +1,7 @@
 import { ConfirmModal, Navigation, QuickAccessTab } from '@decky/ui';
 import { FC, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { FaExclamationCircle } from 'react-icons/fa';
 
 import { InstallType, InstallTypeTranslationMapping } from '../../plugin';
 import WindowsCompatBadge from '../store/WindowsCompatBadge';
@@ -13,7 +14,7 @@ interface PluginInstallModalProps {
   installType: InstallType;
   disabled?: boolean;
   platform?: string; // backend sys.platform, for the Windows compatibility badge
-  onOK(): void;
+  onOK(): void | Promise<void>;
   onCancel(): void;
   closeModal?(): void;
 }
@@ -62,7 +63,16 @@ const PluginInstallModal: FC<PluginInstallModalProps> = ({
       closeModal={closeModal}
       onOK={async () => {
         setLoading(true);
-        await onOK();
+        try {
+          await onOK();
+        } catch (e) {
+          // The backend has already put the previous version back; tell the user instead of failing silently.
+          DeckyPluginLoader.toaster.toast({
+            title: t('PluginInstallModal.error_toast', { artifact: artifact }),
+            body: e instanceof Error ? e.message : String(e),
+            icon: <FaExclamationCircle />,
+          });
+        }
         setTimeout(() => Navigation.OpenQuickAccessMenu(QuickAccessTab.Decky), 250);
         setTimeout(() => DeckyPluginLoader.checkPluginUpdates(), 1000);
       }}

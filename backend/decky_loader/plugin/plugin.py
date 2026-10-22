@@ -1,6 +1,10 @@
 from asyncio import CancelledError, Task, create_task, sleep, wait, wait_for
 from json import dumps, load, loads
 from logging import getLogger
+import logging
+import os
+import signal
+import sys
 from os import environ, path
 from multiprocessing import Process
 from time import time
@@ -19,6 +23,33 @@ if TYPE_CHECKING:
     from ..localplatform.winprocess import PluginProcess
 
 EmittedEventCallbackType = Callable[[str, Any], Coroutine[Any, Any, Any]]
+
+# How long an update waits for the new plugin backend before rolling back. On Windows each refused connect to the
+# not-yet-listening plugin host takes about 2 s plus PortSocket's 2 s retry delay, and the host is a fresh
+# PluginLoader.exe, so 20 s would roll back plugins that start fine.
+STARTUP_TIMEOUT = 60 if ON_WINDOWS else 20
+
+_held_locks: List[Any] = []
+
+def _before_fork():
+    for ref in list(getattr(logging, "_handlerList", [])):
+        lock = getattr(ref(), "lock", None)
+        if lock is not None and lock.acquire(timeout=0.5):
+            _held_locks.append(lock)
+
+def _after_fork_in_parent():
+    while _held_locks:
+        _held_locks.pop().release()
+
+def _after_fork_in_child():
+    _held_locks.clear()
+    signal.set_wakeup_fd(-1)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        if signal.getsignal(sig) != signal.SIG_IGN:
+            signal.signal(sig, signal.SIG_DFL)
+
+if sys.platform != "win32": # no fork on Windows, and no os.register_at_fork
+    os.register_at_fork(before=_before_fork, after_in_parent=_after_fork_in_parent, after_in_child=_after_fork_in_child)
 
 class PluginWrapper:
     def __init__(self, file: str, plugin_directory: str, plugin_path: str, emit_callback: EmittedEventCallbackType) -> None:
@@ -95,14 +126,23 @@ class PluginWrapper:
         while self._socket.active:
             try:
                 line = await self._socket.read_single_line()
-                if ON_WINDOWS and line == "":
-                    # EOF: the plugin host closed the connection or died. Reading again would spin.
-                    self.log.info(f"Plugin {self.get_display_name()} closed its socket")
+                # EOF reads as None while the connection is still held ("" if the socket was deactivated);
+                # None with no reader means connecting failed, which the next iteration retries.
+                windows_eof = ON_WINDOWS and (line == "" or (line is None and self._socket.reader is not None))
+                exited = not windows_eof and line is None and self.proc is not None and not self.proc.is_alive()
+                if windows_eof or exited:
+                    if windows_eof:
+                        # EOF: the plugin host closed the connection or died. Reading again would spin.
+                        self.log.info(f"Plugin {self.get_display_name()} closed its socket")
+                    else:
+                        self.log.error(f"{self.get_display_name()} exited unexpectedly (exit code {getattr(self.proc, 'exitcode', None)})")
                     await self._socket.close_socket_connection()
                     for request in self._method_call_requests.values():
                         request.cancel()
                     self._method_call_requests = {}
                     return
+                if line is None:
+                    await sleep(0.5)
                 if line != None:
                     res = loads(line)
                     if res["type"] == SocketMessageType.EVENT.value:
@@ -177,6 +217,24 @@ class PluginWrapper:
         proc = winprocess.PluginProcess(self_command() + ["--plugin-host", encode_params(self.sandboxed_plugin, sock.port)], env, elevated)
         proc.start()
         return proc
+
+    async def wait_started(self):
+        """Wait for backend initialization and its IPC server, bounded to STARTUP_TIMEOUT seconds."""
+        if self.passive or self.disabled:
+            return
+
+        deadline = time() + STARTUP_TIMEOUT
+
+        while time() < deadline:
+            if self.proc is None or not self.proc.is_alive():
+                raise RuntimeError(f"Plugin {self.name} exited during startup")
+
+            # The response listener opens the connection once initialization completes.
+            if self._socket.writer is not None:
+                return
+            await sleep(0.1)
+
+        raise TimeoutError(f"Plugin {self.name} did not initialize within {STARTUP_TIMEOUT} seconds")
 
     async def stop(self, uninstall: bool = False):
         try:

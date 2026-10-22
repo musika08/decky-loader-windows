@@ -58,6 +58,7 @@
             "reinstall": "Reinstall {{name}} {{version}}",
             "update": "Update {{name}} to {{version}}"
         },
+        "error_toast": "Some plugins could not be installed",
         "ok_button": {
             "idle": "Confirm",
             "loading": "Working"
@@ -89,6 +90,7 @@
     },
     "PluginInstallModal": {
         "disabled": "The plugin will be re-enabled after installation",
+        "error_toast": "Could not install {{artifact}}",
         "downgrade": {
             "button_idle": "Downgrade",
             "button_processing": "Downgrading",

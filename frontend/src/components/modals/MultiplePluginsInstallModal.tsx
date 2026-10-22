@@ -1,7 +1,7 @@
 import { ConfirmModal, Navigation, QuickAccessTab } from '@decky/ui';
 import { FC, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FaCheck, FaDownload } from 'react-icons/fa';
+import { FaCheck, FaDownload, FaExclamationCircle, FaTimes } from 'react-icons/fa';
 
 import { DisabledPlugin, InstallType, InstallTypeTranslationMapping } from '../../plugin';
 import PluginInstallProgress from './PluginInstallProgress';
@@ -27,6 +27,7 @@ const MultiplePluginsInstallModal: FC<MultiplePluginsInstallModalProps> = ({
   const [loading, setLoading] = useState<boolean>(false);
   const [percentage, setPercentage] = useState<number>(0);
   const [pluginsCompleted, setPluginsCompleted] = useState<string[]>([]);
+  const [pluginsFailed, setPluginsFailed] = useState<string[]>([]);
   const [pluginInProgress, setInProgress] = useState<string | null>();
   const [downloadInfo, setDownloadInfo] = useState<string | null>(null);
   const { t } = useTranslation();
@@ -49,15 +50,21 @@ const MultiplePluginsInstallModal: FC<MultiplePluginsInstallModalProps> = ({
     setPluginsCompleted((list) => [...list, name]);
   }
 
+  function failDownload(name: string) {
+    setPluginsFailed((list) => [...list, name]);
+  }
+
   useEffect(() => {
     DeckyBackend.addEventListener('loader/plugin_download_info', updateDownloadState);
     DeckyBackend.addEventListener('loader/plugin_download_start', startDownload);
     DeckyBackend.addEventListener('loader/plugin_download_finish', finishDownload);
+    DeckyBackend.addEventListener('loader/plugin_download_error', failDownload);
 
     return () => {
       DeckyBackend.removeEventListener('loader/plugin_download_info', updateDownloadState);
       DeckyBackend.removeEventListener('loader/plugin_download_start', startDownload);
       DeckyBackend.removeEventListener('loader/plugin_download_finish', finishDownload);
+      DeckyBackend.removeEventListener('loader/plugin_download_error', failDownload);
     };
   }, []);
 
@@ -78,7 +85,16 @@ const MultiplePluginsInstallModal: FC<MultiplePluginsInstallModalProps> = ({
       closeModal={closeModal}
       onOK={async () => {
         setLoading(true);
-        await onOK();
+        try {
+          await onOK();
+        } catch (e) {
+          // The other plugins were still installed; the backend reports every failure in one error.
+          DeckyPluginLoader.toaster.toast({
+            title: t('MultiplePluginsInstallModal.error_toast'),
+            body: e instanceof Error ? e.message : String(e),
+            icon: <FaExclamationCircle />,
+          });
+        }
         setTimeout(() => Navigation.OpenQuickAccessMenu(QuickAccessTab.Decky), 250);
         setTimeout(() => DeckyPluginLoader.checkPluginUpdates(), 1000);
       }}
@@ -124,7 +140,9 @@ const MultiplePluginsInstallModal: FC<MultiplePluginsInstallModalProps> = ({
               <li key={i} style={{ display: 'flex', flexDirection: 'column' }}>
                 <span>
                   {disabled ? `${description} - ${t('PluginInstallModal.disabled')}` : description}{' '}
-                  {(pluginsCompleted.includes(name) && <FaCheck />) || (name === pluginInProgress && <FaDownload />)}
+                  {(pluginsCompleted.includes(name) && <FaCheck />) ||
+                    (pluginsFailed.includes(name) && <FaTimes />) ||
+                    (name === pluginInProgress && <FaDownload />)}
                 </span>
                 {hash === 'False' && (
                   <div style={{ color: 'red', paddingLeft: '10px' }}>{t('PluginInstallModal.no_hash')}</div>
