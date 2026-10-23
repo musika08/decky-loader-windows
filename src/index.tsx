@@ -17,6 +17,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { FaBolt, FaCheck } from 'react-icons/fa';
 import {
   CURVE_POINTS,
+  AUTO_TDP_UNSUPPORTED,
   CURVE_SPEED_MAX,
   CURVE_TEMP_MAX,
   CURVE_TEMP_MIN,
@@ -25,6 +26,8 @@ import {
   FAN_PRESETS,
   MODE_OTHER_TEXT,
   Preset,
+  autoTdpDescription,
+  autoTdpLine,
   defaultDraft,
   liveLines,
   minSpeedAt,
@@ -93,6 +96,7 @@ type State = {
   warning: string;
   fan_note: string;
   busy?: boolean; // ruling P12; read when the backend reports it
+  auto_tdp?: { on: boolean; supported: boolean };
   user_set?: boolean;
   power_set?: boolean;
   // What the device reports (read only): mode "other" = a mode Overdrive does not set; null = not reported.
@@ -109,6 +113,7 @@ type Sensors = {
   gpuUse?: number | null;
   cpuPowerW?: number | null;
   gpuPowerW?: number | null;
+  autoTdp?: { on: boolean; watts: number | null; fps: number | null; best: number | null; paused: string; supported: boolean };
   errors: string[];
 };
 
@@ -120,6 +125,7 @@ const setFps = callable<[number], Result>('set_fps');
 const setFanPreset = callable<[Preset], Result>('set_fan_preset');
 const setFanCurve = callable<[number[], number[], Fan], Result>('set_fan_curve');
 const resetDefaults = callable<[], Result>('reset_defaults');
+const setAutoTdp = callable<[boolean], Result>('set_auto_tdp');
 const setArmouryReplaced = callable<[boolean], Result>('set_armoury_replaced');
 
 const NOT_ALLY = 'Overdrive supports the ROG Ally family only';
@@ -591,6 +597,9 @@ function Content() {
   const [fan, setFan] = useState<Fan>('cpu');
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [working, setWorking] = useState(false);
+  const [autoLine, setAutoLine] = useState<string | null>(null);
+  // The value Auto TDP is being switched to; the toggle shows it meanwhile, else the stored state.
+  const [autoTarget, setAutoTarget] = useState<boolean | null>(null);
   const [armouryBusy, setArmouryBusy] = useState(armouryPending !== null);
   const [power, setPower] = useState({ spl: 30, sppt: 30, fppt: 30 });
   const [editing, setEditing] = useState(false);
@@ -680,11 +689,13 @@ function Content() {
         const s = await getSensors();
         if (!mounted.current) return;
         setSensors(s.ok ? liveLines(s) : [s.message || 'Sensors not available']);
+        setAutoLine(s.ok && s.autoTdp?.on ? autoTdpLine(s.autoTdp) : null);
         setCpuTemp(s.ok && typeof s.cpuTempC === 'number' && isFinite(s.cpuTempC) ? s.cpuTempC : null);
         setGpuTemp(s.ok && typeof s.gpuTempC === 'number' && isFinite(s.gpuTempC) ? s.gpuTempC : null);
       } catch (e) {
         if (!mounted.current) return;
         setSensors(['Sensors not available: ' + errorText(e)]);
+        setAutoLine(null);
         setCpuTemp(null);
         setGpuTemp(null);
       } finally {
@@ -861,6 +872,14 @@ function Content() {
     if (r.ok) setEditing(false);
   };
 
+  const toggleAutoTdp = async () => {
+    // A single press; the target is always the opposite of the stored value, whatever the toggle reported.
+    const on = !state.auto_tdp?.on;
+    setAutoTarget(on);
+    await run('autotdp', () => setAutoTdp(on));
+    if (mounted.current) setAutoTarget(null);
+  };
+
   const toggleArmoury = () => {
     if (armouryPending) return;
     // The target is always the opposite of the stored value, whatever the toggle reported.
@@ -899,6 +918,7 @@ function Content() {
         {sensors.map((line, i) => (
           <Note key={'live' + i} text={line} />
         ))}
+        {state.auto_tdp?.on && autoLine && <Note text={autoLine} />}
       </PanelSection>
 
       <PanelSection title="Performance">
@@ -927,7 +947,7 @@ function Content() {
         )}
         <StatusRow status={statuses.mode} />
         {shown !== 'manual' && (
-          <Note text={modePowerLine(shown) ?? powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
+          <Note text={modePowerLine(shown, !!state.auto_tdp?.on) ?? powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
         )}
         {shown === 'manual' && (
           <>
@@ -965,6 +985,18 @@ function Content() {
           />
         </PanelSectionRow>
         <StatusRow status={statuses.fps} />
+        <PanelSectionRow>
+          <ToggleField
+            label="Auto TDP"
+            description={state.auto_tdp?.supported ? autoTdpDescription(state.fps) : undefined}
+            // Steam's toggle flips itself on every press, so it is fed the target while switching, else the stored state.
+            checked={autoTarget ?? !!state.auto_tdp?.on}
+            disabled={disabled || !state.auto_tdp?.supported}
+            onChange={toggleAutoTdp}
+          />
+        </PanelSectionRow>
+        {!state.auto_tdp?.supported && <Note text={AUTO_TDP_UNSUPPORTED} />}
+        <StatusRow status={statuses.autotdp} />
       </PanelSection>
 
       <PanelSection title="Fans">

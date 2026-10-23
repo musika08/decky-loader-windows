@@ -142,8 +142,26 @@ export const FIRMWARE_DEFAULT_TEXT = 'Firmware default';
 // Watts each mode sends as all three limits; mirrors py_modules/overdrive/settings.py MODE_POWER.
 export const MODE_POWER: Record<'silent' | 'balanced' | 'turbo', number> = { silent: 13, balanced: 17, turbo: 35 };
 
-export function modePowerLine(mode: string | null | undefined): string | null {
-  return mode === 'silent' || mode === 'balanced' || mode === 'turbo' ? 'Power limit: ' + MODE_POWER[mode] + ' W' : null;
+export function modePowerLine(mode: string | null | undefined, autoOn = false): string | null {
+  if (mode !== 'silent' && mode !== 'balanced' && mode !== 'turbo') return null;
+  return autoOn ? 'Power limit: up to ' + MODE_POWER[mode] + ' W (Auto TDP)' : 'Power limit: ' + MODE_POWER[mode] + ' W';
+}
+
+// ---------- Auto TDP ----------
+
+export const AUTO_TDP_UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer.";
+
+export function autoTdpDescription(fpsLimit: number): string {
+  if (!fpsLimit) return 'FPS limit Off: the most frames, trimming only watts that add none.';
+  return 'Holds ' + fpsLimit + ' FPS at the lowest watts.';
+}
+
+// The live line while Auto TDP is on; a pause reason replaces it. A null or 0 fps shows "--".
+export function autoTdpLine(s: { watts: number | null; fps: number | null; best: number | null; paused: string }): string {
+  if (s.paused) return s.paused;
+  const fps = known(s.fps) && s.fps > 0 ? show(s.fps) : '--';
+  const best = known(s.best) ? ' (best ' + show(s.best) + ')' : '';
+  return 'Auto TDP: ' + show(s.watts) + ' W · ' + fps + ' FPS' + best;
 }
 
 // Power limits line outside Manual: the firmware's limits apply. The device reads 0 (not reported) on the Ally,

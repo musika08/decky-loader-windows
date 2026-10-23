@@ -121,3 +121,21 @@ test('each mode shows its own watts; other modes keep the firmware line', async 
   assert.equal(modePowerLine('other'), null);
   assert.equal(modePowerLine(null), null);
 });
+
+test('Auto TDP texts', async () => {
+  const { autoTdpDescription, autoTdpLine, modePowerLine, AUTO_TDP_UNSUPPORTED } = await import('../../src/curve.ts');
+  assert.equal(autoTdpDescription(60), 'Holds 60 FPS at the lowest watts.');
+  assert.equal(autoTdpDescription(45), 'Holds 45 FPS at the lowest watts.');
+  assert.equal(autoTdpDescription(0), 'FPS limit Off: the most frames, trimming only watts that add none.');
+  assert.equal(autoTdpLine({ watts: 11, fps: 60, best: null, paused: '' }), 'Auto TDP: 11 W · 60 FPS');
+  assert.equal(autoTdpLine({ watts: 11.4, fps: 59.6, best: null, paused: '' }), 'Auto TDP: 11 W · 60 FPS');
+  assert.equal(autoTdpLine({ watts: 14, fps: 72, best: 73.6, paused: '' }), 'Auto TDP: 14 W · 72 FPS (best 74)');
+  assert.equal(autoTdpLine({ watts: 11, fps: 0, best: null, paused: '' }), 'Auto TDP: 11 W · -- FPS');
+  assert.equal(autoTdpLine({ watts: 11, fps: null, best: null, paused: '' }), 'Auto TDP: 11 W · -- FPS');
+  assert.equal(autoTdpLine({ watts: null, fps: null, best: null, paused: '' }), 'Auto TDP: -- W · -- FPS');
+  assert.equal(autoTdpLine({ watts: 11, fps: 60, best: null, paused: 'Auto TDP paused: charging' }), 'Auto TDP paused: charging');
+  assert.equal(modePowerLine('balanced', true), 'Power limit: up to 17 W (Auto TDP)');
+  assert.equal(modePowerLine('balanced', false), 'Power limit: 17 W');
+  assert.equal(modePowerLine('other', true), null);
+  assert.equal(AUTO_TDP_UNSUPPORTED, "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer.");
+});
