@@ -227,6 +227,9 @@ def test_skips_while_busy(tmp_path):
         assert mode_writes(c) == []
         c.armoury_inflight = 0
         c.handlers["frame_sample"] = orig
+        await ca.run_once()                     # the switch made the state unknown: a fresh streak of 3
+        await ca.run_once()
+        assert mode_writes(c) == []
         await ca.run_once()
         assert mode_writes(c) == ["desktop"]
         await ca.stop()
@@ -266,5 +269,97 @@ def test_write_takes_the_reapplier_lock(tmp_path):
         r.lock.release()
         await asyncio.wait_for(t, 2)
         assert mode_writes(c) == ["desktop"]
+        await ca.stop()
+    run(go())
+
+
+async def desktop_written(c, ca):
+    front(c, ["msedge.exe"])
+    frames(c, 0.0)
+    for _ in range(3):
+        await ca.run_once()
+    assert mode_writes(c) == ["desktop"]
+
+
+def test_rewrites_after_a_reapply(tmp_path):
+    async def go():
+        c, r, ca, _ = setup(tmp_path)
+        ca.start()
+        await desktop_written(c, ca)
+        r.applies += 1                          # a reapply (resume, AC, helper restart) may have reset the controller
+        await ca.run_once()
+        await ca.run_once()
+        assert mode_writes(c) == ["desktop"]
+        await ca.run_once()
+        assert mode_writes(c) == ["desktop", "desktop"]
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["desktop", "desktop"]
+        await ca.stop()
+    run(go())
+
+
+def test_rewrites_after_an_armoury_switch(tmp_path):
+    async def go():
+        c, _, ca, _ = setup(tmp_path)
+        ca.start()
+        await desktop_written(c, ca)
+        c.armoury_inflight = 1
+        await ca.run_once()
+        c.armoury_inflight = 0
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["desktop", "desktop"]
+        await ca.stop()
+    run(go())
+
+
+def test_no_write_while_a_reapply_runs(tmp_path):
+    async def go():
+        c, r, ca, _ = setup(tmp_path)
+        ca.start()
+        front(c, ["msedge.exe"])
+        frames(c, 0.0)
+        r.applying = 1
+        for _ in range(4):
+            await ca.run_once()
+        assert mode_writes(c) == []             # dropped, not counted as written
+        r.applying = 0
+        await ca.run_once()
+        assert mode_writes(c) == ["desktop"]
+        await ca.stop()
+    run(go())
+
+
+def test_failed_gamepad_write_retried_next_tick(tmp_path):
+    async def go():
+        c, _, ca, _ = setup(tmp_path)
+        ca.start()
+        refuse = {"n": 1}
+
+        async def set_mode(args):
+            if refuse["n"]:
+                refuse["n"] -= 1
+                return fail("controller busy")
+            return ok(dict(args))
+        c.handlers["set_controller_mode"] = set_mode
+        front(c, ["steam.exe"])
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["gamepad"]    # refused
+        await ca.run_once()
+        assert mode_writes(c) == ["gamepad", "gamepad"]   # retried at once
+        # A refused Desktop write waits for another 3 equal decisions.
+        refuse["n"] = 1
+        front(c, ["msedge.exe"])
+        frames(c, 0.0)
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["gamepad", "gamepad", "desktop"]
+        await ca.run_once()
+        await ca.run_once()
+        assert len(mode_writes(c)) == 3
+        await ca.run_once()
+        assert mode_writes(c) == ["gamepad", "gamepad", "desktop", "desktop"]
         await ca.stop()
     run(go())

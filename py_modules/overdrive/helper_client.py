@@ -28,9 +28,10 @@ MAX_STARTS = 5
 WINDOW = 600.0
 READ_LIMIT = 1 << 20
 TIMEOUTS_BEFORE_KILL = 2
-# Auto TDP's frame sample has a short timeout (2 s, every 300 ms): its timeouts do not count toward a kill, so a short
-# helper stall does not kill the helper. Its own failures pause Auto TDP, whose mode write then counts as usual.
-NOT_COUNTED = ("frame_sample",)
+# Auto TDP's frame sample and Controller Auto's foreground have a short timeout (2 s, every 300 ms): their timeouts do
+# not count toward a kill, so a short helper stall does not kill the helper. Auto TDP's own failures pause it, whose
+# mode write then counts as usual; a failed foreground decides Gamepad.
+NOT_COUNTED = ("frame_sample", "foreground")
 LONG_ARMOURY = ("armoury_stop", "armoury_restore")
 ARMOURY_GRACE = 60.0   # one more listed service's worst case (30 s stop, doubled by a rollback)
 

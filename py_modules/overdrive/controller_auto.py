@@ -11,6 +11,8 @@ docs/specs/2026-10-24-overdrive-controls-design.md sections 3.3, 4 and 5.2.
 - Nothing is asked or written while an Armoury Crate switch runs. Writes take the reapplier's lock; they are not user
   changes (no generation bump, nothing saved). Never call stop() from inside reapplier.user_change(): it takes the
   same (non-reentrant) lock.
+- The written mode is forgotten after a reapply (reapplier.applies changed) or an Armoury switch, so the next streak
+  writes again; no write lands while a reapply runs (reapplier.applying).
 - An error inside the loop is logged (once a minute at most), Gamepad is written and the loop goes on.
 - stop() writes Gamepad.
 """
@@ -44,6 +46,8 @@ class ControllerAuto:
         self._written: Optional[str] = None   # mode this loop last wrote; None = unknown
         self._error_logged_at: Optional[float] = None
         self._write_failed_logged_at: Optional[float] = None
+        self._applies_seen = 0     # reapplier.applies at the last tick: a reapply may have rewritten the controller
+        self._busy_seen = False    # an Armoury switch was seen: the controller state is no longer known
 
     # ---------- control ----------
 
@@ -52,6 +56,7 @@ class ControllerAuto:
             return
         self._on = True
         self._candidate, self._count, self._written = None, 0, None
+        self._applies_seen, self._busy_seen = self.reapplier.applies, False
         self.log.info("Controller Auto started")
         if self._task is None:
             self._task = asyncio.ensure_future(self._run())
@@ -98,8 +103,17 @@ class ControllerAuto:
 
     async def run_once(self) -> None:
         """One decision and, after 3 equal decisions in a row that differ from the written mode, one write."""
-        if not self._on or self.reapplier._busy():
+        if not self._on:
             return
+        rp = self.reapplier
+        if rp._busy():
+            self._busy_seen = True
+            return
+        if rp.applies != self._applies_seen or self._busy_seen:
+            # A reapply (resume, AC change, helper restart) or an Armoury switch since the last tick: the controller
+            # may have forgotten or been given another mode. Unknown again: the next 3-in-a-row decision is written.
+            self._applies_seen, self._busy_seen = rp.applies, False
+            self._written, self._candidate, self._count = None, None, 0
         r = await self.client.call("foreground", {}, SAMPLE_TIMEOUT)
         data = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
         exe = data.get("exe") if isinstance(data.get("exe"), str) else ""   # a failed reply: no window, Gamepad
@@ -119,15 +133,21 @@ class ControllerAuto:
     async def _write(self, mode: str) -> None:
         rp = self.reapplier
         async with rp.lock:
-            if not self._on or rp._busy():
-                return   # stopped meanwhile, or an Armoury switch started: decided again at the next tick
+            if not self._on or rp.applying or rp._busy():
+                # Stopped meanwhile, a reapply in progress (its steps release the lock in between) or an Armoury
+                # switch: not written, decided again at the next tick.
+                if rp._busy():
+                    self._busy_seen = True
+                return
             r = await self.client.call("set_controller_mode", {"mode": mode})
         if r.get("ok"):
             self._written = mode
             self._write_failed_logged_at = None
             return
         self._written = None
-        self._count = 0   # tried again after another 3 equal decisions (about 1 s), not every tick
+        if mode != GAMEPAD:
+            self._count = 0   # Desktop is tried again after another 3 equal decisions (about 1 s), not every tick
+        # Gamepad keeps the streak: tried again at the next tick (Big Picture must get its gamepad back).
         now = self.clock.monotonic()
         if self._write_failed_logged_at is None or now - self._write_failed_logged_at >= ERROR_LOG_EVERY:
             self._write_failed_logged_at = now
