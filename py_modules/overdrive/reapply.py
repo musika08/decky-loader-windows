@@ -106,6 +106,26 @@ def fan_args(curve: dict, fan: str) -> dict:
     return args
 
 
+async def rewrite_fans(client, s: Settings) -> "tuple[str, bool]":
+    """After a mode write the firmware curve of both fans is back; put the chosen preset or custom curves on again
+    (CPU, then GPU, as G-Helper's AutoFans). Used by user changes (main.py) and Auto TDP's restore. The caller holds
+    the reapplier's lock. (message for the owner, a set_fans write failed)."""
+    msgs = []
+    failed = False
+    for fan in FANS:
+        curve, _, warn = fan_plan(s, fan)
+        if curve is None:
+            if warn:
+                msgs.append(warn)
+            continue
+        r = await client.call("set_fans", fan_args(curve, fan))
+        if not r.get("ok"):
+            failed = True
+            what = "fan curve" if fan == "cpu" else "GPU fan curve"
+            msgs.append(f"The {what} was not put back: " + str(r.get("message")))
+    return " ".join(msgs), failed
+
+
 def mode_args(s: Settings) -> dict:
     return mode_write(s.mode, (s.spl, s.sppt, s.fppt))
 
@@ -145,7 +165,7 @@ class Reapplier:
         self.busy_check: Optional[Callable[[], bool]] = None   # main.py: an Armoury operation is running
         self._deferring = False
         self._retries = 0          # consecutive reapplies retried after a transport failure
-        self.on_applied: Optional[Callable[[], None]] = None   # main.py: Auto TDP restarts from the new ceiling
+        self.on_applied: Optional[Callable[[], None]] = None   # main.py: after a reapply's mode write landed
         self.applies = 0           # bumped when a reapply starts: Auto TDP drops a write sampled before it
         self.applying = 0          # reapplies in progress: Auto TDP writes nothing meanwhile
 
@@ -234,12 +254,14 @@ class Reapplier:
             return True
         problems = []
         transport = False
+        mode_ok = False
         try:
             r = await self._step(gen, "set_mode", mode_args(s))
             transport |= transport_failure(r)
             if not r.get("ok"):
                 problems.append(r.get("message") or "The performance mode was not applied.")
             else:
+                mode_ok = True
                 self.fan_note = fan_note(s)
                 for fan in FANS:   # CPU then GPU, as G-Helper's AutoFans
                     curve, _, warn = fan_plan(s, fan)
@@ -274,7 +296,9 @@ class Reapplier:
             self.log.warning(f"Reapply incomplete: {self.warning}")
         else:
             self.log.info("Settings reapplied")
-        if self.on_applied is not None:
+        # Only a mode write that landed put the mode's watts on the device: Auto TDP restarts from them then. After a
+        # failed mode write the loop keeps the watts it knows (or a pause) until a reapply's mode write lands.
+        if mode_ok and self.on_applied is not None:
             try:
                 self.on_applied()
             except Exception:

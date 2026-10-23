@@ -943,6 +943,7 @@ def test_set_auto_tdp_saves_and_starts(tmp_path):
         st = p.auto_tdp_loop.status()
         assert st["on"] is True and st["watts"] == 17                  # starts at the mode's watts
         assert c.writes() == []                                       # starting writes nothing
+        assert p.reapplier.rerun is True              # the next poll writes the mode and fans, resetting the loop
         assert (await wait(p.set_auto_tdp("yes")))["ok"] is False
         await wait(p.auto_tdp_loop.stop(restore=False))
     run(go())
@@ -1014,7 +1015,7 @@ def test_mode_change_resets_loop(tmp_path):
         assert (await wait(p.set_fan_preset("default")))["ok"] is True   # no device curve known: rewrites the mode
         assert c.writes()[-1][0] == "set_mode" and loop.ctl.watts == 22
         # the reapplier's own reapply resets it through on_applied
-        assert p.reapplier.on_applied == loop.reset
+        assert p.reapplier.on_applied == loop.after_mode_write
         loop.ctl.watts = 9
         assert await wait(p.reapplier.apply_all()) is True
         assert loop.ctl.watts == 22
@@ -1104,4 +1105,16 @@ def test_state_and_sensors_report_auto_tdp(tmp_path, monkeypatch):
         # R8: the stored switch stays on; the panel shows why from the sensors
         assert (await p.get_state())["auto_tdp"] == {"on": True, "supported": False}
         assert (await p.get_sensors())["autoTdp"]["supported"] is False
+    run(go())
+
+
+def test_unload_restores_after_a_halted_loop(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True)
+        loop = p.auto_tdp_loop
+        loop.start()
+        loop._halt()                                                  # e.g. stopped by a set_power refusal
+        assert loop.status()["on"] is False and s.auto_tdp is True    # the stored switch stays on
+        await wait(p._unload())
+        assert c.writes()[-1] == ("set_mode", {"mode": "silent", "spl": 13, "sppt": 13, "fppt": 13})
     run(go())

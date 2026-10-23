@@ -162,6 +162,7 @@ def test_good_sample_clears_failure_count(tmp_path):
     async def go():
         c, s, r, loop, clock = setup(tmp_path, mode="silent", fps=60)
         loop.start()
+        loop.after_mode_write()   # the reapply's mode write landed: the device is at the 13 W ceiling
         for fps in (None, None, 60.0, None, None):
             c.handlers["frame_sample"] = frames(fps)
             await loop.run_once()
@@ -174,7 +175,7 @@ def test_good_sample_clears_failure_count(tmp_path):
 def test_reapply_hook_resets_and_resumes(tmp_path):
     async def go():
         c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
-        r.on_applied = loop.reset
+        r.on_applied = loop.after_mode_write
         loop.start()
         loop.ctl.watts = 13
         c.handlers["frame_sample"] = frames(40.0)
@@ -238,7 +239,7 @@ def test_reset_lowers_to_new_ceiling(tmp_path):
         loop.start()
         assert loop.status()["watts"] == 15
         s.spl, s.sppt, s.fppt = 10, 10, 10
-        loop.reset()
+        loop.reset(mode_written=True)   # the Sustained slider wrote the mode
         assert loop.status()["watts"] == 10
         c.handlers["frame_sample"] = frames(60.0, gpu=3)   # at the limit, GPU under the cap: trims after 8
         for _ in range(8):
@@ -334,7 +335,7 @@ def test_background_task_samples_every_period(tmp_path):
 def test_loop_write_never_lands_inside_a_reapply(tmp_path):
     async def go():
         c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
-        r.on_applied = loop.reset
+        r.on_applied = loop.after_mode_write
         loop.start()
         loop.ctl.watts = 13
         c.handlers["frame_sample"] = frames(40.0)
@@ -462,4 +463,210 @@ def test_successful_restore_leaves_rerun_alone(tmp_path):
         loop.start()
         await loop.stop()
         assert r.rerun is False
+    run(go())
+
+
+# ---------- final review fixes ----------
+
+def with_quiet_fans(s):
+    from fake_helper import CURVE, GPU_CURVE
+    s.fan_preset = "quiet"
+    s.set_default_curves("cpu", {m: dict(CURVE) for m in ("balanced", "turbo", "silent")})
+    s.set_default_curves("gpu", {m: dict(GPU_CURVE) for m in ("balanced", "turbo", "silent")})
+
+
+def test_restore_writes_fan_curves_after_the_mode(tmp_path):
+    from overdrive.reapply import fan_args, fan_plan
+
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        with_quiet_fans(s)
+        cpu, gpu = fan_plan(s, "cpu")[0], fan_plan(s, "gpu")[0]
+        expected = [("set_mode", mode_write("balanced")), ("set_fans", fan_args(cpu, "cpu")),
+                    ("set_fans", fan_args(gpu, "gpu"))]
+        loop.start()
+        await asyncio.wait_for(loop.stop(), 2)          # switched off
+        assert c.writes() == expected
+        assert r.rerun is False
+        c.calls.clear()
+        loop.start()
+        c.handlers["frame_sample"] = frames(None)
+        for _ in range(3):                                # paused
+            await asyncio.wait_for(loop.run_once(), 2)
+        assert c.writes() == expected
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_restore_fan_write_failure_asks_for_a_reapply(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        with_quiet_fans(s)
+
+        async def refuse(_args):
+            return fail("fan refused")
+        c.handlers["set_fans"] = refuse
+        loop.start()
+        await asyncio.wait_for(loop.stop(), 2)
+        assert [cmd for cmd, _ in c.writes()] == ["set_mode", "set_fans", "set_fans"]
+        assert r.rerun is True
+    run(go())
+
+
+def test_failed_reapply_mode_write_does_not_reset_or_resume(tmp_path):
+    """(a) A reapply whose mode write failed did not put the ceiling on the device."""
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        r.on_applied = loop.after_mode_write
+        loop.start()
+        loop.ctl.watts = loop._written = 11              # trimmed and confirmed
+
+        async def refuse(_args):
+            return fail("mode refused")
+        c.handlers["set_mode"] = refuse
+        assert await asyncio.wait_for(r.apply_all(), 2) is True
+        assert (loop.ctl.watts, loop._written) == (11, 11)   # not reset to 17
+        c.handlers["frame_sample"] = frames(None)
+        for _ in range(3):
+            await asyncio.wait_for(loop.run_once(), 2)
+        assert loop.status()["paused"]
+        await asyncio.wait_for(r.apply_all(), 2)
+        assert loop.status()["paused"]                     # still paused: no successful reapply yet
+        del c.handlers["set_mode"]
+        await asyncio.wait_for(r.apply_all(), 2)
+        assert loop.status()["paused"] == "" and loop._written == 17
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_switching_on_writes_the_ceiling_when_the_device_watts_are_unknown(tmp_path):
+    """(b) Armoury Crate or an earlier session may have left lower watts: the first sample writes the ceiling even
+    though the controller wants no change (low fps at the ceiling)."""
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        c.handlers["frame_sample"] = frames(40.0)
+        await asyncio.wait_for(loop.run_once(), 2)
+        assert power_writes(c) == [{"spl": 17, "sppt": 17, "fppt": 17}]
+        await asyncio.wait_for(loop.run_once(), 2)
+        assert len(power_writes(c)) == 1                   # confirmed now: no repeat
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_failed_pause_restore_leaves_watts_unknown(tmp_path):
+    """(c) The pause's restore failed: the device may still be trimmed, so the ceiling is written once sampling
+    resumes (here after an FPS limit change, which writes no mode)."""
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        loop.ctl.watts = loop._written = 9
+        c.handlers["frame_sample"] = frames(None)
+
+        async def refuse(_args):
+            return fail("mode refused")
+        c.handlers["set_mode"] = refuse
+        for _ in range(3):
+            await asyncio.wait_for(loop.run_once(), 2)
+        assert loop.status()["paused"] and loop._written is None and r.rerun is True
+        s.fps = 45
+        loop.reset()                                       # FPS limit change: no mode write
+        c.handlers["frame_sample"] = frames(30.0)          # far below 45: wants a climb, already at the ceiling
+        await asyncio.wait_for(loop.run_once(), 2)
+        assert power_writes(c) == [{"spl": 17, "sppt": 17, "fppt": 17}]
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_fps_change_reset_keeps_confirmed_watts(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        loop.ctl.watts = loop._written = 11
+        s.fps = 45
+        loop.reset()                                       # no mode write: the device is still at 11 W
+        assert loop._written == 11 and loop.ctl.watts == 17
+        c.handlers["frame_sample"] = frames(45.0, gpu=10)
+        await asyncio.wait_for(loop.run_once(), 2)
+        assert power_writes(c) == [{"spl": 17, "sppt": 17, "fppt": 17}]
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_halted_task_ends_when_switched_on_again_during_its_restore(tmp_path):
+    async def go():
+        c = FakeClient()
+        s = make(tmp_path, mode="silent", fps=60)
+        r = Reapplier(c, s, clock=Clock())
+
+        async def tick(_secs):
+            await asyncio.sleep(0.005)
+        loop = AutoTdpLoop(c, s, r, clock=Clock(), sleep=tick)
+        loop.start()
+        old = loop._task
+        loop._written = 11
+        loop.ctl.watts = 11
+        c.handlers["frame_sample"] = frames(40.0)
+        restoring, release = asyncio.Event(), asyncio.Event()
+
+        async def refuse(_args):
+            return fail("The power limit was refused by the firmware.")
+
+        async def slow_mode(args):
+            restoring.set()
+            await release.wait()
+            return ok(dict(args))
+        c.handlers["set_power"] = refuse
+        c.handlers["set_mode"] = slow_mode
+        await asyncio.wait_for(restoring.wait(), 2)        # the old task halted and is restoring the mode
+        assert loop.status()["on"] is False
+        del c.handlers["set_power"]
+        loop.start()                                       # switched on again meanwhile
+        new = loop._task
+        assert new is not None and new is not old
+        release.set()
+        await asyncio.wait_for(old, 2)                     # the old task ends instead of sampling on
+        assert not new.done()
+        await asyncio.wait_for(loop.stop(restore=False), 2)
+    run(go())
+
+
+def test_persistent_sample_error_is_logged_once_a_minute(tmp_path):
+    class Log:
+        def __init__(self):
+            self.traces = 0
+
+        def exception(self, _msg):
+            self.traces += 1
+
+        def info(self, _msg):
+            pass
+
+        warning = info
+
+    async def go():
+        c = FakeClient()
+        s = make(tmp_path, mode="silent", fps=60)
+        r = Reapplier(c, s, clock=Clock())
+        clock = Clock()
+        log = Log()
+        samples = []
+        done = asyncio.Event()
+
+        async def tick(_secs):
+            clock.mono += 0.3
+            if len(samples) >= 400:                        # 400 samples x 0.3 s = 120 s
+                done.set()
+                await asyncio.Event().wait()
+            await asyncio.sleep(0)
+        loop = AutoTdpLoop(c, s, r, clock=clock, sleep=tick, logger=log)
+
+        async def boom(_args):
+            samples.append(1)
+            raise RuntimeError("bad reply")
+        c.handlers["frame_sample"] = boom
+        loop.start()
+        await asyncio.wait_for(done.wait(), 10)
+        assert log.traces == 2                             # at 0 s and at 60 s, not 400 times
+        await asyncio.wait_for(loop.stop(restore=False), 2)
     run(go())

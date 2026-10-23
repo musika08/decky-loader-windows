@@ -14,7 +14,8 @@ if _PY_MODULES not in sys.path:
 from overdrive import device  # noqa: E402
 from overdrive.auto_tdp_loop import AutoTdpLoop  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
-from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write  # noqa: E402
+from overdrive.reapply import (Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write,  # noqa: E402
+                               rewrite_fans)
 from overdrive.cpu_usage import CpuUsage  # noqa: E402
 from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRESETS, START_TYPES,  # noqa: E402
                                 Settings, check_curve, clamp_power, curve_mode, preset_curve)
@@ -74,7 +75,8 @@ class Plugin:
             reapplier.busy_check = self._busy
             if client is not None:
                 self.auto_tdp_loop = AutoTdpLoop(client, settings, reapplier, logger=decky.logger)
-                reapplier.on_applied = self.auto_tdp_loop.reset   # a reapply wrote the mode: restart at the ceiling
+                # a reapply's mode write landed: restart at the ceiling it set
+                reapplier.on_applied = self.auto_tdp_loop.after_mode_write
 
     def _busy(self) -> bool:
         return self._armoury_busy or bool(getattr(self.client, "busy", False))
@@ -127,9 +129,11 @@ class Plugin:
             except (asyncio.CancelledError, Exception):
                 pass
         if self.auto_tdp_loop is not None:
-            # Never leave the Ally at trimmed watts: write the mode again (only when Auto TDP was running; a pause or
-            # a refusal already did, and with Auto TDP off nothing is written).
-            await self.auto_tdp_loop.stop(restore=self.auto_tdp_loop.status()["on"])
+            # Never leave the Ally at trimmed watts: write the mode again when Auto TDP is running or stored on (a
+            # loop halted by a refusal may have left trimmed watts if its restore failed). With Auto TDP off nothing
+            # is written.
+            restore = bool(self.auto_tdp_loop.status()["on"] or (self.settings is not None and self.settings.auto_tdp))
+            await self.auto_tdp_loop.stop(restore=restore)
         if self.reapplier is not None:
             await self.reapplier.stop()
         if self.client is not None:
@@ -218,24 +222,14 @@ class Plugin:
         """After a mode write the firmware curve of both fans is back; put the chosen preset or custom curves on
         again (CPU, then GPU)."""
         self.reapplier.fan_note = fan_note(self.settings)
-        msgs = []
-        for fan in FANS:
-            curve, _, warn = fan_plan(self.settings, fan)
-            if curve is None:
-                if warn:
-                    msgs.append(warn)
-                continue
-            r = await self.client.call("set_fans", fan_args(curve, fan))
-            if not r.get("ok"):
-                what = "fan curve" if fan == "cpu" else "GPU fan curve"
-                msgs.append(f"The {what} was not put back: " + str(r.get("message")))
-        return " ".join(msgs)
+        msg, _ = await rewrite_fans(self.client, self.settings)
+        return msg
 
-    def _auto_tdp_reset(self) -> None:
-        """After a user write that set the mode's watts or the FPS limit: Auto TDP restarts from the new ceiling and
-        limit (sync, idle when stopped; safe inside user_change)."""
+    def _auto_tdp_reset(self, mode_written: bool) -> None:
+        """After a user write that set the mode's watts (mode_written) or the FPS limit: Auto TDP restarts from the
+        new ceiling and limit (sync, idle when stopped; safe inside user_change)."""
         if self.auto_tdp_loop is not None:
-            self.auto_tdp_loop.reset()
+            self.auto_tdp_loop.reset(mode_written=mode_written)
 
     async def set_mode(self, mode, spl=None, sppt=None, fppt=None) -> dict:
         refused = self._refuse_write()
@@ -268,7 +262,7 @@ class Plugin:
                                                     _int(d.get("fppt")) or args["fppt"])
             s.user_set = True
             msgs = [await self._rewrite_fans(), self._save()]
-            self._auto_tdp_reset()
+            self._auto_tdp_reset(mode_written=True)
         return {"ok": True, "message": " ".join(m for m in msgs if m)}
 
     async def set_fps(self, fps) -> dict:
@@ -286,7 +280,7 @@ class Plugin:
                 return _fail(str(r.get("message")))
             self.settings.fps = fps
             self.settings.user_set = True
-            self._auto_tdp_reset()
+            self._auto_tdp_reset(mode_written=False)   # the watts on the device are unchanged
             return {"ok": True, "message": self._save()}
 
     async def set_fan_preset(self, name) -> dict:
@@ -326,7 +320,7 @@ class Plugin:
             self.reapplier.fan_note = fan_note(s)
             s.user_set = True
             if writes and writes[0][0] == "set_mode":   # the mode's watts were written again
-                self._auto_tdp_reset()
+                self._auto_tdp_reset(mode_written=True)
             return {"ok": True, "message": " ".join(m for m in warns + [self._save()] if m)}
 
     async def set_fan_curve(self, temps, speeds, fan="cpu") -> dict:
@@ -389,7 +383,7 @@ class Plugin:
                 msgs.append("The FPS limit was not turned off: " + str(r.get("message")))
             s.user_set = True
             msgs.append(self._save())
-            self._auto_tdp_reset()
+            self._auto_tdp_reset(mode_written=True)
         return {"ok": True, "message": " ".join(m for m in msgs if m)}
 
     # ---------- Auto TDP ----------
@@ -428,6 +422,9 @@ class Plugin:
             s.user_set = True   # a user choice: reapplies run, and each one resets the loop
             msg = self._save()
         loop.start()
+        # The watts on the device are not known (Armoury Crate's or an earlier session's may be lower): the next
+        # reapply poll writes the mode and the fan curves, and its mode write restarts the loop at the ceiling.
+        self.reapplier.rerun = True
         return {"ok": True, "message": msg}
 
     # ---------- Armoury Crate ----------
