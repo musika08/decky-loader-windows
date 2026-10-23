@@ -36,6 +36,9 @@ namespace Overdrive.Helper
             { "set_cpu_boost", new[] { "value" } },
             { "get_power_mode", None },
             { "set_power_mode", new[] { "mode" } },
+            { "controller_info", None },
+            { "set_controller_mode", new[] { "mode" } },
+            { "set_vibration", new[] { "strength" } },
         };
 
         private static readonly string[] TopLevel = { "id", "cmd", "args" };
@@ -56,6 +59,14 @@ namespace Overdrive.Helper
         private const string OverlayBalanced = "00000000-0000-0000-0000-000000000000";
         private const string OverlayBest = "ded574b5-45a0-4f42-8737-46345c09c238";
         public const string WinPowerUnavailable = "Windows power control is not available.";
+
+        // The ASUS controller (mode, grip vibration). Set after construction; null means not available.
+        public IAsusHid Hid { get; set; }
+
+        // BIOS SystemProductName; the Xbox Ally family ("ROG Xbox Ally X RC73XA_RC73XA") gets a second vibration report.
+        public string ProductName { get; set; }
+
+        public const string ControllerUnavailable = "Controller control is not available.";
 
         public static IEnumerable<string> CommandNames { get { return Commands.Keys; } }
 
@@ -171,6 +182,9 @@ namespace Overdrive.Helper
                 case "set_cpu_boost": return SetCpuBoost(id, args);
                 case "get_power_mode": return GetPowerMode(id);
                 case "set_power_mode": return SetPowerMode(id, args);
+                case "controller_info": return ControllerInfo(id);
+                case "set_controller_mode": return SetControllerMode(id, args);
+                case "set_vibration": return SetVibration(id, args);
             }
             return Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
         }
@@ -576,6 +590,72 @@ namespace Overdrive.Helper
             d["mode"] = mode;
             d["overlay"] = guid;
             return Reply(id, true, "", d);
+        }
+
+        // ---------- ASUS controller (G-Helper app/Ally/AllyControl.cs ApplyMode and SetDeadzones) ----------
+
+        private bool IsXbox()
+        {
+            return ProductName != null && ProductName.IndexOf("Xbox", StringComparison.Ordinal) >= 0;
+        }
+
+        private string ControllerInfo(object id)
+        {
+            if (Hid == null) return Reply(id, false, ControllerUnavailable, null);
+            HidInfo info = Hid.Find();
+            bool found = info != null && info.Found;
+            var d = new Dictionary<string, object>();
+            d["found"] = found;
+            d["pid"] = found ? "0x" + info.Pid.ToString("X4") : null;
+            d["xbox"] = IsXbox();
+            return Reply(id, true, "", d);
+        }
+
+        private string SetControllerMode(object id, Dictionary<string, object> args)
+        {
+            object raw;
+            if (!args.TryGetValue("mode", out raw)) return Reply(id, false, "Refused: 'mode' is required.", null);
+            string mode = raw as string;
+            // G-Helper ControllerMode: Gamepad = 1, Mouse = 3 (Overdrive's "desktop").
+            byte m = mode == "gamepad" ? (byte)1 : mode == "desktop" ? (byte)3 : (byte)0;
+            if (m == 0) return Reply(id, false, "Refused: controller mode must be gamepad or desktop.", null);
+            var d = new Dictionary<string, object>();
+            d["mode"] = mode;
+            return WriteController(id, d, new byte[] { AsusHid.INPUT_ID, 0xD1, 0x01, 0x01, m });
+        }
+
+        private string SetVibration(object id, Dictionary<string, object> args)
+        {
+            int strength;
+            string err;
+            if (!GetInt(args, "strength", out strength, out err)) return Reply(id, false, err, null);
+            if (strength < 0 || strength > 100) return Reply(id, false, "Refused: vibration strength must be a whole number from 0 to 100.", null);
+            byte s = (byte)strength;
+            var reports = new List<byte[]> { new byte[] { AsusHid.INPUT_ID, 0xD1, 0x06, 0x02, s, s } };
+            if (IsXbox()) reports.Add(new byte[] { AsusHid.INPUT_ID, 0xD1, 0x1C, 0x02, s, s });
+            var d = new Dictionary<string, object>();
+            d["strength"] = strength;
+            return WriteController(id, d, reports.ToArray());
+        }
+
+        // Pads each report to the controller collection's feature report length and sends them in order; the first
+        // failure stops and is reported.
+        private string WriteController(object id, Dictionary<string, object> data, params byte[][] reports)
+        {
+            if (Hid == null) return Reply(id, false, ControllerUnavailable, null);
+            HidInfo info = Hid.Find();
+            if (info == null || !info.Found) return Reply(id, false, AsusHid.NotFound, null);
+            foreach (byte[] r in reports)
+                if (info.FeatureLength < r.Length)
+                    return Reply(id, false, "Refused: the controller's feature report is only " + info.FeatureLength + " bytes.", null);
+            foreach (byte[] r in reports)
+            {
+                var padded = new byte[info.FeatureLength];
+                Array.Copy(r, padded, r.Length);
+                string err;
+                if (!Hid.SetFeature(padded, out err)) return Reply(id, false, err ?? "The controller refused the report.", null);
+            }
+            return Reply(id, true, "", data);
         }
 
         private string FpsUnavailable()

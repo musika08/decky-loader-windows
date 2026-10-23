@@ -68,6 +68,7 @@ namespace Overdrive.Helper.Tests
             public FakeAdl Adl = new FakeAdl();
             public FakeServices Services = new FakeServices();
             public FakeWinPower Power = new FakeWinPower();
+            public FakeHidBus Bus = new FakeHidBus();
             public List<int> Sleeps = new List<int>();      // delays the helper asked for, never actually waited
             public HelperCore Core;
             public Rig() : this(true) { }
@@ -75,6 +76,8 @@ namespace Overdrive.Helper.Tests
             {
                 Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms));
                 Core.WinPower = Power;
+                Core.Hid = new AsusHid(Bus);
+                Core.ProductName = "ROG Ally X RC72LA_RC72LA";
             }
 
             public Dictionary<string, object> Send(string line)
@@ -1043,6 +1046,186 @@ namespace Overdrive.Helper.Tests
             }
         }
 
+        // ---------- ASUS controller (mode, grip vibration) ----------
+
+        private const string XboxProduct = "ROG Xbox Ally X RC73XA_RC73XA";
+
+        // The report as it must reach the device: the bytes, then zeros up to the collection's feature length.
+        private static byte[] Padded(int length, params byte[] head)
+        {
+            var b = new byte[length];
+            Array.Copy(head, b, head.Length);
+            return b;
+        }
+
+        private static string Hex(byte[] b) { return b == null ? "null" : BitConverter.ToString(b); }
+
+        private static void WritesAre(FakeHidBus bus, string what, params byte[][] reports)
+        {
+            Equal(reports.Length, bus.Writes.Count, what + ": write count");
+            for (int i = 0; i < reports.Length; i++)
+            {
+                Equal(FakeHidBus.MatchPath, bus.Writes[i].Key, what + ": write " + i + " path");
+                Equal(Hex(reports[i]), Hex(bus.Writes[i].Value), what + ": write " + i + " bytes");
+            }
+        }
+
+        public static void Controller_ModeBytes()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}");
+            True(Ok(r), "gamepad: " + Msg(r));
+            Equal("gamepad", ((Dictionary<string, object>)r["data"])["mode"], "echoed mode");
+            WritesAre(rig.Bus, "gamepad", Padded(64, 0x5A, 0xD1, 0x01, 0x01, 0x01));
+
+            rig.Bus.Writes.Clear();
+            r = rig.Send("{\"id\":2,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}");
+            True(Ok(r), "desktop: " + Msg(r));
+            Equal("desktop", ((Dictionary<string, object>)r["data"])["mode"], "echoed mode");
+            WritesAre(rig.Bus, "desktop", Padded(64, 0x5A, 0xD1, 0x01, 0x01, 0x03));
+
+            // The padding follows the collection's own feature report length.
+            var rig48 = new Rig();
+            rig48.Bus = new FakeHidBus(48);
+            rig48.Core.Hid = new AsusHid(rig48.Bus);
+            True(Ok(rig48.Send("{\"id\":3,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}")), "48-byte collection");
+            WritesAre(rig48.Bus, "desktop on 48", Padded(48, 0x5A, 0xD1, 0x01, 0x01, 0x03));
+
+            rig.Bus.Writes.Clear();
+            rig.Bus.Fail = true;
+            r = rig.Send("{\"id\":4,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}");
+            True(!Ok(r) && Msg(r).Contains("feature write failed"), "write error passed on: " + Msg(r));
+        }
+
+        public static void Controller_VibrationBytes()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
+            True(Ok(r), "on: " + Msg(r));
+            Equal(100, ((Dictionary<string, object>)r["data"])["strength"], "echoed strength");
+            WritesAre(rig.Bus, "non-Xbox on", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 100, 100));
+
+            rig.Bus.Writes.Clear();
+            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":0}}")), "off");
+            WritesAre(rig.Bus, "non-Xbox off", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 0, 0));
+
+            var x = new Rig();
+            x.Core.ProductName = XboxProduct;
+            True(Ok(x.Send("{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":55}}")), "Xbox");
+            WritesAre(x.Bus, "Xbox", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 55, 55), Padded(64, 0x5A, 0xD1, 0x1C, 0x02, 55, 55));
+
+            // A failed first write stops there and is reported.
+            x.Bus.Writes.Clear();
+            x.Bus.Fail = true;
+            r = x.Send("{\"id\":4,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
+            True(!Ok(r) && Msg(r).Contains("feature write failed"), "write error passed on: " + Msg(r));
+            Equal(1, x.Bus.Writes.Count, "no second write after a failure");
+        }
+
+        public static void ControllerHid_OnlyMatchingCollection()
+        {
+            SeqEqual(new[] { "1A30", "1854", "1869", "1866", "19B6", "1822", "1837", "1854", "184A", "183D", "8502", "1807",
+                "17E0", "1ABE", "1B4C", "1B6E", "1B2C", "8854", "1CE7", "1CE6", "1BF2", "1BF3", "1CD7", "1CD8" },
+                new List<int>(AsusHid.MAIN_AURA_PIDS).ConvertAll(p => p.ToString("X4")), "PIDs copied from G-Helper MAIN_AURA_PIDS");
+            Equal(0x0B05, AsusHid.ASUS_ID, "vendor id");
+            Equal((byte)0x5A, AsusHid.INPUT_ID, "input report id");
+
+            var bus = new FakeHidBus();
+            var hid = new AsusHid(bus);
+            HidInfo info = hid.Find();
+            True(info.Found, "found");
+            Equal(0x1B4C, info.Pid, "pid");
+            Equal(64, info.FeatureLength, "feature length");
+
+            // Every command writes to the one matching collection only.
+            var rig = new Rig();
+            rig.Core.ProductName = XboxProduct;
+            rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}");
+            rig.Send("{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
+            Equal(3, rig.Bus.Writes.Count, "three writes");
+            foreach (var w in rig.Bus.Writes) Equal(FakeHidBus.MatchPath, w.Key, "written path");
+
+            // controller_info: found, PID as hex, Xbox from the product name. It writes nothing.
+            var r = rig.Send("{\"id\":3,\"cmd\":\"controller_info\"}");
+            True(Ok(r), "info: " + Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(true, d["found"], "found");
+            Equal("0x1B4C", d["pid"], "pid");
+            Equal(true, d["xbox"], "xbox");
+            Equal(3, rig.Bus.Writes.Count, "info wrote nothing");
+            var plain = new Rig();
+            Equal(false, ((Dictionary<string, object>)plain.Send("{\"id\":4,\"cmd\":\"controller_info\"}")["data"])["xbox"], "non-Xbox");
+            plain.Core.ProductName = null;
+            Equal(false, ((Dictionary<string, object>)plain.Send("{\"id\":5,\"cmd\":\"controller_info\"}")["data"])["xbox"], "unknown product");
+
+            // AsusHid itself refuses a report that is not a padded 0x5A report, before anything is sent.
+            string err;
+            True(!hid.SetFeature(new byte[] { 0x5A, 0xD1, 0x01, 0x01, 0x01 }, out err), "unpadded refused");
+            True(!hid.SetFeature(Padded(64, 0x5D, 0xD1), out err), "other report id refused");
+            True(!hid.SetFeature(null, out err), "null refused");
+            Equal(0, bus.Writes.Count, "nothing sent");
+
+            // Without the 0x5A collection nothing is found, even with the controller's other collections present.
+            bus.Devices.RemoveAll(c => c.Path == FakeHidBus.MatchPath);
+            True(!hid.Find().Found, "no 0x5A collection, not found");
+            True(!hid.SetFeature(Padded(64, 0x5A, 0xD1, 0x01, 0x01, 0x01), out err), "write without a controller refused");
+            Equal(0, bus.Writes.Count, "nothing sent to the other collections");
+        }
+
+        // The Win32 structs as the x64 Windows SDK lays them out. Nothing is opened or listed.
+        public static void ControllerHid_Win32LayoutsX64()
+        {
+            Equal(8, IntPtr.Size, "tests run as x64, like the helper");
+            SeqEqual(new[] { "32", "12", "64", "8" }, new List<int>(Win32HidBus.LayoutSizes()).ConvertAll(n => n.ToString()),
+                "SP_DEVICE_INTERFACE_DATA, HIDD_ATTRIBUTES, HIDP_CAPS, detail cbSize");
+        }
+
+        public static void Controller_NotFoundRefused()
+        {
+            var rig = new Rig();
+            rig.Bus.Devices.RemoveAll(c => c.Path == FakeHidBus.MatchPath);
+            foreach (string line in new[] {
+                "{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}",
+                "{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}" })
+            {
+                var r = rig.Send(line);
+                Equal("Controller not found", Msg(r), "refused: " + line);
+                True(!Ok(r), "not ok");
+            }
+            var info = rig.Send("{\"id\":3,\"cmd\":\"controller_info\"}");
+            True(Ok(info), "info still answers");
+            var d = (Dictionary<string, object>)info["data"];
+            Equal(false, d["found"], "found");
+            True(d["pid"] == null, "no pid");
+            Equal(0, rig.Bus.Writes.Count, "nothing written");
+
+            // No HID layer at all (Hid left null): refused as not available.
+            var core = new HelperCore(new FakeAcpi(), new FakeAdl(), new FakeServices(), true, ms => { });
+            foreach (string line in new[] {
+                "{\"id\":1,\"cmd\":\"controller_info\"}",
+                "{\"id\":2,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}",
+                "{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":0}}" })
+            {
+                var r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine(line));
+                True(!Ok(r) && Msg(r) == HelperCore.ControllerUnavailable, "not available: " + Msg(r));
+            }
+        }
+
+        public static void Controller_InvalidArgsRefused()
+        {
+            var rig = new Rig();
+            foreach (string m in new[] { "\"Gamepad\"", "\"mouse\"", "\"auto\"", "\"\"", "1", "3", "null", "true" })
+                True(!Ok(rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":" + m + "}}")), "mode " + m + " refused");
+            True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"set_controller_mode\"}")), "mode required");
+            foreach (string v in new[] { "-1", "101", "255", "\"50\"", "1.5", "null", "true" })
+                True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":" + v + "}}")), "strength " + v + " refused");
+            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_vibration\"}")), "strength required");
+            True(!Ok(rig.Send("{\"id\":5,\"cmd\":\"set_vibration\",\"args\":{\"strength\":50,\"x\":1}}")), "unknown arg refused");
+            True(!Ok(rig.Send("{\"id\":6,\"cmd\":\"controller_info\",\"args\":{\"x\":1}}")), "info takes no args");
+            Equal(0, rig.Bus.Lists, "refusals never reached the HID layer");
+            Equal(0, rig.Bus.Writes.Count, "nothing written");
+        }
+
         public static void NotAlly_RefusesAllButReadAllowList()
         {
             SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode" },
@@ -1056,8 +1239,9 @@ namespace Overdrive.Helper.Tests
                 if (read) True(Msg(r) != HelperCore.NotAllyMessage, cmd + " is a read and must not be refused as non-Ally");
                 else { True(!Ok(r) && Msg(r) == HelperCore.NotAllyMessage, cmd + " refused: " + Msg(r)); refused++; }
             }
-            Equal(9, refused, "every non-read command refused");
+            Equal(12, refused, "every non-read command refused");
             Equal(0, rig.Power.Writes().Count, "no power write");
+            Equal(0, rig.Bus.Writes.Count, "no HID write");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get"), "only reads reached ACPI: " + c);
             Equal(0, rig.Adl.Sets.Count, "no ADL write");
             Equal(0, rig.Services.Changes().Count, "no service change");

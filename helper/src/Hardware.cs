@@ -75,6 +75,41 @@ namespace Overdrive.Helper
         bool SetOverlay(string guid, out string err);
     }
 
+    // The ASUS controller's HID collection that takes feature report 0x5A (see AsusHid.cs).
+    public sealed class HidInfo
+    {
+        public bool Found;
+        public int Pid;
+        public int FeatureLength;   // feature report length of that collection, report id byte included
+    }
+
+    // The ASUS controller, shaped after G-Helper app/USB/AsusHid.cs (FindHidStream / WriteInput).
+    public interface IAsusHid
+    {
+        // The controller collection (VID 0x0B05, PID in MAIN_AURA_PIDS, feature report 0x5A), or Found = false.
+        HidInfo Find();
+        // Sends one feature report to that collection only. The report must start with 0x5A and be exactly
+        // FeatureLength bytes long.
+        bool SetFeature(byte[] report, out string err);
+    }
+
+    // One HID collection as Windows lists it.
+    public sealed class HidCollection
+    {
+        public string Path;
+        public int Vid;
+        public int Pid;
+        public int FeatureLength;
+        public byte[] FeatureReportIds;   // report ids of the collection's feature reports
+    }
+
+    // The raw HID layer under AsusHid: lists collections and sends a feature report to one path.
+    public interface IHidBus
+    {
+        List<HidCollection> List();
+        bool SetFeature(string path, byte[] report, out string err);
+    }
+
     // Device ids (spec section 3; same values as G-Helper app/AsusACPI.cs).
     public static class DeviceIds
     {

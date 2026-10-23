@@ -122,6 +122,50 @@ namespace Overdrive.Helper.Tests
         public void Dispose() { Disposed = true; }
     }
 
+    // Raw HID stand-in: a fixed list of collections and every feature report sent, by path.
+    // The default list is shaped like the owner's Ally: other vendors, an ASUS PID that is not a controller, the
+    // controller's collections without 0x5A, and exactly one controller collection with feature report 0x5A.
+    public class FakeHidBus : IHidBus
+    {
+        public const string MatchPath = @"\\?\hid#vid_0b05&pid_1b4c&mi_02&col03#match";
+        public readonly List<HidCollection> Devices = new List<HidCollection>();
+        public readonly List<KeyValuePair<string, byte[]>> Writes = new List<KeyValuePair<string, byte[]>>();
+        public bool Fail;
+        public int Lists;
+
+        public FakeHidBus() : this(64) { }
+
+        public FakeHidBus(int featureLength)
+        {
+            Add(@"\\?\hid#vid_046d&pid_c52b#other-vendor", 0x046D, 0xC52B, 64, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1234#asus-not-controller", 0x0B05, 0x1234, 64, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_02&col01#aura", 0x0B05, 0x1B4C, 64, 0x5D);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_02&col02#no-feature", 0x0B05, 0x1B4C, 0);
+            Add(@"\\?\hid#vid_046d&pid_1b4c#other-vendor-same-pid", 0x046D, 0x1B4C, 64, 0x5A);
+            Add(MatchPath, 0x0B05, 0x1B4C, featureLength, 0x5D, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_05#gamepad", 0x0B05, 0x1B4C, 0);
+        }
+
+        public void Add(string path, int vid, int pid, int featureLength, params byte[] ids)
+        {
+            Devices.Add(new HidCollection { Path = path, Vid = vid, Pid = pid, FeatureLength = featureLength, FeatureReportIds = ids });
+        }
+
+        public List<HidCollection> List()
+        {
+            Lists++;
+            return new List<HidCollection>(Devices);
+        }
+
+        public bool SetFeature(string path, byte[] report, out string err)
+        {
+            err = null;
+            Writes.Add(new KeyValuePair<string, byte[]>(path, (byte[])report.Clone()));
+            if (Fail) { err = "feature write failed"; return false; }
+            return true;
+        }
+    }
+
     // Windows power stand-in: boost AC/DC values and the active overlay, with every call recorded.
     public class FakeWinPower : IWinPower
     {
