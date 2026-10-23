@@ -6,7 +6,7 @@
 Script options (argv):
   --exit-at-start CODE   exit with CODE before reading anything
   --exit-on CMD          exit with code 3 when CMD arrives, without replying
-  --hang-on CMD          never reply to CMD (keeps reading other lines)
+  --hang-on CMD[,CMD]    never reply to these commands (keeps reading other lines)
   --slow-on CMD          reply to CMD after 1 s (or --slow-secs S), reading nothing else meanwhile
   --log PATH             append every request line to PATH
 """
@@ -54,7 +54,7 @@ def main(argv):
         args = req.get("args") or {}
         if cmd == opts["exit_on"]:
             sys.exit(3)
-        if cmd == opts["hang_on"]:
+        if opts["hang_on"] and cmd in opts["hang_on"].split(","):
             continue
         if cmd == opts["slow_on"]:
             time.sleep(opts["slow_secs"])
@@ -105,7 +105,7 @@ class FakeClient:
         return self.armoury_inflight > 0
 
     async def call(self, cmd, args=None, timeout=10.0):
-        armoury = cmd.startswith("armoury_")
+        armoury = cmd in ("armoury_stop", "armoury_restore")
         if armoury:
             self.armoury_inflight += 1
         try:

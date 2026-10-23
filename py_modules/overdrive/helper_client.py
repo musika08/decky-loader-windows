@@ -7,9 +7,10 @@ Restarts: when the helper exits it is started again after 1, 2, 4, 4 ... s; at m
 that the client stays unavailable (unavailable_reason) until the plugin is reloaded. Calls in flight when the helper
 exits resolve at once with RESTARTED; a reply that arrives after its call gave up is dropped, never applied.
 
-Hung helper (ruling P11): two non-armoury calls in a row that time out kill the helper, which then restarts within
-the same budget. Calls that overlapped an armoury_* call never count: the single-threaded helper may legitimately be
-busy for many minutes stopping or starting services, and it is never killed while an armoury_* call is in flight.
+Hung helper (ruling P11): two calls in a row that time out kill the helper, which then restarts within the same
+budget. Only armoury_stop and armoury_restore are long service calls ("busy"): calls that overlapped one never count,
+the helper is never killed while one is in flight, and after one times out the helper gets a grace period
+(ARMOURY_GRACE) because it may still be finishing the service work. armoury_state is an ordinary read.
 """
 import asyncio
 import json
@@ -27,6 +28,8 @@ MAX_STARTS = 5
 WINDOW = 600.0
 READ_LIMIT = 1 << 20
 TIMEOUTS_BEFORE_KILL = 2
+LONG_ARMOURY = ("armoury_stop", "armoury_restore")
+ARMOURY_GRACE = 60.0   # one more listed service's worst case (30 s stop, doubled by a rollback)
 
 StartProcess = Callable[[], Awaitable["asyncio.subprocess.Process"]]
 
@@ -36,13 +39,14 @@ def failure(message: str, data=None) -> dict:
 
 
 def is_armoury(cmd: str) -> bool:
-    return cmd.startswith("armoury_")
+    """A long service call (stop/restore). armoury_state is a normal read and is not one."""
+    return cmd in LONG_ARMOURY
 
 
 class HelperClient:
     def __init__(self, start_process: Optional[StartProcess] = None, *, plugin_dir: Optional[str] = None,
                  runtime_dir: Optional[str] = None, sleep=asyncio.sleep, clock=time.monotonic,
-                 logger: Optional[logging.Logger] = None):
+                 logger: Optional[logging.Logger] = None, default_timeout: float = 10.0):
         self._start_process = start_process or self._spawn
         self._plugin_dir = plugin_dir or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self._runtime_dir = runtime_dir
@@ -60,9 +64,12 @@ class HelperClient:
         self._armoury_epoch = 0          # bumped whenever an armoury_* call starts
         self._armoury_until = 0.0        # loop time by which every armoury_* call in flight has given up
         self._timeouts = 0               # consecutive non-armoury timeouts
+        self._grace_until = 0.0          # after a long armoury call timed out, no kills before this loop time
+        self.armoury_grace = ARMOURY_GRACE
         self._kill_reason = ""
         self.last_error = ""
         self.unavailable_reason = ""
+        self.default_timeout = default_timeout
 
     @property
     def exe_path(self) -> str:
@@ -70,7 +77,7 @@ class HelperClient:
 
     @property
     def busy(self) -> bool:
-        """True while an armoury_* call is in flight."""
+        """True while armoury_stop or armoury_restore is in flight."""
         return self._armoury_inflight > 0
 
     async def _spawn(self):
@@ -230,7 +237,10 @@ class HelperClient:
 
     # ---------- calls ----------
 
-    async def call(self, cmd: str, args: Optional[dict] = None, timeout: float = 10.0) -> dict:
+    async def call(self, cmd: str, args: Optional[dict] = None, timeout: Optional[float] = None) -> dict:
+        """Sends one request; timeout None means default_timeout (10 s)."""
+        if timeout is None:
+            timeout = self.default_timeout
         if self._stopping:
             return failure(STOPPING)
         if self.unavailable_reason:
@@ -281,7 +291,12 @@ class HelperClient:
         try:
             return await asyncio.wait_for(exchange(), max(deadline - loop.time(), 0.01))
         except asyncio.TimeoutError:
-            overlapped = self._armoury_inflight > 0 or epoch != self._armoury_epoch
+            if armoury:
+                # The helper may still be finishing the service work: start counting afresh, after a grace period.
+                self._timeouts = 0
+                self._grace_until = max(self._grace_until, loop.time() + self.armoury_grace)
+            overlapped = (self._armoury_inflight > 0 or epoch != self._armoury_epoch
+                          or loop.time() < self._grace_until)
             if not armoury and not overlapped and proc is self._proc:
                 self._timeouts += 1
                 if self._timeouts >= TIMEOUTS_BEFORE_KILL:

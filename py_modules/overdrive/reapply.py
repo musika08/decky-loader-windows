@@ -93,6 +93,8 @@ class Reapplier:
         self._task: Optional[asyncio.Task] = None
         self._wall = self._mono = None
         self._ac: Optional[bool] = None
+        self.busy_check: Optional[Callable[[], bool]] = None   # main.py: an Armoury operation is running
+        self._deferring = False
 
     # ---------- user changes ----------
 
@@ -106,7 +108,16 @@ class Reapplier:
     # ---------- applying ----------
 
     def _busy(self) -> bool:
-        return bool(getattr(self.client, "busy", False))
+        if getattr(self.client, "busy", False):
+            return True
+        return bool(self.busy_check and self.busy_check())
+
+    def _defer(self) -> None:
+        """Remember to reapply once the Armoury operation is over; logged once per deferral, not every poll."""
+        self.rerun = True
+        if not self._deferring:
+            self._deferring = True
+            self.log.info("Reapply deferred while Armoury Crate services are being switched")
 
     async def _step(self, gen: int, cmd: str, args: dict) -> dict:
         async with self.lock:
@@ -139,8 +150,9 @@ class Reapplier:
         if self._busy():
             # An armoury_* call holds the single-threaded helper for minutes: queueing behind it would only time
             # out and then run later. Try again at the next poll.
-            self.rerun = True
+            self._defer()
             return False
+        self._deferring = False
         await self.read_default_curves()
         s = self.settings
         if not s.user_set:
@@ -206,6 +218,9 @@ class Reapplier:
         if self.rerun:
             reasons.append("redo after a newer change")
         if not reasons:
+            return False
+        if self._busy():
+            self._defer()
             return False
         self.log.info(f"Reapplying ({', '.join(reasons)})")
         try:

@@ -173,6 +173,31 @@ def test_no_reapply_while_armoury_call_runs(tmp_path):
     run(go())
 
 
+def test_deferral_is_logged_once(tmp_path, caplog):
+    async def go():
+        c = FakeClient()
+        s = make(tmp_path, default_curve={m: LOW for m in ("balanced", "turbo", "silent")})
+        clock = Clock()
+        r = Reapplier(c, s, clock=clock, power_source=Power())
+        r.prime()
+        busy = [True]
+        r.busy_check = lambda: busy[0]
+        r.rerun = True
+        with caplog.at_level("INFO", logger="overdrive"):
+            for _ in range(5):
+                clock.step(5)
+                assert await r.tick() is False
+            msgs = [rec.getMessage() for rec in caplog.records]
+            assert msgs.count("Reapply deferred while Armoury Crate services are being switched") == 1
+            assert not any(m.startswith("Reapplying") for m in msgs)
+            assert c.calls == [] and r.rerun is True
+            busy[0] = False
+            clock.step(5)
+            assert await r.tick() is True
+            assert c.writes()
+    run(go())
+
+
 def test_reapply_does_not_overwrite_newer_user_change(tmp_path):
     async def go():
         c = FakeClient()

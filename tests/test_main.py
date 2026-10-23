@@ -322,6 +322,120 @@ def test_busy_while_armoury_call_runs(tmp_path):
     run(go())
 
 
+def test_hung_helper_with_get_state_polling_ends_unavailable_not_busy(tmp_path):
+    from overdrive.helper_client import HelperClient
+
+    class HungProc:
+        """A helper that reads requests and never answers."""
+        def __init__(self):
+            self.returncode = None
+            self.stdout = asyncio.StreamReader()
+            proc = self
+
+            class In:
+                def write(self, b):
+                    pass
+
+                async def drain(self):
+                    pass
+
+                def close(self):
+                    proc.kill()
+            self.stdin = In()
+
+        def kill(self):
+            if self.returncode is None:
+                self.returncode = -9
+                self.stdout.feed_eof()
+
+        async def wait(self):
+            return self.returncode
+
+    async def go():
+        async def start():
+            return HungProc()
+
+        async def no_sleep(d):
+            pass
+        client = HelperClient(start_process=start, sleep=no_sleep, default_timeout=0.1)
+        p, c, s = plugin_with(tmp_path, client=client)
+        try:
+            for _ in range(100):
+                if client.unavailable_reason:
+                    break
+                states = await asyncio.gather(p.get_state(), p.get_state())
+                assert all(st["busy"] is False for st in states)
+            st = await p.get_state()
+            assert st["busy"] is False
+            assert "5 times in 10 minutes" in st["unavailable"]
+        finally:
+            await client.stop()
+    run(go())
+
+
+def test_setter_waiting_for_lock_is_refused_when_switch_begins(tmp_path):
+    async def go():
+        c = FakeClient()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_stop(args):
+            entered.set()
+            await release.wait()
+            return ok({})
+        c.handlers["armoury_stop"] = slow_stop
+        p, c, s = plugin_with(tmp_path, client=c)
+        gate = asyncio.Event()
+
+        async def hold():
+            async with p.reapplier.user_change():
+                await gate.wait()
+        holder = asyncio.ensure_future(hold())
+        await asyncio.sleep(0)
+        setter = asyncio.ensure_future(p.set_mode("turbo"))     # passes the first check, waits for the lock
+        await asyncio.sleep(0.05)
+        switch = asyncio.ensure_future(p.set_armoury_replaced(True))
+        await entered.wait()
+        gate.set()
+        r = await setter
+        assert r["message"] == "Overdrive is switching Armoury Crate services. Try again when it finishes."
+        assert all(cmd != "set_mode" for cmd, _ in c.calls)
+        release.set()
+        await asyncio.gather(holder, switch)
+    run(go())
+
+
+def test_load_skips_restop_when_state_unreadable(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def state_fails(args):
+            return fail("Overdrive helper did not answer in 10 s.")
+        c.handlers["armoury_state"] = state_fails
+        p, c, s = plugin_with(tmp_path, client=c, armoury_replaced=True,
+                              armoury_recorded={"ArmouryCrateService": "Automatic"})
+        await p._startup_sequence()
+        assert all(cmd != "armoury_stop" for cmd, _ in c.calls)
+        st = await p.get_state()
+        assert "were not stopped again" in st["warning"] and "did not answer" in st["warning"]
+        assert p.reapplier._task is not None
+        await p.reapplier.stop()
+    run(go())
+
+
+def test_armoury_on_shows_real_reason_when_state_unreadable(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def state_fails(args):
+            return fail("Overdrive helper stopped 5 times in 10 minutes. Last error: x")
+        c.handlers["armoury_state"] = state_fails
+        p, c, s = plugin_with(tmp_path, client=c)
+        r = await p.set_armoury_replaced(True)
+        assert r["ok"] is False and "stopped 5 times in 10 minutes" in r["message"]
+        assert all(cmd != "armoury_stop" for cmd, _ in c.calls)
+    run(go())
+
+
 def test_unload_waits_for_armoury_switch(tmp_path):
     async def go():
         c = FakeClient()

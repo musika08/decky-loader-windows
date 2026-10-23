@@ -63,6 +63,8 @@ class Plugin:
 
     def _attach(self, client, settings, reapplier) -> None:
         self.client, self.settings, self.reapplier = client, settings, reapplier
+        if reapplier is not None:
+            reapplier.busy_check = self._busy
 
     def _busy(self) -> bool:
         return self._armoury_busy or bool(getattr(self.client, "busy", False))
@@ -193,6 +195,8 @@ class Plugin:
         elif spl is not None or sppt is not None or fppt is not None:
             return _fail("Power limits can only be set in Manual mode.")
         async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
             r = await self.client.call("set_mode", args)
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
@@ -214,6 +218,8 @@ class Plugin:
         if fps not in ALLOWED_FPS:
             return _fail("FPS limit must be off or one of 30, 40, 45, 50, 60, 75, 90, 120.")
         async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
             r = await self.client.call("set_fps_limit", {"fps": fps})   # 0 = off at the protocol level
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
@@ -231,6 +237,8 @@ class Plugin:
         if name == "custom" and not s.fan_curve:
             return _fail("There is no custom fan curve yet; use Edit curve first.")
         async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
             old = s.fan_preset
             s.fan_preset = name
             curve, note, warn = fan_plan(s)
@@ -257,6 +265,8 @@ class Plugin:
         if reason:
             return _fail(reason)
         async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
             r = await self.client.call("set_fans", {"temps": t, "speeds": sp})
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
@@ -274,6 +284,8 @@ class Plugin:
             return refused
         s = self.settings
         async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
             r = await self.client.call("set_mode", {"mode": "balanced"})
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
@@ -299,16 +311,12 @@ class Plugin:
     @contextlib.asynccontextmanager
     async def _armoury_op(self):
         async with self._armoury_lock:
-            self._armoury_busy = True
-            self._armoury_until = asyncio.get_running_loop().time() + 30.0
-            try:
-                yield
-            finally:
-                self._armoury_busy = False
+            yield
 
     async def _armoury_timeout(self, extra_running: int):
-        """(timeout, armoury_state data or None). Timeout = max(5 min, 60 s per listed service running now + 60 s);
-        all listed services count when the state is unknown."""
+        """(timeout, armoury_state data or None, failure message). armoury_state is an ordinary read (normal timeout,
+        not busy). Timeout = max(5 min, 60 s per listed service running now + 60 s); all listed services count when
+        the state is unknown."""
         r = await self.client.call("armoury_state")
         d = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else None
         if d is not None:
@@ -317,11 +325,17 @@ class Plugin:
         else:
             n = len(ARMOURY_SERVICES)
         n = max(n, extra_running)
-        return max(ARMOURY_MIN_TIMEOUT, ARMOURY_PER_SERVICE * n + 60.0), d
+        message = "" if d is not None else str(r.get("message") or "no answer")
+        return max(ARMOURY_MIN_TIMEOUT, ARMOURY_PER_SERVICE * n + 60.0), d, message
 
     async def _armoury_call(self, cmd: str, args, timeout: float) -> dict:
+        """armoury_stop / armoury_restore: busy (P12) for exactly as long as the call runs."""
         self._armoury_until = asyncio.get_running_loop().time() + timeout + 5.0
-        return await self.client.call(cmd, args, timeout)
+        self._armoury_busy = True
+        try:
+            return await self.client.call(cmd, args, timeout)
+        finally:
+            self._armoury_busy = False
 
     def _merge_new_services(self, data) -> bool:
         """Adds services that are missing from a non-empty record (installed later), never changing an entry."""
@@ -342,7 +356,13 @@ class Plugin:
         # Ruling P8: stopped-but-Automatic services may have come back after a reboot, so stop them again while the
         # switch is on. Only the first switch-on records the start types; this run never overwrites them.
         async with self._armoury_op():
-            timeout, state = await self._armoury_timeout(0)
+            timeout, state, why = await self._armoury_timeout(0)
+            if state is None:
+                # Never stop blind (an unknown state means the all-services timeout on a possibly hung helper).
+                self._armoury_warning = ("Armoury Crate services could not be checked at load, so they were not "
+                                         f"stopped again: {why}")
+                decky.logger.warning(self._armoury_warning)
+                return
             if self._merge_new_services(state):
                 self._save()
             r = await self._armoury_call("armoury_stop", None, timeout)
@@ -365,9 +385,9 @@ class Plugin:
         s = self.settings
         if s.armoury_replaced:
             return {"ok": True, "message": ""}
-        timeout, state = await self._armoury_timeout(0)
+        timeout, state, why = await self._armoury_timeout(0)
         if state is None:
-            return _fail("Could not read the Armoury Crate services, so nothing was changed.")
+            return _fail(f"Could not read the Armoury Crate services ({why}), so nothing was changed.")
         provisional = not s.armoury_recorded
         if provisional:
             types, running = _clean_record(state)
@@ -413,7 +433,7 @@ class Plugin:
             msg = self._save()
             return {"ok": True, "message": ("No recorded Armoury Crate state was found, so the services were left as "
                                             "they are. " + msg).strip()}
-        timeout, _ = await self._armoury_timeout(len(s.armoury_running))
+        timeout, _, _ = await self._armoury_timeout(len(s.armoury_running))
         r = await self._armoury_call("armoury_restore",
                                      {"recorded": dict(s.armoury_recorded), "running": list(s.armoury_running)},
                                      timeout)

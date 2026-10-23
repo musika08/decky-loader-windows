@@ -218,6 +218,46 @@ def test_timeouts_during_armoury_call_never_kill():
     asyncio.run(run())
 
 
+def test_armoury_state_is_a_normal_read():
+    async def run():
+        c = HelperClient(start_process=spawner("--hang-on", "armoury_state,sensors"), sleep=Sleeps(),
+                         default_timeout=0.2)
+        try:
+            await c.call("hello")
+            for _ in range(60):
+                if c.unavailable_reason:
+                    break
+                polls = asyncio.gather(c.call("armoury_state"), c.call("armoury_state"), c.call("sensors"))
+                await asyncio.sleep(0.05)
+                assert c.busy is False                     # a state read never counts as a service switch
+                await polls
+            assert "did not answer" in c.unavailable_reason
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_grace_after_armoury_timeout():
+    async def run():
+        starts = []
+        c = HelperClient(start_process=spawner("--slow-on", "armoury_stop", "--slow-secs", "1.5",
+                                               "--hang-on", "sensors", counter=starts), sleep=Sleeps())
+        try:
+            await c.call("hello")
+            first = c._proc
+            r = await c.call("armoury_stop", timeout=0.3)
+            assert "did not answer" in r["message"]
+            assert c.busy is False
+            # the helper is still stopping services: the next reads time out but must not kill it
+            for _ in range(3):
+                assert "did not answer" in (await c.call("sensors", timeout=0.2))["message"]
+            assert c._proc is first and len(starts) == 1
+            assert (await c.call("hello", timeout=5))["ok"] is True
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
 def test_stop_waits_for_armoury_call():
     async def run():
         c = HelperClient(start_process=spawner("--slow-on", "armoury_stop", "--slow-secs", "1"))
