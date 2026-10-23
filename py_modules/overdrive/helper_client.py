@@ -28,6 +28,9 @@ MAX_STARTS = 5
 WINDOW = 600.0
 READ_LIMIT = 1 << 20
 TIMEOUTS_BEFORE_KILL = 2
+# Auto TDP's frame sample has a short timeout (2 s, every 300 ms): its timeouts do not count toward a kill, so a short
+# helper stall does not kill the helper. Its own failures pause Auto TDP, whose mode write then counts as usual.
+NOT_COUNTED = ("frame_sample",)
 LONG_ARMOURY = ("armoury_stop", "armoury_restore")
 ARMOURY_GRACE = 60.0   # one more listed service's worst case (30 s stop, doubled by a rollback)
 
@@ -300,7 +303,7 @@ class HelperClient:
                 self._grace_until = max(self._grace_until, loop.time() + self.armoury_grace)
             overlapped = (self._armoury_inflight > 0 or epoch != self._armoury_epoch
                           or loop.time() < self._grace_until)
-            if not armoury and not overlapped and proc is self._proc:
+            if not armoury and not overlapped and proc is self._proc and cmd not in NOT_COUNTED:
                 self._timeouts += 1
                 if self._timeouts >= TIMEOUTS_BEFORE_KILL:
                     self._timeouts = 0

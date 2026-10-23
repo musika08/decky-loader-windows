@@ -353,3 +353,22 @@ def test_default_start_uses_bin_exe_without_window(monkeypatch, tmp_path):
     if os.name == "nt":
         assert seen["kw"]["creationflags"] & 0x08000000
     assert seen["kw"]["cwd"] == str(tmp_path / "rt")
+
+
+def test_frame_sample_timeouts_never_kill():
+    async def run():
+        starts = []
+        c = HelperClient(start_process=spawner("--hang-on", "frame_sample,sensors", counter=starts), sleep=Sleeps())
+        try:
+            await c.call("hello")
+            first = c._proc
+            for _ in range(3):   # Auto TDP's short samples time out during a helper stall
+                assert "did not answer" in (await c.call("frame_sample", {}, 0.2))["message"]
+            assert c._proc is first and len(starts) == 1
+            # they do not add to other calls' count either: one more timeout alone kills nothing
+            assert "did not answer" in (await c.call("sensors", timeout=0.2))["message"]
+            assert c._proc is first
+            assert (await c.call("hello"))["ok"] is True
+        finally:
+            await c.stop()
+    asyncio.run(run())
