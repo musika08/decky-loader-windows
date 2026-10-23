@@ -37,11 +37,13 @@ def get_ssl_context():
 def get_csrf_token():
     return csrf_token
 
+PUBLIC_STATUS_ROUTES = ("/status/frontend", "/status/safe-mode")
+
 def is_public_status(request: Request) -> bool: # pyright: ignore [reportUnknownParameterType]
     '''Read-only status other local apps may poll without the token (see PluginManager.get_frontend_status).'''
     # The raw path too: a percent-encoded spelling (e.g. /status%2Ffrontend) must not be exempt
     url = request.rel_url # pyright: ignore [reportUnknownMemberType, reportUnknownVariableType]
-    return str(url.raw_path) == "/status/frontend" and str(url.path) == "/status/frontend" # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
+    return any(str(url.raw_path) == route and str(url.path) == route for route in PUBLIC_STATUS_ROUTES) # pyright: ignore [reportUnknownMemberType, reportUnknownArgumentType]
 
 @middleware
 async def csrf_middleware(request: Request, handler: Handler):
