@@ -164,6 +164,18 @@ export function autoTdpLine(s: { watts: number | null; fps: number | null; best:
   return 'Auto TDP: ' + show(s.watts) + ' W · ' + fps + ' FPS' + best;
 }
 
+// The line under the switch from a sensors reply: the live line while the loop runs, and the device's message once a
+// refusal stopped it (the loop is off then but the stored switch stays on). Null when there is nothing to show.
+export function autoTdpLiveLine(s: { on: boolean; watts: number | null; fps: number | null; best: number | null; paused: string } | null | undefined): string | null {
+  if (!s || !(s.on || s.paused)) return null;
+  return autoTdpLine(s);
+}
+
+// The switch can always be turned off; it can only be turned on when the driver offers the frame-rate reading.
+export function autoTdpToggleDisabled(supported: boolean, on: boolean): boolean {
+  return !supported && !on;
+}
+
 // Power limits line outside Manual: the firmware's limits apply. The device reads 0 (not reported) on the Ally,
 // so watts are only added when it reports real values.
 export function powerLine(spl: number | null | undefined, sppt: number | null | undefined, fppt: number | null | undefined): string {

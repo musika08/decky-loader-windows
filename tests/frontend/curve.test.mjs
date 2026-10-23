@@ -139,3 +139,18 @@ test('Auto TDP texts', async () => {
   assert.equal(modePowerLine('other', true), null);
   assert.equal(AUTO_TDP_UNSUPPORTED, "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer.");
 });
+
+test('Auto TDP line after a refusal and the switch when unsupported', async () => {
+  const { autoTdpLiveLine, autoTdpToggleDisabled } = await import('../../src/curve.ts');
+  const idle = { on: false, watts: null, fps: null, best: null, paused: '' };
+  assert.equal(autoTdpLiveLine({ ...idle, on: true, watts: 11, fps: 60 }), 'Auto TDP: 11 W · 60 FPS');
+  // a set_power refusal stops the loop (on false) and leaves the device's message: it is still shown
+  assert.equal(autoTdpLiveLine({ ...idle, paused: 'The power limit was refused by the firmware.' }),
+    'The power limit was refused by the firmware.');
+  assert.equal(autoTdpLiveLine(idle), null);
+  assert.equal(autoTdpLiveLine(undefined), null);
+  assert.equal(autoTdpToggleDisabled(true, false), false);
+  assert.equal(autoTdpToggleDisabled(true, true), false);
+  assert.equal(autoTdpToggleDisabled(false, true), false);   // stored on but unsupported: can be turned off
+  assert.equal(autoTdpToggleDisabled(false, false), true);   // cannot be turned on
+});

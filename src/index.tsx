@@ -27,7 +27,8 @@ import {
   MODE_OTHER_TEXT,
   Preset,
   autoTdpDescription,
-  autoTdpLine,
+  autoTdpLiveLine,
+  autoTdpToggleDisabled,
   defaultDraft,
   liveLines,
   minSpeedAt,
@@ -689,7 +690,7 @@ function Content() {
         const s = await getSensors();
         if (!mounted.current) return;
         setSensors(s.ok ? liveLines(s) : [s.message || 'Sensors not available']);
-        setAutoLine(s.ok && s.autoTdp?.on ? autoTdpLine(s.autoTdp) : null);
+        setAutoLine(s.ok ? autoTdpLiveLine(s.autoTdp) : null);
         setCpuTemp(s.ok && typeof s.cpuTempC === 'number' && isFinite(s.cpuTempC) ? s.cpuTempC : null);
         setGpuTemp(s.ok && typeof s.gpuTempC === 'number' && isFinite(s.gpuTempC) ? s.gpuTempC : null);
       } catch (e) {
@@ -990,7 +991,7 @@ function Content() {
             description={state.auto_tdp?.supported ? autoTdpDescription(state.fps) : undefined}
             // Steam's toggle flips itself on every press, so it is fed the target while switching, else the stored state.
             checked={autoTarget ?? !!state.auto_tdp?.on}
-            disabled={disabled || !state.auto_tdp?.supported}
+            disabled={disabled || autoTdpToggleDisabled(!!state.auto_tdp?.supported, !!state.auto_tdp?.on)}
             onChange={toggleAutoTdp}
           />
         </PanelSectionRow>
