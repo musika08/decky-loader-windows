@@ -22,6 +22,9 @@ namespace Overdrive.Helper
     public sealed class SystemControls : ISystemControls
     {
         private const string TouchFilter = "*touch*screen*";
+        // One device for both the read and the change: the exact "HID-compliant touch screen" if present, else the
+        // first match by InstanceId. Fixed text, no client input.
+        private const string PickDevice = "Get-PnpDevice -FriendlyName '" + TouchFilter + "' | Sort-Object @{Expression={$_.FriendlyName -ne 'HID-compliant touch screen'}}, InstanceId | Select-Object -First 1";
         private const int ReadTimeoutMs = 5000;
         private const int SetTimeoutMs = 15000;
 
@@ -34,19 +37,20 @@ namespace Overdrive.Helper
         public TouchInfo GetTouchscreen()
         {
             var info = new TouchInfo();
-            string cmd = "Get-PnpDevice -FriendlyName '" + TouchFilter + "' | Select-Object -First 1 | ForEach-Object { $_.Status + '|' + $_.InstanceId }";
+            string cmd = PickDevice + " | ForEach-Object { $_.Status + '|' + $_.InstanceId }";
             try
             {
                 bool timedOut = false;
-                using (Process p = Start(cmd, true))
+                using (Process p = Start(cmd))
                 {
+                    p.BeginErrorReadLine();   // stderr is discarded
                     // Read stdout on this thread; a hung PowerShell is killed by the timer so the read ends.
                     using (var t = new Timer(delegate { timedOut = true; Kill(p); }, null, ReadTimeoutMs, Timeout.Infinite))
                     {
                         string line = null;
                         string l;
                         while ((l = p.StandardOutput.ReadLine()) != null)
-                            if (l.Trim().Length > 0 && line == null) line = l.Trim();
+                            if (line == null && l.IndexOf('|') >= 0) line = l.Trim();
                         p.WaitForExit(1000);
                         if (!p.HasExited) { Kill(p); }
                         if (timedOut && line == null)
@@ -82,12 +86,16 @@ namespace Overdrive.Helper
                     return false;
                 }
                 string verb = enabled ? "Enable-PnpDevice" : "Disable-PnpDevice";
-                string cmd = "Get-PnpDevice -FriendlyName '" + TouchFilter + "' | ForEach-Object { " + verb + " -InstanceId $_.InstanceId -Confirm:$false }";
+                string cmd = PickDevice + " | ForEach-Object { " + verb + " -InstanceId $_.InstanceId -Confirm:$false }";
                 try
                 {
-                    Process p = Start(cmd, false);
+                    // The previous change has finished (checked above): release it and its timer.
+                    if (killTimer != null) { killTimer.Dispose(); killTimer = null; }
+                    if (setProcess != null) { setProcess.Dispose(); setProcess = null; }
+                    Process p = Start(cmd);
+                    p.BeginOutputReadLine();   // output is discarded so it never reaches the helper's stdout
+                    p.BeginErrorReadLine();
                     setProcess = p;
-                    if (killTimer != null) killTimer.Dispose();
                     // Kills the process if it is still running after 15 s. Touches nothing but the process.
                     killTimer = new Timer(delegate { Kill(p); }, null, SetTimeoutMs, Timeout.Infinite);
                     return true;
@@ -100,7 +108,9 @@ namespace Overdrive.Helper
             }
         }
 
-        private static Process Start(string command, bool redirectOut)
+        // The child gets its own redirected stdin, stdout and stderr, so it never shares the helper's request pipe or
+        // reply stream. stdin is closed at once.
+        private static Process Start(string command)
         {
             var psi = new ProcessStartInfo("powershell.exe");
             // The command has no double quotes; it only uses single quotes.
@@ -108,8 +118,14 @@ namespace Overdrive.Helper
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             psi.WindowStyle = ProcessWindowStyle.Hidden;
-            psi.RedirectStandardOutput = redirectOut;
-            return Process.Start(psi);
+            psi.RedirectStandardInput = true;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            Process p = Process.Start(psi);
+            try { p.StandardInput.Close(); } catch (Exception) { }
+            p.OutputDataReceived += delegate { };
+            p.ErrorDataReceived += delegate { };
+            return p;
         }
 
         private static void Kill(Process p)
@@ -123,17 +139,28 @@ namespace Overdrive.Helper
         private const string GpuKey = @"Software\Microsoft\DirectX\UserGpuPreferences";
         private const string GpuValue = "DirectXUserGlobalSettings";
 
-        public string ReadGpuSettings()
+        // A missing key or value is a normal null. A read error or a value that is not a string is a failure (err set),
+        // so a caller never mistakes it for "not set" and overwrites the other pairs.
+        public string ReadGpuSettings(out string err)
         {
+            err = null;
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(GpuKey, false))
                 {
                     if (k == null) return null;
-                    return k.GetValue(GpuValue) as string;
+                    object v = k.GetValue(GpuValue);
+                    if (v == null) return null;
+                    string s = v as string;
+                    if (s == null) err = "The graphics setting is not a text value.";
+                    return s;
                 }
             }
-            catch (Exception) { return null; }
+            catch (Exception ex)
+            {
+                err = "Could not read the graphics setting: " + ex.Message;
+                return null;
+            }
         }
 
         public bool WriteGpuSettings(string value, out string err)

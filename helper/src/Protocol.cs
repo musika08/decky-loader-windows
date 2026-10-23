@@ -710,7 +710,14 @@ namespace Overdrive.Helper
             bool installed = SystemControls.AutoSrInstalled();
             var d = new Dictionary<string, object>();
             d["installed"] = installed;
-            int? v = installed ? AutoSr.Read(SystemControls.ReadGpuSettings()) : null;
+            int? v = null;
+            if (installed)
+            {
+                string err;
+                string settings = SystemControls.ReadGpuSettings(out err);
+                if (err != null) return Reply(id, false, err, null);
+                v = AutoSr.Read(settings);
+            }
             d["value"] = v.HasValue ? (object)v.Value : null;
             return Reply(id, true, "", d);
         }
@@ -722,7 +729,9 @@ namespace Overdrive.Helper
             if (!GetBool(args, "on", out on, out err)) return Reply(id, false, err, null);
             if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
             if (!SystemControls.AutoSrInstalled()) return Reply(id, false, AutoSrNotInstalled, null);
-            string next = AutoSr.Write(SystemControls.ReadGpuSettings(), on);
+            string current = SystemControls.ReadGpuSettings(out err);
+            if (err != null) return Reply(id, false, err, null);   // never write over a value that could not be read
+            string next = AutoSr.Write(current, on);
             if (!SystemControls.WriteGpuSettings(next, out err))
                 return Reply(id, false, err ?? "The graphics setting could not be written.", null);
             var d = new Dictionary<string, object>();

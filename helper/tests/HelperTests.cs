@@ -1347,6 +1347,22 @@ namespace Overdrive.Helper.Tests
             True(!Ok(f) && Msg(f) == "registry write failed", "write failure reported: " + Msg(f));
         }
 
+        public static void AutoSr_ReadErrorIsNotTreatedAsNotSet()
+        {
+            var rig = new Rig();
+            rig.Sys.GpuReadError = "Could not read the graphics setting: access denied";
+            var set = rig.Send("{\"id\":1,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}");
+            True(!Ok(set) && Msg(set).Contains("access denied"), "set refused on a read error: " + Msg(set));
+            Equal(0, rig.Sys.GpuWrites.Count, "other pairs never overwritten");
+            var get = rig.Send("{\"id\":2,\"cmd\":\"get_auto_sr\"}");
+            True(!Ok(get) && Msg(get).Contains("access denied"), "get reports the read error: " + Msg(get));
+            // a missing value is normal: set writes just the pair
+            rig.Sys.GpuReadError = null;
+            rig.Sys.Gpu = null;
+            True(Ok(rig.Send("{\"id\":3,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}")), "missing value is fine");
+            SeqEqual(new[] { "DXGIEffects=1024;" }, rig.Sys.GpuWrites, "pair appended to nothing");
+        }
+
         public static void AutoSr_NotInstalledRefused()
         {
             var rig = new Rig();

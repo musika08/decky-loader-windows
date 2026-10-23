@@ -192,7 +192,9 @@ namespace Overdrive.Helper.Tests
             return true;
         }
 
-        public string ReadGpuSettings() { return Gpu; }
+        public string GpuReadError;     // simulates a registry read failure
+
+        public string ReadGpuSettings(out string err) { err = GpuReadError; return err != null ? null : Gpu; }
 
         public bool WriteGpuSettings(string value, out string err)
         {

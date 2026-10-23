@@ -31,7 +31,9 @@ namespace Overdrive.Helper
             return null;
         }
 
-        // Replaces only the DXGIEffects pair (appended when missing); every other pair is kept as is, in order.
+        // Replaces only the DXGIEffects pair (appended when missing). Every other pair keeps its text and order, but the
+        // string is rebuilt: empty segments are dropped, every pair ends with ";" (also when the input had no trailing
+        // ";"), and a repeated DXGIEffects pair after the first is removed.
         public static string Write(string settings, bool on)
         {
             string newPair = Key + "=" + (on ? On : Off);

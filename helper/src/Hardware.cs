@@ -128,7 +128,8 @@ namespace Overdrive.Helper
         // running. False (with err) when it could not start or a previous change is still running.
         bool StartSetTouchscreen(bool enabled, out string err);
         // HKCU\Software\Microsoft\DirectX\UserGpuPreferences, DirectXUserGlobalSettings, or null when not set.
-        string ReadGpuSettings();
+        // A missing key or value gives null with err null; a read error sets err.
+        string ReadGpuSettings(out string err);
         bool WriteGpuSettings(string value, out string err);
         // True when a Microsoft.AutoSuperResolution2_* package folder exists; an access error counts as not installed.
         bool AutoSrInstalled();
