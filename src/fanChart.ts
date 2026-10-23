@@ -2,7 +2,8 @@
 // directly (same rule as curve.ts). The panel passes validateCurve's reason and minSpeedAt in from curve.ts.
 
 export type ChartCurve = { temps: number[]; speeds: number[] };
-export type EditMode = 'point' | 'temp';
+// 'idle': the chart is only focused and the D-pad navigates past it; 'point' / 'temp': engaged by A.
+export type EditMode = 'idle' | 'point' | 'temp';
 
 export const TEMP_MIN = 20;
 export const TEMP_MAX = 110;
@@ -152,13 +153,47 @@ export function invalidPoint(reason: string | null | undefined): number {
   return m ? Number(m[1]) - 1 : -1;
 }
 
+// ---------- controller state machine ----------
+
+export type Direction = 'up' | 'down' | 'left' | 'right';
+
+// What a D-pad press does in a mode. 'navigate' means the chart must not take the press (Steam moves focus).
+export type ChartAction =
+  | { kind: 'navigate' }
+  | { kind: 'select'; dir: number }
+  | { kind: 'temp'; delta: number }
+  | { kind: 'speed'; delta: number };
+
+export function directionAction(mode: EditMode, d: Direction): ChartAction {
+  if (mode === 'idle') return { kind: 'navigate' };
+  if (d === 'up' || d === 'down') return { kind: 'speed', delta: d === 'up' ? 1 : -1 };
+  const dir = d === 'right' ? 1 : -1;
+  return mode === 'temp' ? { kind: 'temp', delta: dir } : { kind: 'select', dir };
+}
+
+// A engages editing, then toggles point / temperature mode.
+export function pressA(mode: EditMode): EditMode {
+  return mode === 'point' ? 'temp' : 'point';
+}
+
+// B finishes editing. handled=false while idle: the press then does what B normally does.
+export function pressB(mode: EditMode): { mode: EditMode; handled: boolean } {
+  return mode === 'idle' ? { mode, handled: false } : { mode: 'idle', handled: true };
+}
+
+export function aLabel(mode: EditMode): string {
+  return mode === 'idle' ? 'Edit curve' : mode === 'point' ? 'Temperature mode' : 'Point mode';
+}
+
 // ---------- caption ----------
 
 export function caption(c: ChartCurve, i: number, mode: EditMode): { title: string; hint: string } {
   const title = 'Point ' + (i + 1) + ' · ' + c.temps[i] + ' °C · ' + c.speeds[i] + ' %';
   const hint =
-    mode === 'temp'
-      ? 'Temperature mode: left/right change °C, up/down change fan %, A to pick points'
-      : 'Point mode: left/right pick a point, up/down change fan %, A for temperature';
+    mode === 'idle'
+      ? 'Press A to edit the curve'
+      : mode === 'temp'
+        ? 'Editing temperature: left/right change °C, up/down change fan %, A for points · B to finish'
+        : 'Editing: left/right pick a point, up/down change fan %, A for temperature · B to finish';
   return { title, hint };
 }

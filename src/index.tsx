@@ -34,13 +34,16 @@ import {
 } from './curve';
 import {
   CHART,
+  Direction,
   EditMode,
   GRID_SPEEDS,
   GRID_TEMPS,
   LABEL_SPEEDS,
   LABEL_TEMPS,
   PLOT,
+  aLabel,
   caption,
+  directionAction,
   dragTo,
   fillPath,
   floorPath,
@@ -50,6 +53,8 @@ import {
   markerLabel,
   markerX,
   movePoint,
+  pressA,
+  pressB,
   selectNext,
   toChart,
   xOf,
@@ -302,25 +307,35 @@ function FanChartEditor(props: {
   onEdit: (fn: (c: Curve) => Curve) => void;
 }) {
   const { curve, selected, disabled, onSelect, onEdit } = props;
-  const [mode, setMode] = useState<EditMode>('point');
+  // Idle until A: a merely focused chart lets every D-pad press navigate, so it never traps focus.
+  const [mode, setMode] = useState<EditMode>('idle');
   const dragging = useRef(-1);
   const count = curve.temps.length;
+  const engaged = mode !== 'idle';
 
   const onButtonDown = (evt: CustomEvent<{ button: number; is_repeat?: boolean }>) => {
     const b = evt.detail?.button;
-    if (b !== BTN_UP && b !== BTN_DOWN && b !== BTN_LEFT && b !== BTN_RIGHT) return;
-    if (disabled) return;
+    const d: Direction | null =
+      b === BTN_UP ? 'up' : b === BTN_DOWN ? 'down' : b === BTN_LEFT ? 'left' : b === BTN_RIGHT ? 'right' : null;
+    if (d === null || disabled) return;
+    const act = directionAction(mode, d);
+    if (act.kind === 'navigate') return;
     // Held buttons arrive again with is_repeat from Steam's navigation, so holding keeps stepping.
-    if (b === BTN_UP || b === BTN_DOWN) {
-      onEdit((c) => movePoint(c, selected, 0, b === BTN_UP ? 1 : -1));
-    } else {
-      const dir = b === BTN_RIGHT ? 1 : -1;
-      if (mode === 'temp') onEdit((c) => movePoint(c, selected, dir, 0));
-      else onSelect(selectNext(selected, dir, count));
-    }
-    // Keep the press inside the chart instead of moving focus.
+    if (act.kind === 'speed') onEdit((c) => movePoint(c, selected, 0, act.delta));
+    else if (act.kind === 'temp') onEdit((c) => movePoint(c, selected, act.delta, 0));
+    else onSelect(selectNext(selected, act.dir, count));
+    // Engaged: keep the press inside the chart instead of moving focus.
     evt.preventDefault();
     evt.stopPropagation();
+  };
+
+  const onCancel = (evt: CustomEvent) => {
+    const r = pressB(mode);
+    if (!r.handled) return;
+    // Finish editing only; the menu must not close.
+    evt.preventDefault();
+    evt.stopPropagation();
+    setMode(r.mode);
   };
 
   const pointer = (e: ReactPointerEvent<SVGSVGElement>) => toChart(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
@@ -363,10 +378,20 @@ function FanChartEditor(props: {
     <Focusable
       onButtonDown={onButtonDown}
       onOKButton={() => {
-        if (!disabled) setMode((m) => (m === 'point' ? 'temp' : 'point'));
+        if (!disabled) setMode((m) => pressA(m));
       }}
-      onOKActionDescription={mode === 'point' ? 'Temperature mode' : 'Point mode'}
-      style={{ width: '100%' }}
+      onOKActionDescription={aLabel(mode)}
+      onCancelButton={onCancel}
+      onCancelActionDescription={engaged ? 'Finish editing' : undefined}
+      onGamepadBlur={() => setMode('idle')}
+      style={{
+        width: '100%',
+        borderRadius: '4px',
+        padding: '2px',
+        boxSizing: 'border-box',
+        border: engaged ? '1px solid ' + C_LINE : '1px solid transparent',
+        boxShadow: engaged ? '0 0 8px rgba(26, 159, 255, 0.6)' : 'none',
+      }}
     >
       <ChartSvg
         curve={curve}
@@ -379,7 +404,7 @@ function FanChartEditor(props: {
         onPointerEnd={onPointerEnd}
       />
       <div style={{ fontSize: '12px', color: '#dcdedf', marginTop: '4px' }}>{cap.title}</div>
-      <div style={{ fontSize: '11px', color: C_LABEL, whiteSpace: 'normal' }}>{cap.hint}</div>
+      <div style={{ fontSize: '11px', color: engaged ? C_LINE : C_LABEL, whiteSpace: 'normal' }}>{cap.hint}</div>
     </Focusable>
   );
 }

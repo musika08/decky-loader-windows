@@ -20,6 +20,10 @@ import {
   hitTest,
   invalidPoint,
   caption,
+  directionAction,
+  pressA,
+  pressB,
+  aLabel,
   linePath,
   fillPath,
   floorPath,
@@ -151,10 +155,13 @@ test('caption names the point and the active mode', () => {
   const c = { temps: [48, 54, 59, 62, 62, 62, 62, 62], speeds: [1, 9, 18, 22, 22, 22, 22, 22] };
   const p = caption(c, 2, 'point');
   assert.equal(p.title, 'Point 3 · 59 °C · 18 %');
-  assert.match(p.hint, /^Point mode/);
+  assert.match(p.hint, /^Editing: .* · B to finish$/);
+  const idle = caption(c, 2, 'idle');
+  assert.equal(idle.title, 'Point 3 · 59 °C · 18 %');
+  assert.equal(idle.hint, 'Press A to edit the curve');
   const t = caption(c, 2, 'temp');
   assert.equal(t.title, 'Point 3 · 59 °C · 18 %');
-  assert.match(t.hint, /^Temperature mode/);
+  assert.match(t.hint, /^Editing temperature: .* · B to finish$/);
 });
 
 test('paths: line through 8 points, closed fill, floor follows minSpeedAt', () => {
@@ -177,4 +184,34 @@ test('CPU temperature marker: position, clamping and label', () => {
   assert.equal(markerX(5), xOf(20));
   assert.equal(markerX(130), xOf(110));
   assert.equal(markerLabel(57.4), '57 °C');
+});
+
+test('focused but not engaged: every D-pad direction navigates (no trap)', () => {
+  for (const d of ['up', 'down', 'left', 'right']) assert.deepEqual(directionAction('idle', d), { kind: 'navigate' });
+  assert.equal(aLabel('idle'), 'Edit curve');
+});
+
+test('A engages, then toggles point and temperature mode', () => {
+  assert.equal(pressA('idle'), 'point');
+  assert.equal(pressA('point'), 'temp');
+  assert.equal(pressA('temp'), 'point');
+  assert.deepEqual(directionAction('point', 'left'), { kind: 'select', dir: -1 });
+  assert.deepEqual(directionAction('point', 'right'), { kind: 'select', dir: 1 });
+  assert.deepEqual(directionAction('point', 'up'), { kind: 'speed', delta: 1 });
+  assert.deepEqual(directionAction('point', 'down'), { kind: 'speed', delta: -1 });
+  assert.deepEqual(directionAction('temp', 'left'), { kind: 'temp', delta: -1 });
+  assert.deepEqual(directionAction('temp', 'right'), { kind: 'temp', delta: 1 });
+  assert.deepEqual(directionAction('temp', 'up'), { kind: 'speed', delta: 1 });
+});
+
+test('B finishes editing from either mode and is left alone while idle', () => {
+  assert.deepEqual(pressB('point'), { mode: 'idle', handled: true });
+  assert.deepEqual(pressB('temp'), { mode: 'idle', handled: true });
+  assert.deepEqual(pressB('idle'), { mode: 'idle', handled: false });
+  // A full round: engage, temperature, finish, and the D-pad navigates again.
+  let m = 'idle';
+  m = pressA(m);
+  m = pressA(m);
+  m = pressB(m).mode;
+  assert.deepEqual(directionAction(m, 'down'), { kind: 'navigate' });
 });
