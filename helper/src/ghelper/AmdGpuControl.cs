@@ -13,7 +13,9 @@
 // null for the marshaller. Read-only iGPU sensors: Sensor (196-200) and GetiGpuSensors (202-212), returning a
 // GpuSensors object (C# 5 has no tuples) or null; upstream's 500 ms PMLog cache (GetPMLogiGpu, 179-194) is dropped
 // (the panel polls every 2 s) and a driver without the PMLog entry point gives null.
-// Discrete-GPU sensors, clocks, FPS counter, OLED/VariBright and app killing are not ported.
+// Frame rate (read only): StartFPS, GetFPS and StopFPS become FrameMetricsStart, FrameMetricsGet and
+// FrameMetricsStop, which return ADL's result code and leave "started" tracking to AdlHardware.
+// Discrete-GPU sensors, clocks, OLED/VariBright and app killing are not ported.
 
 using System;
 using System.Linq;
@@ -163,6 +165,27 @@ namespace Overdrive.Helper.GHelper
             s.CpuPowerW = Sensor(log, ADLSensorType.PMLOG_CPU_POWER);
             s.AsicPowerW = Sensor(log, ADLSensorType.PMLOG_ASIC_POWER);
             return s;
+        }
+
+        // ADL result codes (0 = ADL_SUCCESS); -1 when ADL or the adapter is unavailable.
+        // A driver without the entry points throws EntryPointNotFoundException (AdlHardware turns that into "not supported").
+        public int FrameMetricsStart()
+        {
+            if (_adlContextHandle == IntPtr.Zero || _iGPU == null) return -1;
+            return Adl2.FrameMetricsMethods.ADL2_Adapter_FrameMetrics_Start(_adlContextHandle, ((ADLAdapterInfo)_iGPU).AdapterIndex, 0);
+        }
+
+        public int FrameMetricsGet(out float fps)
+        {
+            fps = 0;
+            if (_adlContextHandle == IntPtr.Zero || _iGPU == null) return -1;
+            return Adl2.FrameMetricsMethods.ADL2_Adapter_FrameMetrics_Get(_adlContextHandle, ((ADLAdapterInfo)_iGPU).AdapterIndex, 0, out fps);
+        }
+
+        public int FrameMetricsStop()
+        {
+            if (_adlContextHandle == IntPtr.Zero || _iGPU == null) return -1;
+            return Adl2.FrameMetricsMethods.ADL2_Adapter_FrameMetrics_Stop(_adlContextHandle, ((ADLAdapterInfo)_iGPU).AdapterIndex, 0);
         }
 
         private void ReleaseUnmanagedResources()

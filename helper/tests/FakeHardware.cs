@@ -69,6 +69,23 @@ namespace Overdrive.Helper.Tests
         // The iGPU readings the fake driver reports; null = the driver reports no sensors.
         public GpuSensors Gpu = new GpuSensors { TempC = 45, Use = 30, GfxPowerW = 5, CpuPowerW = 8, AsicPowerW = 14 };
         public GpuSensors GetGpuSensors() { return Missing ? null : Gpu; }
+
+        // The frame rate the fake driver reports; the metrics start on the first sample (like the real AdlHardware).
+        public float? Fps = 60f;
+        public bool FrameSupported = true;
+        public int FrameStarts;
+        private bool frameStarted;
+        public bool FrameRateSupported { get { return FrameSupported; } }
+
+        public float? GetFrameRate()
+        {
+            if (Missing || !FrameSupported) return null;
+            if (!frameStarted) { frameStarted = true; FrameStarts++; }
+            return Fps;
+        }
+
+        // A restarted helper: the fake's started flag is cleared, so the next sample starts the metrics again.
+        public void Reset() { frameStarted = false; }
     }
 
     // Stands in for the ported AmdGpuControl behind AdlHardware: same get/set contract as G-Helper
@@ -93,6 +110,14 @@ namespace Overdrive.Helper.Tests
 
         public GpuSensors Gpu;
         public GpuSensors GetiGpuSensors() { return Gpu; }
+
+        public int StartResult, GetResult, StopResult;
+        public float FpsValue;
+        public bool NoEntryPoint;
+        public int Starts, Stops;
+        public int FrameMetricsStart() { if (NoEntryPoint) throw new EntryPointNotFoundException(); Starts++; return StartResult; }
+        public int FrameMetricsGet(out float fps) { if (NoEntryPoint) throw new EntryPointNotFoundException(); fps = FpsValue; return GetResult; }
+        public int FrameMetricsStop() { Stops++; return StopResult; }
 
         public void Dispose() { Disposed = true; }
     }

@@ -14,6 +14,11 @@ namespace Overdrive.Helper
         int SetFPSLimit(int limit);
         // Integrated GPU sensors (read only), or null when the driver has no sensor log.
         GpuSensors GetiGpuSensors();
+        // Frame metrics (ADL result codes: 0 = success, -1 = unavailable). A driver without the entry points throws
+        // EntryPointNotFoundException.
+        int FrameMetricsStart();
+        int FrameMetricsGet(out float fps);
+        int FrameMetricsStop();
     }
 
     // The real IAdl. ADL is set up on first use (not at helper start) and kept for the life of the process; a
@@ -36,6 +41,8 @@ namespace Overdrive.Helper
         private readonly Func<IFpsControl> factory;
         private IFpsControl control;
         private string unavailable;
+        private bool frameStarted;
+        private bool frameSupported = true;
 
         public AdlHardware() : this(() => new AmdGpuControl()) { }
 
@@ -70,9 +77,50 @@ namespace Overdrive.Helper
             return control.GetiGpuSensors();
         }
 
+        public bool FrameRateSupported { get { return frameSupported; } }
+
+        // The first call starts the metrics (kept started for the life of the process, so a restarted helper starts
+        // them again); the first read after a start reports 0 (live: 0, then the game's rate), which is also "no game".
+        public float? GetFrameRate()
+        {
+            if (!Ready()) return null;
+            if (!frameSupported) return null;
+            try
+            {
+                if (!frameStarted)
+                {
+                    int s = control.FrameMetricsStart();
+                    if (s != 0) { unavailable = "the graphics driver would not start its frame rate meter (ADL " + s + ")"; return null; }
+                    frameStarted = true;
+                }
+                float fps;
+                int r = control.FrameMetricsGet(out fps);
+                if (r != 0) { unavailable = "the graphics driver did not report a frame rate (ADL " + r + ")"; return null; }
+                unavailable = null;
+                if (float.IsNaN(fps) || fps < 0) return 0f;
+                return fps;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                frameSupported = false;
+                unavailable = "the graphics driver has no frame rate meter";
+                return null;
+            }
+        }
+
         public void Dispose()
         {
-            if (control != null) { control.Dispose(); control = null; }
+            if (control != null)
+            {
+                if (frameStarted)
+                {
+                    // The result is ignored: Stop returned -1 on the device.
+                    try { control.FrameMetricsStop(); } catch (Exception) { }
+                    frameStarted = false;
+                }
+                control.Dispose();
+                control = null;
+            }
         }
 
         private bool Ready()

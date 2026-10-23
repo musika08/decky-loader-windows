@@ -17,6 +17,9 @@
 // TEMPERATURE_SOC, GFX_POWER, CPU_POWER), ADL_PMLOG_MAX_SENSORS (405) and ADL2_New_QueryPMLogData_Get (545). The
 // PMLog import sits in its own class (PMLogMethods) that Load does not prelink, so a driver without it can never
 // stop the FPS limit from loading; the private Size field's "never used" warning is silenced.
+// For the frame rate (read only): ADL2_Adapter_FrameMetrics_Start/Get/Stop, taken from G-Helper's AmdGpuControl.cs
+// StartFPS/GetFPS/StopFPS (their DllImports); they sit in their own class (FrameMetricsMethods), not prelinked by
+// Load, for the same reason as PMLogMethods.
 // Nothing else (overdrive clocks, VariBright, display, switchable graphics) is ported.
 
 using System;
@@ -208,6 +211,19 @@ namespace Overdrive.Helper.GHelper
         {
             [DllImport(Atiadlxx_FileName)]
             public static extern int ADL2_New_QueryPMLogData_Get(IntPtr adlContextHandle, int adapterIndex, out ADLPMLogDataOutput adlpmLogDataOutput);
+        }
+
+        // Not prelinked by Load either (see the header). Display index is 0, as in G-Helper.
+        public static class FrameMetricsMethods
+        {
+            [DllImport(Atiadlxx_FileName)]
+            public static extern int ADL2_Adapter_FrameMetrics_Start(IntPtr adlContextHandle, int adapterIndex, int displayIndex);
+
+            [DllImport(Atiadlxx_FileName)]
+            public static extern int ADL2_Adapter_FrameMetrics_Get(IntPtr adlContextHandle, int adapterIndex, int displayIndex, out float fps);
+
+            [DllImport(Atiadlxx_FileName)]
+            public static extern int ADL2_Adapter_FrameMetrics_Stop(IntPtr adlContextHandle, int adapterIndex, int displayIndex);
         }
 
         public static class NativeMethods

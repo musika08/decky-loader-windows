@@ -29,6 +29,11 @@ namespace Overdrive.Helper
         string Unavailable { get; }
         // Integrated GPU sensors (read only), or null when ADL or its sensor log is unavailable (reason in Unavailable).
         GpuSensors GetGpuSensors();
+        // Frame rate of the game in front (AMD frame metrics): null when ADL or its frame metrics are unavailable
+        // (reason in Unavailable), 0 when no game is in front. The first call starts the metrics.
+        float? GetFrameRate();
+        // False once the driver is known to lack the frame metrics entry points.
+        bool FrameRateSupported { get; }
     }
 
     // G-Helper AmdGpuControl.GetiGpuSensors (temp, use, gfxPower, cpuPower, asicPower); null = not reported.

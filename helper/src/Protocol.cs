@@ -21,6 +21,7 @@ namespace Overdrive.Helper
             { "hello", None },
             { "status", None },
             { "sensors", None },
+            { "frame_sample", None },
             { "set_mode", new[] { "mode", "spl", "sppt", "fppt" } },
             { "set_power", new[] { "spl", "sppt", "fppt" } },
             { "get_fans", new[] { "mode", "fan" } },
@@ -39,7 +40,7 @@ namespace Overdrive.Helper
         // added later is refused there unless it is listed here on purpose).
         public static readonly string[] ReadCommands =
         {
-            "hello", "status", "sensors", "get_fans", "get_fps_limit", "armoury_state"
+            "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state"
         };
 
         public static IEnumerable<string> CommandNames { get { return Commands.Keys; } }
@@ -141,6 +142,7 @@ namespace Overdrive.Helper
                 case "hello": return Hello(id);
                 case "status": return Status(id);
                 case "sensors": return Sensors(id);
+                case "frame_sample": return FrameSample(id);
                 case "set_mode": return SetMode(id, args);
                 case "set_power": return SetPower(id, args);
                 case "get_fans": return GetFans(id, args);
@@ -194,6 +196,35 @@ namespace Overdrive.Helper
             var d = new Dictionary<string, object>();
             var errors = new List<string>();
             ReadSensors(acpi, adl, d, errors);
+            d["errors"] = errors;
+            return Reply(id, true, "", d);
+        }
+
+        // One sample for Auto TDP, read only: the game's frame rate (AMD frame metrics; 0 = no game in front, null =
+        // unavailable, with an error) and the graphics power (null unless 1..1000 W, as in sensors).
+        private string FrameSample(object id)
+        {
+            var d = new Dictionary<string, object>();
+            var errors = new List<string>();
+            float? fps = null;
+            try
+            {
+                fps = adl.GetFrameRate();
+                if (!fps.HasValue) errors.Add("frame rate: " + (adl.Unavailable ?? "not available"));
+            }
+            catch (Exception ex) { errors.Add("frame rate: " + ex.Message); }
+            bool supported = true;
+            try { supported = adl.FrameRateSupported; } catch (Exception) { }
+            int? power = null;
+            try
+            {
+                GpuSensors g = adl.GetGpuSensors();
+                if (g != null) power = InRange(g.GfxPowerW, 1, 1000);
+            }
+            catch (Exception ex) { errors.Add("gpu power: " + ex.Message); }
+            d["supported"] = supported;
+            d["fps"] = fps.HasValue ? (object)fps.Value : null;
+            d["gpuPowerW"] = power;
             d["errors"] = errors;
             return Reply(id, true, "", d);
         }

@@ -477,6 +477,85 @@ namespace Overdrive.Helper.Tests
             Equal("gpuFan: not reported by the device (raw -65536).", ((object[])d["errors"])[2], "gpu fan error text");
         }
 
+        // ---------- frame_sample (Auto TDP, Task 1) ----------
+
+        public static void FrameSample_ReturnsFpsAndGfxPower()
+        {
+            var rig = new Rig();
+            rig.Adl.Fps = 58.5f;
+            rig.Adl.Gpu = new GpuSensors { TempC = 45, GfxPowerW = 7 };
+            var r = rig.Send("{\"id\":1,\"cmd\":\"frame_sample\"}");
+            True(Ok(r), "frame_sample ok");
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(true, d["supported"], "supported");
+            Equal(58.5, Convert.ToDouble(d["fps"]), "fps");
+            Equal(7, d["gpuPowerW"], "gpuPowerW");
+            Equal(0, ((object[])d["errors"]).Length, "no errors");
+            Equal(0, rig.Acpi.Calls.Count, "no ACPI call at all");
+            Equal(0, rig.Adl.Sets.Count, "no ADL write");
+        }
+
+        public static void FrameSample_Unsupported()
+        {
+            var rig = new Rig();
+            rig.Adl.FrameSupported = false;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"frame_sample\"}");
+            True(Ok(r), "frame_sample ok");
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(false, d["supported"], "supported");
+            True(d["fps"] == null, "fps null");
+            var errors = (object[])d["errors"];
+            Equal(1, errors.Length, "one error");
+            True(((string)errors[0]).Contains("frame rate"), "error names the frame rate: " + errors[0]);
+        }
+
+        public static void FrameSample_ZeroPowerIsNull()
+        {
+            var rig = new Rig();
+            rig.Adl.Gpu = new GpuSensors { GfxPowerW = 0 };
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"frame_sample\"}")["data"];
+            True(d["gpuPowerW"] == null, "0 W = not reported");
+            Equal(60.0, Convert.ToDouble(d["fps"]), "fps still reported");
+        }
+
+        public static void FrameSample_RestartsMetricsAfterReset()
+        {
+            var rig = new Rig();
+            rig.Send("{\"id\":1,\"cmd\":\"frame_sample\"}");
+            rig.Send("{\"id\":2,\"cmd\":\"frame_sample\"}");
+            Equal(1, rig.Adl.FrameStarts, "two samples start the metrics once");
+            rig.Adl.Reset();
+            var core = new HelperCore(rig.Acpi, rig.Adl, rig.Services, true, ms => { });
+            core.HandleLine("{\"id\":3,\"cmd\":\"frame_sample\"}");
+            Equal(2, rig.Adl.FrameStarts, "a restarted helper starts the metrics again");
+        }
+
+        // AdlHardware (real IAdl) on the fake control: start once, stop on dispose, missing entry points = unsupported.
+        public static void AdlHardware_FrameRate()
+        {
+            var c = new FakeFpsControl { FpsValue = 77.5f };
+            var hw = new AdlHardware(() => c);
+            Equal(77.5, Convert.ToDouble(hw.GetFrameRate()), "fps");
+            hw.GetFrameRate();
+            Equal(1, c.Starts, "started once");
+            True(hw.FrameRateSupported, "supported");
+            hw.Dispose();
+            Equal(1, c.Stops, "stopped on dispose");
+
+            var c2 = new FakeFpsControl { NoEntryPoint = true };
+            var hw2 = new AdlHardware(() => c2);
+            True(hw2.GetFrameRate() == null, "no entry point = null");
+            True(!hw2.FrameRateSupported, "marked unsupported");
+            True(hw2.Unavailable != null && hw2.Unavailable.Contains("frame rate"), "reason");
+            hw2.Dispose();
+            Equal(0, c2.Stops, "never started, never stopped");
+
+            var c3 = new FakeFpsControl { StartResult = -1 };
+            var hw3 = new AdlHardware(() => c3);
+            True(hw3.GetFrameRate() == null, "start refused = null");
+            True(hw3.FrameRateSupported, "still supported (retried next sample)");
+        }
+
         // G-Helper app/AsusACPI.cs 629-635: "because it's asus, and modes are swapped here".
         public static void FanCurve_ModeSwapLikeGHelper()
         {
@@ -847,7 +926,7 @@ namespace Overdrive.Helper.Tests
 
         public static void NotAlly_RefusesAllButReadAllowList()
         {
-            SeqEqual(new[] { "hello", "status", "sensors", "get_fans", "get_fps_limit", "armoury_state" },
+            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state" },
                 new List<string>(HelperCore.ReadCommands), "read allow-list");
             var rig = new Rig(false);
             int n = 0, refused = 0;
