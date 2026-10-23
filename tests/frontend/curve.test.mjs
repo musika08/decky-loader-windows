@@ -112,3 +112,12 @@ test('live readout leaves out what is not reported and hides an empty line', () 
   assert.deepEqual(liveLines({ cpuTempC: 51, gpuTempC: NaN, gpuFanRpm: undefined }), ['CPU 51 °C'], 'GPU line hidden');
   assert.deepEqual(liveLines({}), []);
 });
+
+test('each mode shows its own watts; other modes keep the firmware line', async () => {
+  const { modePowerLine } = await import('../../src/curve.ts');
+  assert.equal(modePowerLine('silent'), 'Power limit: 13 W');
+  assert.equal(modePowerLine('balanced'), 'Power limit: 17 W');
+  assert.equal(modePowerLine('turbo'), 'Power limit: 35 W');
+  assert.equal(modePowerLine('other'), null);
+  assert.equal(modePowerLine(null), null);
+});

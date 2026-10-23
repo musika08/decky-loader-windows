@@ -106,6 +106,18 @@ def test_set_mode_saves_applied_values_and_rewrites_fans(tmp_path):
     run(go())
 
 
+def test_each_mode_sends_its_own_watts(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        for mode, w in (("silent", 13), ("balanced", 17), ("turbo", 35)):
+            c.calls.clear()
+            assert (await p.set_mode(mode))["ok"] is True
+            assert c.writes()[0] == ("set_mode", {"mode": mode, "spl": w, "sppt": w, "fppt": w})
+        saved = Settings.load(s.path)
+        assert (saved.mode, saved.spl, saved.sppt, saved.fppt) == ("turbo", 30, 30, 30)   # Manual's own limits kept
+    run(go())
+
+
 def main_curve():
     return {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [0, 5, 10, 20, 30, 40, 50, 60]}
 
@@ -156,7 +168,7 @@ def test_reset_defaults(tmp_path):
                               default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")})
         r = await p.reset_defaults()
         assert r["ok"] is True
-        assert c.writes() == [("set_mode", {"mode": "balanced"}), ("set_fps_limit", {"fps": 0})]
+        assert c.writes() == [("set_mode", {"mode": "balanced", "spl": 17, "sppt": 17, "fppt": 17}), ("set_fps_limit", {"fps": 0})]
         saved = Settings.load(s.path)
         assert (saved.mode, saved.spl, saved.sppt, saved.fppt, saved.fps, saved.fan_preset) == \
             ("balanced", 30, 30, 30, 0, "default")
@@ -836,7 +848,7 @@ def test_mode_change_and_reset_rewrite_both_fans(tmp_path):
             [("set_mode", None), ("set_fans", None), ("set_fans", "gpu")]
         c.calls.clear()
         assert (await p.reset_defaults())["ok"] is True
-        assert c.writes() == [("set_mode", {"mode": "balanced"}), ("set_fps_limit", {"fps": 0})]
+        assert c.writes() == [("set_mode", {"mode": "balanced", "spl": 17, "sppt": 17, "fppt": 17}), ("set_fps_limit", {"fps": 0})]
     run(go())
 
 

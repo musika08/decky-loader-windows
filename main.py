@@ -13,7 +13,7 @@ if _PY_MODULES not in sys.path:
 
 from overdrive import device  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
-from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args  # noqa: E402
+from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write  # noqa: E402
 from overdrive.cpu_usage import CpuUsage  # noqa: E402
 from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRESETS, START_TYPES,  # noqa: E402
                                 Settings, check_curve, clamp_power, curve_mode, preset_curve)
@@ -220,16 +220,16 @@ class Plugin:
         if mode not in MODES:
             return _fail("Mode must be silent, balanced, turbo or manual.")
         s = self.settings
-        args = {"mode": mode}
         if mode == "manual":
             vals = [s.spl if spl is None else _int(spl), s.sppt if sppt is None else _int(sppt),
                     s.fppt if fppt is None else _int(fppt)]
             if any(v is None for v in vals):
                 return _fail("Power limits must be whole watts.")
-            p = clamp_power(*vals)
-            args.update(spl=p[0], sppt=p[1], fppt=p[2])
+            args = mode_write(mode, clamp_power(*vals))
         elif spl is not None or sppt is not None or fppt is not None:
             return _fail("Power limits can only be set in Manual mode.")
+        else:
+            args = mode_write(mode)
         async with self.reapplier.user_change():
             if self._busy():   # an Armoury switch may have begun while this waited for the lock
                 return _fail(BUSY)
@@ -340,7 +340,7 @@ class Plugin:
         async with self.reapplier.user_change():
             if self._busy():   # an Armoury switch may have begun while this waited for the lock
                 return _fail(BUSY)
-            r = await self.client.call("set_mode", {"mode": "balanced"})
+            r = await self.client.call("set_mode", mode_write("balanced"))
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
             s.mode = "balanced"

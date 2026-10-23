@@ -23,6 +23,9 @@ PRESETS = ("default", "recommended", "quiet", "cool", "custom")
 FANS = ("cpu", "gpu")                                  # G-Helper AsusFan.CPU / AsusFan.GPU; written in this order
 ALLOWED_FPS = (0, 30, 40, 45, 50, 60, 75, 90, 120)     # 0 = off (the helper maps it to the driver's value)
 POWER_MIN, POWER_MAX, POWER_DEFAULT = 5, 50, 30
+# Owner-chosen watts per mode (2026-10-23), sent as all three limits with the mode. With Armoury Crate stopped the
+# Ally's firmware mode alone changed the fans but barely the speed. src/curve.ts MODE_POWER mirrors it.
+MODE_POWER = {"silent": 13, "balanced": 17, "turbo": 35}
 CURVE_POINTS, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX = 8, 20, 110, 100
 QUIET_DELTA, COOL_DELTA = -10, 15
 # Owner-approved fixed curve for both fans (2026-10-23), derived from the Ally's factory curves and G-Helper's

@@ -16,7 +16,7 @@ import time
 from typing import Callable, Optional
 
 from .helper_client import RESTARTED
-from .settings import CURVE_MODES, FANS, Settings, curve_mode, preset_curve
+from .settings import CURVE_MODES, FANS, MODE_POWER, Settings, curve_mode, preset_curve
 
 POLL = 5.0
 RESUME_GAP = 30.0
@@ -107,9 +107,17 @@ def fan_args(curve: dict, fan: str) -> dict:
 
 
 def mode_args(s: Settings) -> dict:
-    args = {"mode": s.mode}
-    if s.mode == "manual":
-        args.update(spl=s.spl, sppt=s.sppt, fppt=s.fppt)
+    return mode_write(s.mode, (s.spl, s.sppt, s.fppt))
+
+
+def mode_write(mode: str, manual_power=None) -> dict:
+    """set_mode arguments: Manual with the user's limits, every other mode with its own watts (MODE_POWER)."""
+    args = {"mode": mode}
+    if mode == "manual":
+        args.update(spl=manual_power[0], sppt=manual_power[1], fppt=manual_power[2])
+    else:
+        w = MODE_POWER[mode]
+        args.update(spl=w, sppt=w, fppt=w)
     return args
 
 

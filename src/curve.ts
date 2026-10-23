@@ -139,6 +139,13 @@ export function shownMode(stored: string, userSet: boolean | undefined, device: 
 export const MODE_OTHER_TEXT = 'Set by Armoury Crate';
 export const FIRMWARE_DEFAULT_TEXT = 'Firmware default';
 
+// Watts each mode sends as all three limits; mirrors py_modules/overdrive/settings.py MODE_POWER.
+export const MODE_POWER: Record<'silent' | 'balanced' | 'turbo', number> = { silent: 13, balanced: 17, turbo: 35 };
+
+export function modePowerLine(mode: string | null | undefined): string | null {
+  return mode === 'silent' || mode === 'balanced' || mode === 'turbo' ? 'Power limit: ' + MODE_POWER[mode] + ' W' : null;
+}
+
 // Power limits line outside Manual: the firmware's limits apply. The device reads 0 (not reported) on the Ally,
 // so watts are only added when it reports real values.
 export function powerLine(spl: number | null | undefined, sppt: number | null | undefined, fppt: number | null | undefined): string {

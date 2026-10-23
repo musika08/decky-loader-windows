@@ -338,17 +338,18 @@ namespace Overdrive.Helper
             string mode, err;
             if (!GetMode(args, true, out mode, out err)) return Reply(id, false, err, null);
 
+            // Limits are required with "manual" and optional with the other modes: with Armoury Crate stopped the
+            // Ally's firmware mode alone changes the fans but not the watts, so the plugin sends each mode's own.
             bool anyPower = args.ContainsKey("spl") || args.ContainsKey("sppt") || args.ContainsKey("fppt");
             int[] power = null;
-            if (mode == "manual")
+            if (mode == "manual" || anyPower)
             {
                 if (!GetPower(args, out power, out err)) return Reply(id, false, err, null);
             }
-            else if (anyPower)
-                return Reply(id, false, "Refused: power limits can only be set with mode 'manual'.", null);
 
             if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return Reply(id, false, err, null);
             lastMode = mode;
+            if (power == null) lastPower = null;   // reset_fans puts back only limits sent with this mode
 
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
@@ -432,7 +433,7 @@ namespace Overdrive.Helper
             if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return Reply(id, false, err, null);
             lastMode = mode;
             bool reapplied = false;
-            if (mode == "manual" && lastPower != null)
+            if (lastPower != null)
             {
                 WaitForModeLimits();
                 if (!ApplyPower(lastPower, out err)) return Reply(id, false, err, null);

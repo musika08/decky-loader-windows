@@ -29,6 +29,7 @@ import {
   liveLines,
   minSpeedAt,
   powerLine,
+  modePowerLine,
   shownMode,
   stepValue,
   validateCurve,
@@ -926,7 +927,7 @@ function Content() {
         )}
         <StatusRow status={statuses.mode} />
         {shown !== 'manual' && (
-          <Note text={powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
+          <Note text={modePowerLine(shown) ?? powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
         )}
         {shown === 'manual' && (
           <>
@@ -1085,7 +1086,7 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description="Balanced, factory power limits, default fan curves, FPS limit off."
+            description="Balanced (17 W), Manual limits back to 30 W, default fan curves, FPS limit off."
             disabled={disabled}
             onClick={() => {
               if (!confirmed('reset')) return;

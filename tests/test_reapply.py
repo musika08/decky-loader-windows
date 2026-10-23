@@ -224,7 +224,7 @@ def test_reapply_does_not_overwrite_newer_user_change(tmp_path):
 
         async def user():
             async with r.user_change():
-                reply = await c.call("set_mode", {"mode": "turbo"})
+                reply = await c.call("set_mode", {"mode": "turbo", "spl": 35, "sppt": 35, "fppt": 35})
                 s.mode = "turbo"
                 return reply
         user_task = asyncio.ensure_future(user())
@@ -234,13 +234,13 @@ def test_reapply_does_not_overwrite_newer_user_change(tmp_path):
 
         modes = [a["mode"] for cmd, a in c.calls if cmd == "set_mode"]
         assert modes == ["balanced", "turbo"]                     # the user's value lands last
-        assert c.calls[-1] == ("set_mode", {"mode": "turbo"})     # nothing from the stale reapply after it
+        assert c.calls[-1] == ("set_mode", {"mode": "turbo", "spl": 35, "sppt": 35, "fppt": 35})     # nothing from the stale reapply after it
         assert r.rerun is True                                    # the dropped reapply is redone with fresh values
 
         c.calls.clear()
         c.handlers.clear()
         await r.tick()
-        assert ("set_mode", {"mode": "turbo"}) in c.calls
+        assert ("set_mode", {"mode": "turbo", "spl": 35, "sppt": 35, "fppt": 35}) in c.calls
         assert r.rerun is False
     run(go())
 

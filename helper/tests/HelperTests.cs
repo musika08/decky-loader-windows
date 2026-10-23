@@ -239,6 +239,26 @@ namespace Overdrive.Helper.Tests
             Equal(0, rig.Sleeps.Count, "no limits, no wait");
         }
 
+        // Every mode may carry its own limits (the plugin sends Silent 13, Balanced 17, Turbo 35 W): applied after
+        // the same 1.1 s wait as Manual, and put back by reset_fans.
+        public static void Mode_Silent_WithLimits_AppliesThemAfterTheMode()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"silent\",\"spl\":13,\"sppt\":13,\"fppt\":13}}");
+            True(Ok(r), "silent with limits ok: " + Msg(r));
+            SeqEqual(new[] { "set 0x00120075=2", "set 0x001200A3=13", "set 0x001200A0=13", "set 0x001200C1=13" },
+                rig.Acpi.Calls, "silent, then SPL, sPPT, fPPT");
+            Equal(2, rig.Sleeps.Count, "waits 100 + 1000 ms before the limits");
+            rig.Acpi.Calls.Clear();
+            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"reset_fans\"}")), "reset silent");
+            SeqEqual(new[] { "set 0x00120075=2", "set 0x001200A3=13", "set 0x001200A0=13", "set 0x001200C1=13" },
+                rig.Acpi.Calls, "reset_fans puts the mode's limits back");
+            rig.Acpi.Calls.Clear();
+            True(Ok(rig.Send("{\"id\":3,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"turbo\"}}")), "turbo without limits");
+            True(Ok(rig.Send("{\"id\":4,\"cmd\":\"reset_fans\"}")), "reset turbo");
+            SeqEqual(new[] { "set 0x00120075=1", "set 0x00120075=1" }, rig.Acpi.Calls, "old limits are not reused");
+        }
+
         public static void Mode_Values_MatchSpec()
         {
             var rig = new Rig();
@@ -253,7 +273,7 @@ namespace Overdrive.Helper.Tests
             var rig = new Rig();
             True(!Ok(rig.Send("{\"id\":1,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"ludicrous\"}}")), "unknown mode");
             True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"set_mode\",\"args\":{}}")), "missing mode");
-            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"turbo\",\"spl\":20}}")), "limits only with manual");
+            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"turbo\",\"spl\":20}}")), "turbo limits need all three");
             True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"manual\",\"spl\":20}}")), "manual needs all three");
             Equal(0, rig.Acpi.Calls.Count, "no hardware call");
         }
