@@ -670,3 +670,19 @@ def test_persistent_sample_error_is_logged_once_a_minute(tmp_path):
         assert log.traces == 2                             # at 0 s and at 60 s, not 400 times
         await asyncio.wait_for(loop.stop(restore=False), 2)
     run(go())
+
+
+def test_last_sample_is_kept_for_controller_auto(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        assert loop.last_sample is None
+        loop.start()
+        c.handlers["frame_sample"] = frames(48.0)
+        await loop.run_once()
+        assert loop.last_sample == (48.0, clock.mono)
+        clock.mono += 0.3
+        c.handlers["frame_sample"] = frames(float("nan"))   # a bad reading leaves the last good one
+        await loop.run_once()
+        assert loop.last_sample == (48.0, clock.mono - 0.3)
+        await loop.stop(restore=False)
+    run(go())

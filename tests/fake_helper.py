@@ -104,7 +104,7 @@ class FakeClient:
 
     def writes(self):
         return [c for c in self.calls
-                if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello", "frame_sample",
+                if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello", "frame_sample", "foreground",
                              "get_cpu_boost", "get_power_mode", "controller_info", "get_touchscreen", "get_auto_sr")]
 
     @property
@@ -143,6 +143,8 @@ class FakeClient:
                     "gpuPowerW": 6, "errors": []})
         if cmd == "frame_sample":
             return ok(dict(FRAME_SAMPLE))
+        if cmd == "foreground":
+            return ok({"exe": "steam.exe"})
         if cmd == "get_cpu_boost":
             return ok({"ac": 0, "dc": 0})
         if cmd == "get_power_mode":

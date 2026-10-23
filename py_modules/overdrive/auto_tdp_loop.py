@@ -58,6 +58,7 @@ class AutoTdpLoop:
         self._supported = True
         self._written: Optional[int] = None   # watts confirmed on the device (mode write or set_power), else None
         self._error_logged_at: Optional[float] = None
+        self.last_sample: Optional[tuple] = None   # (fps, monotonic time) of the last good frame_sample (ControllerAuto)
 
     # ---------- control ----------
 
@@ -166,6 +167,7 @@ class AutoTdpLoop:
             return
         self._fails = 0
         self._fps = float(fps)
+        self.last_sample = (float(fps), self.clock.monotonic())
         gpu = data.get("gpuPowerW")
         gpu = int(gpu) if _finite(gpu) else None
         self.ctl.step(float(fps), gpu, self.clock.monotonic())
