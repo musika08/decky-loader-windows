@@ -5,7 +5,8 @@ feature is reported, never raised.
 
 get_touchscreen spawns PowerShell in the helper and can take up to 5 s, so read_controls keeps the last touchscreen
 status for TOUCH_TTL seconds and a state poll never waits on it more than once per that time. set_touchscreen returns
-at once (the change lands later), so the cache is updated with the requested value instead of asking again.
+at once (the change lands later): it drops the cache, so the next read asks the real device, and for TOUCH_SETTLE
+seconds every read asks again until the device shows the requested state (the panel polls that long).
 """
 import time
 from typing import Optional
@@ -14,15 +15,15 @@ from .helper_client import RESTARTED
 from .settings import CONTROLLER_MODES, Settings
 
 TOUCH_TTL = 30.0
+TOUCH_SETTLE = 15.0             # seconds after set_touchscreen in which reads skip the cache until the change shows
 POWER_MODES = ("eco", "balanced", "best")
 
 clock = time.monotonic          # tests replace it
-_touch = {"at": None, "value": None}
+_touch = {"at": None, "value": None, "want": None, "until": None}
 
 
 def reset_cache() -> None:
-    _touch["at"] = None
-    _touch["value"] = None
+    _touch.update(at=None, value=None, want=None, until=None)
 
 
 def transport_failure(reply: dict) -> bool:
@@ -49,7 +50,11 @@ def _msg(reply: dict, fallback: str) -> str:
 
 async def _touchscreen_status(client) -> dict:
     now = clock()
-    if _touch["at"] is not None and now - _touch["at"] < TOUCH_TTL:
+    settling = _touch["want"] is not None and now < _touch["until"]
+    if not settling:
+        _touch["want"] = _touch["until"] = None
+    cached = _touch["at"] is not None and now - _touch["at"] < TOUCH_TTL
+    if cached and not (settling and _touch["value"]["enabled"] != _touch["want"]):
         return _touch["value"]
     d = _data(await client.call("get_touchscreen", {}, timeout=15.0))
     if d is None:
@@ -128,8 +133,9 @@ async def set_touchscreen(client, enabled: bool) -> dict:
     r = await client.call("set_touchscreen", {"enabled": bool(enabled)})
     if not r.get("ok"):
         return _result(False, _msg(r, "The touchscreen was not changed."))
-    # The change lands a little later and asking again takes up to 5 s: remember what was asked for.
-    _touch["at"], _touch["value"] = clock(), {"found": True, "enabled": bool(enabled)}
+    # The change lands a little later: show only what the device reports (C4). Until it shows the requested state
+    # (or TOUCH_SETTLE passes), every read asks the device again.
+    _touch.update(at=None, value=None, want=bool(enabled), until=clock() + TOUCH_SETTLE)
     return _result(True, "", enabled=bool(enabled))
 
 

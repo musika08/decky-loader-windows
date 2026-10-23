@@ -11,14 +11,15 @@ _PY_MODULES = os.path.join(PLUGIN_DIR, "py_modules")
 if _PY_MODULES not in sys.path:
     sys.path.append(_PY_MODULES)
 
-from overdrive import device  # noqa: E402
+from overdrive import controls, device  # noqa: E402
 from overdrive.auto_tdp_loop import AutoTdpLoop  # noqa: E402
+from overdrive.controller_auto import ControllerAuto  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
 from overdrive.reapply import (Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write,  # noqa: E402
                                rewrite_fans)
 from overdrive.cpu_usage import CpuUsage  # noqa: E402
-from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRESETS, START_TYPES,  # noqa: E402
-                                Settings, check_curve, clamp_power, curve_mode, preset_curve)
+from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, CONTROLLER_MODES, FANS, MODES, PRESETS,  # noqa: E402
+                                START_TYPES, Settings, check_curve, clamp_power, curve_mode, preset_curve)
 
 NOT_ALLY = "Overdrive supports the ROG Ally family only"
 BUSY = "Overdrive is switching Armoury Crate services. Try again when it finishes."
@@ -27,6 +28,11 @@ AUTO_TDP_UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, whic
 AUTO_TDP_IDLE = {"on": False, "watts": None, "fps": None, "best": None, "paused": "", "supported": False}
 ARMOURY_MIN_TIMEOUT = 300.0      # ruling P8: armoury_* calls get at least 5 minutes
 ARMOURY_PER_SERVICE = 60.0       # each service may wait 30 s, doubled when a rollback runs
+NO_CONTROLLER = "The controller was not found; the choice is saved and applied when it is back."
+# get_state's new controls when nothing was read (not an Ally, or nothing read yet while an Armoury switch runs)
+CONTROLS_UNREAD = {"cpu_boost": {"on": False, "supported": False}, "power_mode": {"value": "other", "supported": False},
+                   "controller": {"found": False}, "touchscreen": {"found": False, "enabled": False},
+                   "auto_sr": {"installed": False, "on": None}}
 
 
 def settings_path() -> str:
@@ -61,6 +67,8 @@ class Plugin:
         self.settings = None
         self.reapplier = None
         self.auto_tdp_loop = None
+        self.controller_auto = None
+        self._controls = None            # the last read_controls reply (shown while an Armoury switch runs)
         self._startup = None
         self._armoury_lock = asyncio.Lock()
         self._armoury_installed = None
@@ -77,6 +85,8 @@ class Plugin:
                 self.auto_tdp_loop = AutoTdpLoop(client, settings, reapplier, logger=decky.logger)
                 # a reapply's mode write landed: restart at the ceiling it set
                 reapplier.on_applied = self.auto_tdp_loop.after_mode_write
+                # uses Auto TDP's frame sample when it is fresh (one sampler, two consumers)
+                self.controller_auto = ControllerAuto(client, reapplier, self.auto_tdp_loop, logger=decky.logger)
 
     def _busy(self) -> bool:
         return self._armoury_busy or bool(getattr(self.client, "busy", False))
@@ -112,6 +122,8 @@ class Plugin:
         self.reapplier.start()
         if self.settings.auto_tdp and self.auto_tdp_loop is not None:
             self.auto_tdp_loop.start()   # the reapply just started writes the mode; on_applied resets the loop then
+        if self.settings.controller_mode == "auto" and self.controller_auto is not None:
+            self.controller_auto.start()   # the reapply writes Gamepad first; the loop decides from there
 
     async def _unload(self) -> None:
         # Try not to kill the helper halfway through changing services: wait for the Armoury operation to finish,
@@ -128,16 +140,20 @@ class Plugin:
                 await self._startup
             except (asyncio.CancelledError, Exception):
                 pass
+        # Each step runs even when an earlier one failed. Gamepad first, whatever the stored mode, while the helper
+        # still runs: Big Picture must never be left with a mouse-only controller.
+        if self.controller_auto is not None:
+            await _unload_step("put the controller back to Gamepad", self.controller_auto.stop())
         if self.auto_tdp_loop is not None:
             # Never leave the Ally at trimmed watts: write the mode again when Auto TDP is running or stored on (a
             # loop halted by a refusal may have left trimmed watts if its restore failed). With Auto TDP off nothing
             # is written.
             restore = bool(self.auto_tdp_loop.status()["on"] or (self.settings is not None and self.settings.auto_tdp))
-            await self.auto_tdp_loop.stop(restore=restore)
+            await _unload_step("stop Auto TDP", self.auto_tdp_loop.stop(restore=restore))
         if self.reapplier is not None:
-            await self.reapplier.stop()
+            await _unload_step("stop the reapplier", self.reapplier.stop())
         if self.client is not None:
-            await self.client.stop()
+            await _unload_step("stop the helper", self.client.stop())
         decky.logger.info("Overdrive unloaded")
 
     # ---------- reads ----------
@@ -170,7 +186,9 @@ class Plugin:
             "power_set": bool(s.user_set and s.mode == "manual"),
             "device": _device_readback(None),
             "auto_tdp": {"on": False, "supported": False},
+            "grip_vibration": bool(s.grip_vibration),
         }
+        _merge_controls(state, CONTROLS_UNREAD, s)
         if self.client is None:
             return state
         if self.auto_tdp_loop is not None:   # the stored switch; "supported" is False once the driver had no reading
@@ -184,6 +202,9 @@ class Plugin:
             r = await self.client.call("status")   # reads only; shown, never written back
             if r.get("ok"):
                 state["device"] = _device_readback(r.get("data"))
+            self._controls = await controls.read_controls(self.client)
+        if self._controls is not None:   # while busy, the last reading: a call would queue behind the switch
+            _merge_controls(state, self._controls, s)
         state["armoury"]["installed"] = bool(self._armoury_installed)
         state["unavailable"] = self.client.unavailable_reason or ""
         state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, self._armoury_warning) if w)
@@ -427,6 +448,99 @@ class Plugin:
         self.reapplier.rerun = True
         return {"ok": True, "message": msg}
 
+    # ---------- Windows settings and the controller ----------
+
+    async def _user_write(self, write) -> dict:
+        """A refusable user write under the reapplier's lock; `write` returns the coroutine making the reply."""
+        refused = self._refuse_write()
+        if refused:
+            return refused
+        async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
+            r = await write()
+        return {"ok": bool(r.get("ok")), "message": str(r.get("message") or "")}
+
+    async def set_cpu_boost(self, on) -> dict:
+        if not isinstance(on, bool):
+            return self._refuse_write() or _fail("Expected on or off.")
+        return await self._user_write(lambda: controls.set_cpu_boost(self.client, self.settings, on))
+
+    async def set_power_mode(self, value) -> dict:
+        if value not in controls.POWER_MODES:
+            return self._refuse_write() or _fail("Battery performance must be eco, balanced or best.")
+        return await self._user_write(lambda: controls.set_power_mode(self.client, value))
+
+    async def set_touchscreen(self, on) -> dict:
+        if not isinstance(on, bool):
+            return self._refuse_write() or _fail("Expected on or off.")
+        return await self._user_write(lambda: controls.set_touchscreen(self.client, on))
+
+    async def set_auto_sr(self, on) -> dict:
+        if not isinstance(on, bool):
+            return self._refuse_write() or _fail("Expected on or off.")
+        return await self._user_write(lambda: controls.set_auto_sr(self.client, on))
+
+    async def _controller_found(self) -> bool:
+        r = await self.client.call("controller_info", {})
+        d = r.get("data") if r.get("ok") else None
+        return isinstance(d, dict) and bool(d.get("found"))
+
+    async def set_controller_mode(self, mode) -> dict:
+        """Gamepad, Desktop or Auto. Saved once written, or when no controller is found (it applies when the
+        controller is back). Auto writes Gamepad, then the Controller Auto loop decides."""
+        refused = self._refuse_write()
+        if refused:
+            return refused
+        if mode not in CONTROLLER_MODES:
+            return _fail("Controller mode must be gamepad, desktop or auto.")
+        s, ca = self.settings, self.controller_auto
+        # R10: stop() takes the reapplier's lock (not reentrant), so a running loop is stopped before user_change.
+        # It writes Gamepad; Auto chosen again starts the loop afresh below.
+        if ca is not None and ca._on:
+            await ca.stop()
+        result = None
+        async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                result = _fail(BUSY)
+            else:
+                note = ""
+                if await self._controller_found():
+                    r = await controls.apply_controller(self.client, s, mode)
+                    if not r.get("ok"):
+                        result = _fail(str(r.get("message") or "The controller mode was not changed."))
+                else:
+                    note = NO_CONTROLLER
+                if result is None:
+                    s.controller_mode = mode
+                    s.user_set = True   # a user choice: reapplies (resume, helper restart) write it again
+                    result = {"ok": True, "message": " ".join(m for m in (note, self._save()) if m)}
+        if ca is not None and s.controller_mode == "auto":
+            ca.start()   # Auto chosen, or a failed change away from Auto: the loop goes on
+        return result
+
+    async def set_grip_vibration(self, on) -> dict:
+        refused = self._refuse_write()
+        if refused:
+            return refused
+        if not isinstance(on, bool):
+            return _fail("Expected on or off.")
+        s = self.settings
+        async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
+            note = ""
+            if await self._controller_found():
+                # Only the vibration is written: the controller mode (and a running Auto loop) is left alone.
+                r = await self.client.call("set_vibration", {"strength": 100 if on else 0})
+                if not r.get("ok"):
+                    return _fail(str(r.get("message") or "The grip vibration was not changed."))
+            else:
+                note = NO_CONTROLLER
+            s.grip_vibration = on
+            s.user_set = True   # reapplied with the controller mode after sleep
+            return {"ok": True, "message": " ".join(m for m in (note, self._save()) if m)}
+
     # ---------- Armoury Crate ----------
     # The record (start types + running services before Overdrive stopped anything) is what armoury_restore puts
     # back, so it must exist on disk before the first service is touched and must never be replaced by types read
@@ -612,6 +726,23 @@ class Plugin:
 
 
 DEVICE_MODES = ("silent", "balanced", "turbo", "other")
+
+
+async def _unload_step(what: str, coro) -> None:
+    """One unload step; a failure is logged and the later steps still run."""
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        decky.logger.error(f"Overdrive could not {what} at unload: {e}")
+
+
+def _merge_controls(state: dict, read: dict, s: Settings) -> None:
+    """get_state's new controls from a read_controls reply; the controller mode and vibration are the stored ones."""
+    for key in ("cpu_boost", "power_mode", "touchscreen", "auto_sr"):
+        state[key] = dict(read.get(key) or CONTROLS_UNREAD[key])
+    state["controller"] = {"mode": s.controller_mode, "found": bool((read.get("controller") or {}).get("found"))}
 
 
 def _device_readback(data) -> dict:
