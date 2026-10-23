@@ -146,6 +146,41 @@ def test_touchscreen_rereads_stop_after_15_seconds(tmp_path, monkeypatch):
     run(go())
 
 
+def test_failed_touchscreen_read_keeps_the_last_status(tmp_path, monkeypatch):
+    async def go():
+        now = [1000.0]
+        monkeypatch.setattr(controls, "clock", lambda: now[0])
+        c = FakeClient()
+        good = handler(ok({"found": True, "enabled": True, "instanceId": "x"}))
+        bad = handler(fail("PowerShell did not answer in 5 seconds."))
+        count = lambda: len([x for x in c.calls if x[0] == "get_touchscreen"])
+        # no good reading yet: a failure reports not found, and is not cached
+        c.handlers["get_touchscreen"] = bad
+        assert (await controls.read_controls(c))["touchscreen"] == {"found": False, "enabled": False}
+        c.handlers["get_touchscreen"] = good
+        assert (await controls.read_controls(c))["touchscreen"] == {"found": True, "enabled": True}
+        assert count() == 2
+        # cache expired, the read fails: the last status is shown (toggle stays), and the next read asks again
+        now[0] += 31
+        c.handlers["get_touchscreen"] = bad
+        assert (await controls.read_controls(c))["touchscreen"] == {"found": True, "enabled": True}
+        assert (await controls.read_controls(c))["touchscreen"] == {"found": True, "enabled": True}
+        assert count() == 4
+        c.handlers["get_touchscreen"] = good
+        await controls.read_controls(c)
+        await controls.read_controls(c)                                 # good again: cached
+        assert count() == 5
+        # settling on "off": a failed read reports the last real status (on), never the requested off
+        assert (await controls.set_touchscreen(c, False))["ok"]
+        c.handlers["get_touchscreen"] = bad
+        now[0] += 1.5
+        assert (await controls.read_controls(c))["touchscreen"] == {"found": True, "enabled": True}
+        now[0] += 1.5
+        await controls.read_controls(c)
+        assert count() == 7                                             # still asking: not settled
+    run(go())
+
+
 def test_read_controls_values_and_unsupported(tmp_path):
     async def go():
         c = FakeClient()

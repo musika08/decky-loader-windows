@@ -7,6 +7,8 @@ get_touchscreen spawns PowerShell in the helper and can take up to 5 s, so read_
 status for TOUCH_TTL seconds and a state poll never waits on it more than once per that time. set_touchscreen returns
 at once (the change lands later): it drops the cache, so the next read asks the real device, and for TOUCH_SETTLE
 seconds every read asks again until the device shows the requested state (the panel polls that long).
+A failed read changes nothing: the last good status is reported (not found when there is none yet) and the cache time
+is not refreshed, so the next read asks again; a failure never hides the toggle or passes for the requested state.
 """
 import time
 from typing import Optional
@@ -57,10 +59,9 @@ async def _touchscreen_status(client) -> dict:
     if cached and not (settling and _touch["value"]["enabled"] != _touch["want"]):
         return _touch["value"]
     d = _data(await client.call("get_touchscreen", {}, timeout=15.0))
-    if d is None:
-        value = {"found": False, "enabled": False}
-    else:
-        value = {"found": bool(d.get("found")), "enabled": bool(d.get("enabled"))}
+    if d is None:   # a failed read: keep the last good status and its time (asked again at the next read)
+        return _touch["value"] or {"found": False, "enabled": False}
+    value = {"found": bool(d.get("found")), "enabled": bool(d.get("enabled"))}
     _touch["at"], _touch["value"] = clock(), value
     return value
 
@@ -135,7 +136,8 @@ async def set_touchscreen(client, enabled: bool) -> dict:
         return _result(False, _msg(r, "The touchscreen was not changed."))
     # The change lands a little later: show only what the device reports (C4). Until it shows the requested state
     # (or TOUCH_SETTLE passes), every read asks the device again.
-    _touch.update(at=None, value=None, want=bool(enabled), until=clock() + TOUCH_SETTLE)
+    # The last good status is kept (cache time dropped): a failed read meanwhile reports it, never the target.
+    _touch.update(at=None, want=bool(enabled), until=clock() + TOUCH_SETTLE)
     return _result(True, "", enabled=bool(enabled))
 
 
