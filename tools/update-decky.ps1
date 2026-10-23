@@ -8,7 +8,8 @@ Update this Windows fork of Decky Loader to the latest official version, then te
   powershell -ExecutionPolicy Bypass -File tools\update-decky.ps1 -Package -Version 0.1.0
     Release packaging only: builds the frontend, runs the tests, builds the installer folder in a temporary folder and
     zips it (python\, app\ with app\VERSION = the version, LICENSE) into ..\build\release\decky-windows-<version>.zip
-    (or -OutDir). Does not merge, install, push, restart anything or touch build\installer\DeckyLoader. -Version must be x.y.z.
+    (or -OutDir). Does not merge, install, push, restart anything or touch build\installer\DeckyLoader. -Version must be x.y.z
+    or a beta x.y.z-beta.N (the dashboard's release versions).
 
 Stops (exit 2) when official changes clash with ours, leaving the branch as it was, and (exit 3) when tests or the
 build fail. Plugins and settings in C:\ProgramData\decky are never touched; --install keeps them.
@@ -37,7 +38,7 @@ function Fail($code, $msg) { Write-Host "`nSTOPPED: $msg" -ForegroundColor Red; 
 function Invoke-Git { & git.exe -C $repo @args; if ($LASTEXITCODE -ne 0) { throw "git $args failed ($LASTEXITCODE)" } }
 
 if ($Package) {
-    if ($Version -notmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$') { Fail 1 '-Package needs -Version x.y.z (digits only)' }
+    if ($Version -cnotmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})(-beta\.(0|[1-9][0-9]{0,8}))?$') { Fail 1 '-Package needs -Version x.y.z or x.y.z-beta.N' }
     $Rebuild = $true; $NoInstall = $true; $NoPush = $true
     if (-not $OutDir) { $OutDir = Join-Path $buildDir 'release' }
 }
@@ -105,7 +106,7 @@ if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $work -ErrorAction Silent
 if ($Package) {
     Step 'Zipping the installer folder'
     try {
-        # app\VERSION is what the dashboard reads as the installed Decky version (strict x.y.z)
+        # app\VERSION is what the dashboard reads as the installed Decky version (x.y.z or x.y.z-beta.N)
         [System.IO.File]::WriteAllText((Join-Path $work 'app\VERSION'), $Version, (New-Object System.Text.UTF8Encoding($false)))
         Copy-Item -ErrorAction Stop (Join-Path $repo 'LICENSE') (Join-Path $work 'LICENSE')
         # Not needed at run time: source maps (only browser dev tools read them) and certifi's own test folder
