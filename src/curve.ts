@@ -75,9 +75,10 @@ export type ShownMode = 'silent' | 'balanced' | 'turbo' | 'manual' | 'other' | n
 // always wins, as nothing else is true then; before the owner changed anything the device's mode is shown (the
 // stored default is only a default); after that the stored mode (Manual reads back as Balanced on the device).
 export function shownMode(stored: string, userSet: boolean | undefined, device: DeviceMode | undefined): ShownMode {
-  if (device === 'other') return 'other';
-  if (userSet === false) return device ?? null;
-  return stored as ShownMode;
+  // Once the user has chosen a mode, show it: the Ally always reads back 7 ("other"), so the device value would
+  // otherwise hide every choice. Before that, show what the device runs.
+  if (userSet !== false) return stored as ShownMode;
+  return device ?? null;
 }
 
 export const MODE_OTHER_TEXT = 'Set by Armoury Crate';

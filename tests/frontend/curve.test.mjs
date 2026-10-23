@@ -87,7 +87,7 @@ test('liveLine formats sensors', () => {
 
 test('mode read back as other shows Set by Armoury Crate, never a stored mode', () => {
   assert.equal(shownMode('balanced', false, 'other'), 'other');
-  assert.equal(shownMode('manual', true, 'other'), 'other');
+  assert.equal(shownMode('manual', true, 'other'), 'manual'); // the user's choice wins over the Ally's mode 7
   assert.equal(shownMode('balanced', false, 'turbo'), 'turbo'); // untouched install: what the device runs
   assert.equal(shownMode('balanced', false, null), null);
   assert.equal(shownMode('manual', true, 'balanced'), 'manual'); // Manual reads back as Balanced

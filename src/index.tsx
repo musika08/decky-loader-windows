@@ -490,6 +490,9 @@ function Content() {
           </Field>
         </PanelSectionRow>
         {shown === 'other' && <Note text={'Mode: ' + MODE_OTHER_TEXT} />}
+        {state.user_set !== false && state.armoury.installed && !state.armoury.replaced && (
+          <Note text="Armoury Crate is still running and can override this mode. Turn on Use Overdrive instead of Armoury Crate below." />
+        )}
         <StatusRow status={statuses.mode} />
         {shown !== 'manual' && (
           <Note text={powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
