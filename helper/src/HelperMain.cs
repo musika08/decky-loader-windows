@@ -35,7 +35,9 @@ namespace Overdrive.Helper
             using (var acpi = new AcpiHardware())
             using (var adl = new AdlHardware())
             {
-                Run(input, output, new HelperCore(acpi, adl, new ServiceHardware(), IsAlly()));
+                var core = new HelperCore(acpi, adl, new ServiceHardware(), IsAlly());
+                core.WinPower = new WinPower();
+                Run(input, output, core);
             }
             return 0;
         }

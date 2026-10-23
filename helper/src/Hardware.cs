@@ -62,6 +62,19 @@ namespace Overdrive.Helper
         void SetStartType(string name, string startType);
     }
 
+    // Windows power settings, shaped after G-Helper app/Mode/PowerNative.cs (CPU Boost and power mode overlay).
+    public interface IWinPower
+    {
+        // Boost mode index (0..6) of the active scheme as { AC, DC }, or null on error.
+        int[] GetCpuBoost();
+        // Writes the AC and DC boost index, applying the scheme after each write.
+        bool SetCpuBoost(int value, out string err);
+        // Effective power mode overlay GUID (lowercase D-format), or null on error.
+        string GetOverlay();
+        // Sets the power mode overlay.
+        bool SetOverlay(string guid, out string err);
+    }
+
     // Device ids (spec section 3; same values as G-Helper app/AsusACPI.cs).
     public static class DeviceIds
     {

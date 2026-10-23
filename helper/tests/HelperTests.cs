@@ -67,10 +67,15 @@ namespace Overdrive.Helper.Tests
             public FakeAcpi Acpi = new FakeAcpi();
             public FakeAdl Adl = new FakeAdl();
             public FakeServices Services = new FakeServices();
+            public FakeWinPower Power = new FakeWinPower();
             public List<int> Sleeps = new List<int>();      // delays the helper asked for, never actually waited
             public HelperCore Core;
             public Rig() : this(true) { }
-            public Rig(bool ally) { Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms)); }
+            public Rig(bool ally)
+            {
+                Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms));
+                Core.WinPower = Power;
+            }
 
             public Dictionary<string, object> Send(string line)
             {
@@ -928,9 +933,119 @@ namespace Overdrive.Helper.Tests
             True(acpi.Calls.Contains("getcurve 0 0"), "unknown mode -> balanced curve");
         }
 
+        // ---------- Windows power (CPU Boost, power mode) ----------
+
+        private const string EcoGuid = "961cc777-2547-4f9d-8174-7d86181b8a7a";
+        private const string BalancedGuid = "00000000-0000-0000-0000-000000000000";
+        private const string BestGuid = "ded574b5-45a0-4f42-8737-46345c09c238";
+
+        public static void WinPower_GetSetBoost()
+        {
+            var rig = new Rig();
+            rig.Power.Ac = 2; rig.Power.Dc = 4;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"get_cpu_boost\"}");
+            True(Ok(r), "get: " + Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(2, d["ac"], "ac");
+            Equal(4, d["dc"], "dc");
+            for (int v = 0; v <= 6; v++)
+            {
+                r = rig.Send("{\"id\":2,\"cmd\":\"set_cpu_boost\",\"args\":{\"value\":" + v + "}}");
+                True(Ok(r), "set " + v + ": " + Msg(r));
+                Equal(v, ((Dictionary<string, object>)r["data"])["value"], "echoed value");
+                Equal(v, rig.Power.Ac, "ac written " + v);
+                Equal(v, rig.Power.Dc, "dc written " + v);
+            }
+            rig.Power.Fail = true;
+            r = rig.Send("{\"id\":3,\"cmd\":\"get_cpu_boost\"}");
+            True(!Ok(r), "read error is an error reply");
+            r = rig.Send("{\"id\":4,\"cmd\":\"set_cpu_boost\",\"args\":{\"value\":1}}");
+            True(!Ok(r) && Msg(r).Contains("boost write failed"), "write error passed on: " + Msg(r));
+        }
+
+        public static void WinPower_BoostOutOfRangeRefused()
+        {
+            var rig = new Rig();
+            foreach (string v in new[] { "-1", "7", "100", "\"2\"", "1.5", "null", "true" })
+            {
+                var r = rig.Send("{\"id\":1,\"cmd\":\"set_cpu_boost\",\"args\":{\"value\":" + v + "}}");
+                True(!Ok(r), "refused " + v);
+            }
+            True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"set_cpu_boost\"}")), "value required");
+            Equal(0, rig.Power.Calls.Count, "nothing reached Windows power");
+        }
+
+        public static void WinPower_ModeMapping()
+        {
+            var rig = new Rig();
+            var cases = new[] { new[] { EcoGuid, "eco" }, new[] { BalancedGuid, "balanced" }, new[] { BestGuid, "best" },
+                new[] { "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "other" }, new[] { "garbage", "other" } };
+            foreach (string[] c in cases)
+            {
+                rig.Power.Overlay = c[0];
+                var r = rig.Send("{\"id\":1,\"cmd\":\"get_power_mode\"}");
+                True(Ok(r), "get: " + Msg(r));
+                var d = (Dictionary<string, object>)r["data"];
+                Equal(c[1], d["mode"], "mode of " + c[0]);
+                Equal(c[0], d["overlay"], "overlay of " + c[0]);
+            }
+            rig.Power.Fail = true;
+            True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"get_power_mode\"}")), "read error is an error reply");
+        }
+
+        public static void WinPower_SetModeOnlyThree()
+        {
+            var rig = new Rig();
+            var want = new Dictionary<string, string> { { "eco", EcoGuid }, { "balanced", BalancedGuid }, { "best", BestGuid } };
+            foreach (var kv in want)
+            {
+                var r = rig.Send("{\"id\":1,\"cmd\":\"set_power_mode\",\"args\":{\"mode\":\"" + kv.Key + "\"}}");
+                True(Ok(r), kv.Key + ": " + Msg(r));
+                Equal(kv.Value, rig.Power.Overlay, "overlay for " + kv.Key);
+                Equal(kv.Key, ((Dictionary<string, object>)r["data"])["mode"], "echoed mode");
+            }
+            int before = rig.Power.Writes().Count;
+            foreach (string m in new[] { "other", "turbo", "Eco", "", "high" })
+                True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"set_power_mode\",\"args\":{\"mode\":\"" + m + "\"}}")), "refused '" + m + "'");
+            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_power_mode\",\"args\":{\"mode\":5}}")), "non-string refused");
+            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_power_mode\"}")), "mode required");
+            Equal(before, rig.Power.Writes().Count, "refusals wrote nothing");
+            rig.Power.Fail = true;
+            var f = rig.Send("{\"id\":5,\"cmd\":\"set_power_mode\",\"args\":{\"mode\":\"eco\"}}");
+            True(!Ok(f) && Msg(f).Contains("overlay write failed"), "write error passed on: " + Msg(f));
+        }
+
+        public static void WinPower_ReadsWriteNothing()
+        {
+            var rig = new Rig();
+            rig.Send("{\"id\":1,\"cmd\":\"get_cpu_boost\"}");
+            rig.Send("{\"id\":2,\"cmd\":\"get_power_mode\"}");
+            Equal(2, rig.Power.Calls.Count, "two reads");
+            Equal(0, rig.Power.Writes().Count, "no writes");
+            // Not an Ally: reads still work, writes are refused before reaching Windows power.
+            var na = new Rig(false);
+            True(Ok(na.Send("{\"id\":1,\"cmd\":\"get_cpu_boost\"}")), "read allowed off-Ally");
+            var w = na.Send("{\"id\":2,\"cmd\":\"set_cpu_boost\",\"args\":{\"value\":1}}");
+            Equal(HelperCore.NotAllyMessage, Msg(w), "write refused off-Ally");
+            Equal(0, na.Power.Writes().Count, "no writes off-Ally");
+        }
+
+        public static void WinPower_NotAvailableWhenNull()
+        {
+            var core = new HelperCore(new FakeAcpi(), new FakeAdl(), new FakeServices(), true, ms => { });
+            foreach (string line in new[] {
+                "{\"id\":1,\"cmd\":\"get_cpu_boost\"}", "{\"id\":2,\"cmd\":\"get_power_mode\"}",
+                "{\"id\":3,\"cmd\":\"set_cpu_boost\",\"args\":{\"value\":1}}",
+                "{\"id\":4,\"cmd\":\"set_power_mode\",\"args\":{\"mode\":\"eco\"}}" })
+            {
+                var r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine(line));
+                True(!Ok(r) && Msg(r).Contains("not available"), "not available: " + Msg(r));
+            }
+        }
+
         public static void NotAlly_RefusesAllButReadAllowList()
         {
-            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state" },
+            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode" },
                 new List<string>(HelperCore.ReadCommands), "read allow-list");
             var rig = new Rig(false);
             int n = 0, refused = 0;
@@ -941,7 +1056,8 @@ namespace Overdrive.Helper.Tests
                 if (read) True(Msg(r) != HelperCore.NotAllyMessage, cmd + " is a read and must not be refused as non-Ally");
                 else { True(!Ok(r) && Msg(r) == HelperCore.NotAllyMessage, cmd + " refused: " + Msg(r)); refused++; }
             }
-            Equal(7, refused, "every non-read command refused");
+            Equal(9, refused, "every non-read command refused");
+            Equal(0, rig.Power.Writes().Count, "no power write");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get"), "only reads reached ACPI: " + c);
             Equal(0, rig.Adl.Sets.Count, "no ADL write");
             Equal(0, rig.Services.Changes().Count, "no service change");

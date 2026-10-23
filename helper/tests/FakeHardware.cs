@@ -122,6 +122,53 @@ namespace Overdrive.Helper.Tests
         public void Dispose() { Disposed = true; }
     }
 
+    // Windows power stand-in: boost AC/DC values and the active overlay, with every call recorded.
+    public class FakeWinPower : IWinPower
+    {
+        public int Ac = 3, Dc = 3;
+        public string Overlay = "00000000-0000-0000-0000-000000000000";
+        public bool Fail;
+        public readonly List<string> Calls = new List<string>();
+
+        public int[] GetCpuBoost()
+        {
+            Calls.Add("get boost");
+            return Fail ? null : new[] { Ac, Dc };
+        }
+
+        public bool SetCpuBoost(int value, out string err)
+        {
+            Calls.Add("set boost " + value);
+            err = null;
+            if (Fail) { err = "boost write failed"; return false; }
+            Ac = value;
+            Dc = value;
+            return true;
+        }
+
+        public string GetOverlay()
+        {
+            Calls.Add("get overlay");
+            return Fail ? null : Overlay;
+        }
+
+        public bool SetOverlay(string guid, out string err)
+        {
+            Calls.Add("set overlay " + guid);
+            err = null;
+            if (Fail) { err = "overlay write failed"; return false; }
+            Overlay = guid;
+            return true;
+        }
+
+        public List<string> Writes()
+        {
+            var l = new List<string>();
+            foreach (string c in Calls) if (c.StartsWith("set ")) l.Add(c);
+            return l;
+        }
+    }
+
     // Service manager stand-in with state: start types, which services run, and injectable failures.
     // A service that is not in Types does not exist.
     public class FakeServices : IServices

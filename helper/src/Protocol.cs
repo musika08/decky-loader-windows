@@ -32,6 +32,10 @@ namespace Overdrive.Helper
             { "armoury_state", None },
             { "armoury_stop", None },
             { "armoury_restore", new[] { "recorded", "running" } },
+            { "get_cpu_boost", None },
+            { "set_cpu_boost", new[] { "value" } },
+            { "get_power_mode", None },
+            { "set_power_mode", new[] { "mode" } },
         };
 
         private static readonly string[] TopLevel = { "id", "cmd", "args" };
@@ -40,8 +44,18 @@ namespace Overdrive.Helper
         // added later is refused there unless it is listed here on purpose).
         public static readonly string[] ReadCommands =
         {
-            "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state"
+            "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state",
+            "get_cpu_boost", "get_power_mode"
         };
+
+        // Windows power (CPU Boost and power mode). Set after construction; null means not available.
+        public IWinPower WinPower { get; set; }
+
+        // Power mode overlay GUIDs (G-Helper PowerNative POWER_SILENT / POWER_BALANCED / POWER_TURBO).
+        private const string OverlayEco = "961cc777-2547-4f9d-8174-7d86181b8a7a";
+        private const string OverlayBalanced = "00000000-0000-0000-0000-000000000000";
+        private const string OverlayBest = "ded574b5-45a0-4f42-8737-46345c09c238";
+        public const string WinPowerUnavailable = "Windows power control is not available.";
 
         public static IEnumerable<string> CommandNames { get { return Commands.Keys; } }
 
@@ -153,6 +167,10 @@ namespace Overdrive.Helper
                 case "armoury_state": return ArmouryState(id);
                 case "armoury_stop": return ArmouryStop(id);
                 case "armoury_restore": return ArmouryRestore(id, args);
+                case "get_cpu_boost": return GetCpuBoost(id);
+                case "set_cpu_boost": return SetCpuBoost(id, args);
+                case "get_power_mode": return GetPowerMode(id);
+                case "set_power_mode": return SetPowerMode(id, args);
             }
             return Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
         }
@@ -498,6 +516,65 @@ namespace Overdrive.Helper
             if (result != 1) return Reply(id, false, "The graphics driver refused the FPS limit.", null);
             var d = new Dictionary<string, object>();
             d["fps"] = fps;
+            return Reply(id, true, "", d);
+        }
+
+        private string GetCpuBoost(object id)
+        {
+            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            int[] b = WinPower.GetCpuBoost();
+            if (b == null || b.Length != 2) return Reply(id, false, "Windows would not report the CPU Boost setting.", null);
+            var d = new Dictionary<string, object>();
+            d["ac"] = b[0];
+            d["dc"] = b[1];
+            return Reply(id, true, "", d);
+        }
+
+        private string SetCpuBoost(object id, Dictionary<string, object> args)
+        {
+            int value;
+            string err;
+            if (!GetInt(args, "value", out value, out err)) return Reply(id, false, err, null);
+            if (value < 0 || value > 6) return Reply(id, false, "Refused: CPU Boost must be a whole number from 0 to 6.", null);
+            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            if (!WinPower.SetCpuBoost(value, out err)) return Reply(id, false, err ?? "Windows refused the CPU Boost setting.", null);
+            var d = new Dictionary<string, object>();
+            d["value"] = value;
+            return Reply(id, true, "", d);
+        }
+
+        private static string OverlayMode(string guid)
+        {
+            if (guid == OverlayEco) return "eco";
+            if (guid == OverlayBalanced) return "balanced";
+            if (guid == OverlayBest) return "best";
+            return "other";
+        }
+
+        private string GetPowerMode(object id)
+        {
+            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            string overlay = WinPower.GetOverlay();
+            if (overlay == null) return Reply(id, false, "Windows would not report the power mode.", null);
+            var d = new Dictionary<string, object>();
+            d["overlay"] = overlay;
+            d["mode"] = OverlayMode(overlay);
+            return Reply(id, true, "", d);
+        }
+
+        private string SetPowerMode(object id, Dictionary<string, object> args)
+        {
+            object raw;
+            if (!args.TryGetValue("mode", out raw)) return Reply(id, false, "Refused: 'mode' is required.", null);
+            string mode = raw as string;
+            string guid = mode == "eco" ? OverlayEco : mode == "balanced" ? OverlayBalanced : mode == "best" ? OverlayBest : null;
+            if (guid == null) return Reply(id, false, "Refused: power mode must be eco, balanced or best.", null);
+            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            string err;
+            if (!WinPower.SetOverlay(guid, out err)) return Reply(id, false, err ?? "Windows refused the power mode.", null);
+            var d = new Dictionary<string, object>();
+            d["mode"] = mode;
+            d["overlay"] = guid;
             return Reply(id, true, "", d);
         }
 
