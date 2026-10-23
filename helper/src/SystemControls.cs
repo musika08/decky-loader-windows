@@ -22,9 +22,10 @@ namespace Overdrive.Helper
     public sealed class SystemControls : ISystemControls
     {
         private const string TouchFilter = "*touch*screen*";
-        // One device for both the read and the change: the exact "HID-compliant touch screen" if present, else the
-        // first match by InstanceId. Fixed text, no client input.
-        private const string PickDevice = "Get-PnpDevice -FriendlyName '" + TouchFilter + "' | Sort-Object @{Expression={$_.FriendlyName -ne 'HID-compliant touch screen'}}, InstanceId | Select-Object -First 1";
+        // One device for both the read and the change, among the devices present now (-PresentOnly: a remembered but
+        // absent touchscreen is never picked): the exact "HID-compliant touch screen" if present, else the first
+        // match by InstanceId. Fixed text, no client input.
+        internal const string PickDevice = "Get-PnpDevice -PresentOnly -FriendlyName '" + TouchFilter + "' | Sort-Object @{Expression={$_.FriendlyName -ne 'HID-compliant touch screen'}}, InstanceId | Select-Object -First 1";
         private const int ReadTimeoutMs = 5000;
         private const int SetTimeoutMs = 15000;
 

@@ -1296,6 +1296,13 @@ namespace Overdrive.Helper.Tests
             True(!Ok(e) && Msg(e) == "PowerShell did not answer in 5 seconds.", "read timeout reported: " + Msg(e));
         }
 
+        public static void Touchscreen_PickDevice_PresentOnlyFixedText()
+        {
+            string cmd = SystemControls.PickDevice;
+            True(cmd.StartsWith("Get-PnpDevice -PresentOnly -FriendlyName '*touch*screen*' |"), "present devices only: " + cmd);
+            True(cmd.IndexOf("{0}") < 0 && cmd.IndexOf('"') < 0, "fixed text, no placeholder for client input");
+        }
+
         public static void Touchscreen_NotFound()
         {
             var rig = new Rig();
