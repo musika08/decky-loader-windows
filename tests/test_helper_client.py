@@ -155,6 +155,119 @@ def test_timeout_reply_and_helper_still_usable():
     asyncio.run(run())
 
 
+def test_two_timeouts_in_a_row_kill_and_restart_helper():
+    async def run():
+        sleeps = Sleeps()
+        starts = []
+        c = HelperClient(start_process=spawner("--hang-on", "sensors", counter=starts), sleep=sleeps)
+        try:
+            await c.call("hello")
+            first = c._proc
+            assert "did not answer" in (await c.call("sensors", timeout=0.3))["message"]
+            assert c._proc is first                       # one timeout is not enough
+            assert (await c.call("hello"))["ok"] is True  # an answer resets the count
+            assert "did not answer" in (await c.call("sensors", timeout=0.3))["message"]
+            assert c._proc is first
+            assert "did not answer" in (await c.call("sensors", timeout=0.3))["message"]
+            await until(lambda: len(starts) == 2 and c._proc is not None and c._proc is not first)
+            assert first.returncode is not None
+            assert sleeps.delays == [1]                   # counted toward the restart budget
+            assert "did not answer 2 requests in a row" in c.last_error
+            assert (await c.call("hello"))["ok"] is True
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_repeated_kills_end_unavailable():
+    async def run():
+        c = HelperClient(start_process=spawner("--hang-on", "sensors"), sleep=Sleeps())
+        try:
+            for _ in range(40):
+                if c.unavailable_reason:
+                    break
+                await c.call("sensors", timeout=0.2)
+            assert "5 times in 10 minutes" in c.unavailable_reason
+            assert "did not answer" in c.unavailable_reason
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_timeouts_during_armoury_call_never_kill():
+    async def run():
+        starts = []
+        c = HelperClient(start_process=spawner("--slow-on", "armoury_stop", "--slow-secs", "1.5", counter=starts),
+                         sleep=Sleeps())
+        try:
+            await c.call("hello")
+            first = c._proc
+            stop = asyncio.ensure_future(c.call("armoury_stop", timeout=300))
+            await asyncio.sleep(0.1)
+            assert c.busy is True
+            for _ in range(3):
+                assert "did not answer" in (await c.call("sensors", timeout=0.2))["message"]
+            r = await stop
+            assert r["ok"] is True                         # the slow service work finished normally
+            assert c._proc is first and len(starts) == 1
+            assert c.busy is False
+            # a timed-out call that overlapped the armoury call does not count afterwards either
+            assert (await c.call("hello"))["ok"] is True
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_stop_waits_for_armoury_call():
+    async def run():
+        c = HelperClient(start_process=spawner("--slow-on", "armoury_stop", "--slow-secs", "1"))
+        await c.call("hello")
+        proc = c._proc
+        stop_call = asyncio.ensure_future(c.call("armoury_stop", timeout=300))
+        await asyncio.sleep(0.1)
+        await c.stop()
+        assert (await stop_call)["ok"] is True             # not cut short by unload
+        assert proc.returncode is not None
+    asyncio.run(run())
+
+
+def test_write_counts_against_deadline():
+    class Stuck:
+        """stdin whose drain never returns, like a hung helper with a full pipe."""
+        def write(self, b):
+            pass
+
+        async def drain(self):
+            await asyncio.Event().wait()
+
+        def close(self):
+            pass
+
+    class Proc:
+        def __init__(self):
+            self.stdin = Stuck()
+            self.returncode = None
+            self.stdout = asyncio.StreamReader()
+
+        def kill(self):
+            self.returncode = -9
+            self.stdout.feed_eof()
+
+        async def wait(self):
+            return self.returncode
+
+    async def run():
+        async def start():
+            return Proc()
+        c = HelperClient(start_process=start, sleep=Sleeps())
+        try:
+            r = await asyncio.wait_for(c.call("hello", timeout=0.3), 5)
+            assert "did not answer" in r["message"]
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
 def test_late_reply_is_dropped():
     async def run():
         c = HelperClient(start_process=spawner("--slow-on", "sensors"))

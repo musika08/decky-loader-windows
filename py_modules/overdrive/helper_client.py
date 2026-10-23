@@ -6,6 +6,10 @@ a reply dict; failures on this side (helper gone, no answer, unavailable) come b
 Restarts: when the helper exits it is started again after 1, 2, 4, 4 ... s; at most 5 starts per 10 minutes, after
 that the client stays unavailable (unavailable_reason) until the plugin is reloaded. Calls in flight when the helper
 exits resolve at once with RESTARTED; a reply that arrives after its call gave up is dropped, never applied.
+
+Hung helper (ruling P11): two non-armoury calls in a row that time out kill the helper, which then restarts within
+the same budget. Calls that overlapped an armoury_* call never count: the single-threaded helper may legitimately be
+busy for many minutes stopping or starting services, and it is never killed while an armoury_* call is in flight.
 """
 import asyncio
 import json
@@ -22,12 +26,17 @@ BACKOFF = (1, 2, 4)
 MAX_STARTS = 5
 WINDOW = 600.0
 READ_LIMIT = 1 << 20
+TIMEOUTS_BEFORE_KILL = 2
 
 StartProcess = Callable[[], Awaitable["asyncio.subprocess.Process"]]
 
 
 def failure(message: str, data=None) -> dict:
     return {"id": None, "ok": False, "message": message, "data": data}
+
+
+def is_armoury(cmd: str) -> bool:
+    return cmd.startswith("armoury_")
 
 
 class HelperClient:
@@ -47,12 +56,22 @@ class HelperClient:
         self._next_id = 1
         self._starts: deque = deque()
         self._stopping = False
+        self._armoury_inflight = 0
+        self._armoury_epoch = 0          # bumped whenever an armoury_* call starts
+        self._armoury_until = 0.0        # loop time by which every armoury_* call in flight has given up
+        self._timeouts = 0               # consecutive non-armoury timeouts
+        self._kill_reason = ""
         self.last_error = ""
         self.unavailable_reason = ""
 
     @property
     def exe_path(self) -> str:
         return os.path.join(self._plugin_dir, "bin", "asus-helper.exe")
+
+    @property
+    def busy(self) -> bool:
+        """True while an armoury_* call is in flight."""
+        return self._armoury_inflight > 0
 
     async def _spawn(self):
         cwd = self._runtime_dir or self._plugin_dir
@@ -100,19 +119,24 @@ class HelperClient:
                 await self._end(proc)
                 return
             self._proc = proc
+            self._timeouts = 0
             self._reader = asyncio.ensure_future(self._read_loop(proc))
             self._log.info("Overdrive helper started")
             return
 
     async def stop(self) -> None:
+        # Never cut an armoury_* call short: the helper would die halfway through changing services. Wait for it,
+        # bounded by that call's own timeout. New calls are refused meanwhile.
         self._stopping = True
-        for task in (self._starter,):
-            if task is not None and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+        loop = asyncio.get_running_loop()
+        while self._armoury_inflight > 0 and loop.time() < self._armoury_until:
+            await asyncio.sleep(0.05)
+        if self._starter is not None and not self._starter.done():
+            self._starter.cancel()
+            try:
+                await self._starter
+            except (asyncio.CancelledError, Exception):
+                pass
         proc, self._proc = self._proc, None
         self._fail_pending(STOPPING)
         if proc is not None:
@@ -140,6 +164,18 @@ class HelperClient:
             except Exception:
                 pass
 
+    def _kill(self, reason: str) -> None:
+        """Kills a hung helper; the read loop then fails pending calls and restarts it within the budget."""
+        proc = self._proc
+        if proc is None or self._armoury_inflight > 0:
+            return
+        self._kill_reason = reason
+        self._log.warning(f"Overdrive helper killed: {reason}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
     # ---------- reading ----------
 
     async def _read_loop(self, proc) -> None:
@@ -160,6 +196,7 @@ class HelperClient:
                 if fut is None:
                     self._log.info(f"Dropped a late or unknown helper reply (id {rid!r})")
                 elif not fut.done():
+                    self._timeouts = 0
                     fut.set_result(msg)
         except (asyncio.CancelledError, ConnectionError, OSError, ValueError):
             pass
@@ -174,8 +211,13 @@ class HelperClient:
             except Exception:
                 pass
         self._proc = None
-        self.last_error = f"the helper exited with code {code}"
-        self._log.warning(f"Overdrive {self.last_error}")
+        if self._kill_reason:
+            self.last_error, self._kill_reason = self._kill_reason, ""
+        elif code is None:
+            self.last_error = "the helper stopped responding and was killed"
+        else:
+            self.last_error = f"the helper exited with code {code}"
+        self._log.warning(f"Overdrive: {self.last_error}")
         self._fail_pending(RESTARTED)
         if not self._stopping:
             self._starter = asyncio.ensure_future(self._start_loop(restart=True))
@@ -195,6 +237,19 @@ class HelperClient:
             return failure(self.unavailable_reason)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        armoury = is_armoury(cmd)
+        if armoury:
+            self._armoury_inflight += 1
+            self._armoury_epoch += 1
+            self._armoury_until = max(self._armoury_until, deadline)
+        epoch = self._armoury_epoch
+        try:
+            return await self._call(loop, deadline, cmd, args, timeout, armoury, epoch)
+        finally:
+            if armoury:
+                self._armoury_inflight -= 1
+
+    async def _call(self, loop, deadline, cmd, args, timeout, armoury, epoch) -> dict:
         if self._proc is None:
             self.start()
             starter = self._starter
@@ -215,15 +270,25 @@ class HelperClient:
         req = {"id": rid, "cmd": cmd}
         if args is not None:
             req["args"] = args
-        try:
-            proc.stdin.write((json.dumps(req) + "\n").encode("utf-8"))
+        line = (json.dumps(req) + "\n").encode("utf-8")
+
+        async def exchange():
+            # The write and its drain count against the deadline too: a hung helper stops reading its stdin.
+            proc.stdin.write(line)
             await proc.stdin.drain()
-        except (ConnectionError, OSError, AttributeError, RuntimeError):
-            self._pending.pop(rid, None)
-            return failure(RESTARTED)
+            return await fut
+
         try:
-            return await asyncio.wait_for(fut, max(deadline - loop.time(), 0.01))
+            return await asyncio.wait_for(exchange(), max(deadline - loop.time(), 0.01))
         except asyncio.TimeoutError:
+            overlapped = self._armoury_inflight > 0 or epoch != self._armoury_epoch
+            if not armoury and not overlapped and proc is self._proc:
+                self._timeouts += 1
+                if self._timeouts >= TIMEOUTS_BEFORE_KILL:
+                    self._timeouts = 0
+                    self._kill(f"it did not answer {TIMEOUTS_BEFORE_KILL} requests in a row")
             return failure(f"Overdrive helper did not answer in {timeout:g} s.")
+        except (ConnectionError, OSError, AttributeError, RuntimeError):
+            return failure(RESTARTED)
         finally:
             self._pending.pop(rid, None)

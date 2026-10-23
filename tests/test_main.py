@@ -192,16 +192,180 @@ def test_armoury_on_saves_recorded_state_before_success_reply(tmp_path):
 def test_armoury_on_save_failure_restores_and_reports(tmp_path, monkeypatch):
     async def go():
         p, c, s = plugin_with(tmp_path)
+        real_save = s.save
+        saves = []
 
-        def broken_save():
-            raise OSError("disk full")
-        monkeypatch.setattr(s, "save", broken_save)
+        def save_then_fail():
+            saves.append(1)
+            if len(saves) > 1:              # the provisional record saves; the final "on" does not
+                raise OSError("disk full")
+            real_save()
+        monkeypatch.setattr(s, "save", save_then_fail)
         r = await p.set_armoury_replaced(True)
         assert r["ok"] is False and "disk full" in r["message"]
         assert ("armoury_restore", {"recorded": {"ArmouryCrateSEService": "AutomaticDelayedStart",
                                                  "LightingService": "Automatic"},
                                     "running": ["ArmouryCrateSEService"]}) in c.calls
         assert s.armoury_replaced is False
+    run(go())
+
+
+def test_armoury_on_refused_when_record_cannot_be_saved(tmp_path, monkeypatch):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+
+        def broken_save():
+            raise OSError("disk full")
+        monkeypatch.setattr(s, "save", broken_save)
+        r = await p.set_armoury_replaced(True)
+        assert r["ok"] is False and "nothing was changed" in r["message"]
+        assert all(cmd != "armoury_stop" for cmd, _ in c.calls)
+        assert s.armoury_recorded == {}
+    run(go())
+
+
+def test_armoury_provisional_record_saved_before_stop(tmp_path):
+    async def go():
+        c = FakeClient()
+        on_disk = {}
+
+        async def stop_lost(args):
+            with open(s.path, encoding="utf-8") as f:
+                on_disk.update(json.load(f))
+            # services get stopped and disabled, but the reply never arrives (helper killed)
+            c.armoury["startTypes"] = {"ArmouryCrateSEService": "Manual", "LightingService": "Manual"}
+            c.armoury["running"] = []
+            return fail("Overdrive helper restarted, try again")
+        c.handlers["armoury_stop"] = stop_lost
+        p, c, s = plugin_with(tmp_path, client=c)
+        r = await p.set_armoury_replaced(True)
+        assert r["ok"] is False
+        original = {"ArmouryCrateSEService": "AutomaticDelayedStart", "LightingService": "Automatic"}
+        assert on_disk["armoury_recorded"] == original and on_disk["armoury_replaced"] is False
+        saved = Settings.load(s.path)
+        assert saved.armoury_recorded == original and saved.armoury_running == ["ArmouryCrateSEService"]
+
+        # the next switch-on keeps the provisional record instead of recording the stopped state
+        del c.handlers["armoury_stop"]
+        assert (await p.set_armoury_replaced(True))["ok"] is True
+        saved = Settings.load(s.path)
+        assert saved.armoury_replaced is True
+        assert saved.armoury_recorded == original and saved.armoury_running == ["ArmouryCrateSEService"]
+    run(go())
+
+
+def test_armoury_off_with_provisional_record_restores(tmp_path):
+    async def go():
+        recorded = {"ArmouryCrateService": "Automatic"}
+        p, c, s = plugin_with(tmp_path, armoury_replaced=False, armoury_recorded=dict(recorded),
+                              armoury_running=["ArmouryCrateService"])
+        r = await p.set_armoury_replaced(False)
+        assert r["ok"] is True
+        assert c.calls[-1] == ("armoury_restore", {"recorded": recorded, "running": ["ArmouryCrateService"]})
+        assert Settings.load(s.path).armoury_recorded == {}
+    run(go())
+
+
+def test_armoury_stop_rolled_back_clears_provisional_record(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def stop_fails(args):
+            return fail("Could not stop AsHidService (stop): access denied. Every service changed so far was put back.",
+                        {"failed": "AsHidService", "rolledBack": True})
+        c.handlers["armoury_stop"] = stop_fails
+        p, c, s = plugin_with(tmp_path, client=c)
+        assert (await p.set_armoury_replaced(True))["ok"] is False
+        assert Settings.load(s.path).armoury_recorded == {}
+    run(go())
+
+
+def test_armoury_off_with_empty_record_leaves_services(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, armoury_replaced=True)
+        r = await p.set_armoury_replaced(False)
+        assert r["ok"] is True and "No recorded Armoury Crate state" in r["message"]
+        assert all(cmd != "armoury_restore" for cmd, _ in c.calls)
+        assert s.armoury_replaced is False
+    run(go())
+
+
+def test_busy_while_armoury_call_runs(tmp_path):
+    async def go():
+        c = FakeClient()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_stop(args):
+            entered.set()
+            await release.wait()
+            return ok({"startTypes": dict(c.armoury["startTypes"]), "running": list(c.armoury["running"])})
+        c.handlers["armoury_stop"] = slow_stop
+        p, c, s = plugin_with(tmp_path, client=c,
+                              default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")})
+        switch = asyncio.ensure_future(p.set_armoury_replaced(True))
+        await entered.wait()
+        busy = {"ok": False, "message": "Overdrive is switching Armoury Crate services. Try again when it finishes."}
+        assert await p.set_mode("turbo") == busy
+        assert await p.set_fps(60) == busy
+        assert await p.set_fan_preset("quiet") == busy
+        assert await p.set_fan_curve([30, 40, 50, 60, 70, 80, 90, 100], [10, 20, 30, 40, 50, 60, 70, 80]) == busy
+        assert await p.reset_defaults() == busy
+        assert await p.set_armoury_replaced(False) == busy
+        assert c.writes() == [("armoury_stop", None)]          # nothing queued behind the service switch
+        st = await asyncio.wait_for(p.get_state(), 1)          # reads still work, and do not queue either
+        assert st["busy"] is True
+        assert (await p.get_sensors())["ok"] is True
+        release.set()
+        assert (await switch)["ok"] is True
+        assert (await p.get_state())["busy"] is False
+        assert (await p.set_mode("turbo"))["ok"] is True
+    run(go())
+
+
+def test_unload_waits_for_armoury_switch(tmp_path):
+    async def go():
+        c = FakeClient()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def slow_stop(args):
+            entered.set()
+            await release.wait()
+            return ok({"startTypes": dict(c.armoury["startTypes"]), "running": list(c.armoury["running"])})
+        c.handlers["armoury_stop"] = slow_stop
+        p, c, s = plugin_with(tmp_path, client=c)
+        switch = asyncio.ensure_future(p.set_armoury_replaced(True))
+        await entered.wait()
+        unload = asyncio.ensure_future(p._unload())
+        await asyncio.sleep(0.2)
+        assert not c.stopped and not unload.done()
+        release.set()
+        await unload
+        assert c.stopped
+        assert (await switch)["ok"] is True
+        assert Settings.load(s.path).armoury_replaced is True
+    run(go())
+
+
+def test_load_restop_is_busy_and_adds_new_services_only(tmp_path):
+    async def go():
+        c = FakeClient()
+        c.armoury["startTypes"] = {"ArmouryCrateService": "Disabled", "LightingService": "Automatic"}
+        c.armoury["running"] = ["LightingService"]
+        seen = {}
+
+        async def stop(args):
+            seen["busy"] = (await p.get_state())["busy"]
+            return ok({"startTypes": {}, "running": []})
+        c.handlers["armoury_stop"] = stop
+        recorded = {"ArmouryCrateService": "Automatic"}
+        p, c, s = plugin_with(tmp_path, client=c, armoury_replaced=True, armoury_recorded=dict(recorded),
+                              armoury_running=["ArmouryCrateService"])
+        await p._startup_sequence()
+        assert seen["busy"] is True
+        saved = Settings.load(s.path)
+        assert saved.armoury_recorded == {"ArmouryCrateService": "Automatic", "LightingService": "Automatic"}
+        assert saved.armoury_running == ["ArmouryCrateService", "LightingService"]
+        await p.reapplier.stop()
     run(go())
 
 
@@ -240,7 +404,9 @@ def test_load_restops_armoury_without_overwriting_record(tmp_path):
                               armoury_running=["ArmouryCrateService"])
         await p._startup_sequence()
         assert [cmd for cmd, _ in c.calls][:2] == ["armoury_state", "armoury_stop"]
-        assert s.armoury_recorded == recorded and s.armoury_running == ["ArmouryCrateService"]
+        # existing entries untouched (services the fake reports that were not recorded are added, see below)
+        assert s.armoury_recorded["ArmouryCrateService"] == "Automatic"
+        assert s.armoury_running[0] == "ArmouryCrateService"
         await p.reapplier.stop()
     run(go())
 

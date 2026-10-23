@@ -115,6 +115,64 @@ def test_reapply_on_resume_gap(tmp_path):
     run(go())
 
 
+def test_slow_reapply_is_not_a_resume(tmp_path):
+    async def go():
+        c = FakeClient()
+        clock = Clock()
+
+        async def slow_set_mode(args):
+            clock.step(60)                 # a busy helper: the write takes a minute of real time
+            return ok(dict(args))
+        c.handlers["set_mode"] = slow_set_mode
+        power = Power(True)
+        r = Reapplier(c, make(tmp_path), clock=clock, power_source=power)
+        r.prime()
+        power.value = False
+        assert await r.tick() is True      # AC change
+        applied = []
+        for _ in range(5):
+            clock.step(5)
+            applied.append(await r.tick())
+        assert applied == [False] * 5      # no repeat reapplies
+        assert [cmd for cmd, _ in c.writes()] == ["set_mode"]
+    run(go())
+
+
+def test_slow_start_apply_is_not_a_resume(tmp_path):
+    async def go():
+        c = FakeClient()
+        clock = Clock()
+
+        async def slow_get_fans(args):
+            clock.step(10)
+            return ok({"mode": args["mode"], "temps": LOW["temps"], "speeds": LOW["speeds"]})
+        c.handlers["get_fans"] = slow_get_fans
+        r = Reapplier(c, make(tmp_path), clock=clock, power_source=Power(), poll=0.01)
+        r.start()
+        for _ in range(100):
+            if any(cmd == "set_mode" for cmd, _ in c.calls):
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.1)          # several polls with no clock movement
+        await r.stop()
+        assert [cmd for cmd, _ in c.writes()].count("set_mode") == 1
+    run(go())
+
+
+def test_no_reapply_while_armoury_call_runs(tmp_path):
+    async def go():
+        c = FakeClient()
+        s = make(tmp_path, default_curve={m: LOW for m in ("balanced", "turbo", "silent")})
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        c.armoury_inflight = 1
+        assert await r.apply_all() is False
+        assert c.calls == [] and r.rerun is True
+        c.armoury_inflight = 0
+        assert await r.tick() is True
+        assert c.writes() and r.rerun is False
+    run(go())
+
+
 def test_reapply_does_not_overwrite_newer_user_change(tmp_path):
     async def go():
         c = FakeClient()

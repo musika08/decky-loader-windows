@@ -5,7 +5,9 @@ took far longer than 5 s on the monotonic clock means the loop itself was suspen
 
 User changes and reapply steps share one lock. A user change bumps `generation` before it waits for the lock, so a
 reapply step that runs after the bump sees a newer generation and drops the rest of that reapply; the user's write
-always lands last. A dropped reapply is redone (with the then-current settings) at the next poll.
+always lands last. A dropped reapply is redone (with the then-current settings) at the next poll. The same happens
+while an armoury_* call is in flight (client.busy). The resume baseline is taken again after each reapply, so a slow
+reapply is never mistaken for sleep.
 """
 import asyncio
 import contextlib
@@ -103,9 +105,12 @@ class Reapplier:
 
     # ---------- applying ----------
 
+    def _busy(self) -> bool:
+        return bool(getattr(self.client, "busy", False))
+
     async def _step(self, gen: int, cmd: str, args: dict) -> dict:
         async with self.lock:
-            if gen != self.generation:
+            if gen != self.generation or self._busy():
                 raise Dropped()
             return await self.client.call(cmd, args)
 
@@ -131,6 +136,11 @@ class Reapplier:
     async def apply_all(self) -> bool:
         """Applies the stored settings. False when dropped because of a newer user change."""
         gen = self.generation
+        if self._busy():
+            # An armoury_* call holds the single-threaded helper for minutes: queueing behind it would only time
+            # out and then run later. Try again at the next poll.
+            self.rerun = True
+            return False
         await self.read_default_curves()
         s = self.settings
         if not s.user_set:
@@ -198,7 +208,11 @@ class Reapplier:
         if not reasons:
             return False
         self.log.info(f"Reapplying ({', '.join(reasons)})")
-        await self.apply_all()
+        try:
+            await self.apply_all()
+        finally:
+            # Re-baseline after the reapply: its own duration (a busy helper, a lock wait) is not sleep time.
+            self._wall, self._mono = self.clock.time(), self.clock.monotonic()
         return True
 
     def start(self) -> None:
@@ -211,6 +225,7 @@ class Reapplier:
             await self.apply_all()
         except Exception:
             self.log.exception("Reapply on start failed")
+        self._wall, self._mono = self.clock.time(), self.clock.monotonic()
         while True:
             await asyncio.sleep(self.poll)
             try:

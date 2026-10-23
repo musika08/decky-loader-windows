@@ -7,7 +7,7 @@ Script options (argv):
   --exit-at-start CODE   exit with CODE before reading anything
   --exit-on CMD          exit with code 3 when CMD arrives, without replying
   --hang-on CMD          never reply to CMD (keeps reading other lines)
-  --slow-on CMD          reply to CMD after 1 s
+  --slow-on CMD          reply to CMD after 1 s (or --slow-secs S), reading nothing else meanwhile
   --log PATH             append every request line to PATH
 """
 import json
@@ -18,7 +18,7 @@ CURVE = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [0, 5, 10, 20, 30
 
 
 def main(argv):
-    opts = {"exit_on": None, "hang_on": None, "slow_on": None, "log": None}
+    opts = {"exit_on": None, "hang_on": None, "slow_on": None, "slow_secs": 1.0, "log": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -30,6 +30,8 @@ def main(argv):
             opts["hang_on"] = argv[i + 1]
         elif a == "--slow-on":
             opts["slow_on"] = argv[i + 1]
+        elif a == "--slow-secs":
+            opts["slow_secs"] = float(argv[i + 1])
         elif a == "--log":
             opts["log"] = argv[i + 1]
         i += 2
@@ -55,7 +57,7 @@ def main(argv):
         if cmd == opts["hang_on"]:
             continue
         if cmd == opts["slow_on"]:
-            time.sleep(1.0)
+            time.sleep(opts["slow_secs"])
         data = None
         if cmd == "hello":
             data = {"version": "0.1.0", "ally": True}
@@ -83,6 +85,7 @@ class FakeClient:
         self.unavailable_reason = ""
         self.started = False
         self.stopped = False
+        self.armoury_inflight = 0
         self.curves = curves or {m: dict(CURVE) for m in ("balanced", "turbo", "silent")}
         self.armoury = {"startTypes": {"ArmouryCrateSEService": "AutomaticDelayedStart",
                                        "LightingService": "Automatic"},
@@ -97,7 +100,21 @@ class FakeClient:
     def writes(self):
         return [c for c in self.calls if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello")]
 
+    @property
+    def busy(self):
+        return self.armoury_inflight > 0
+
     async def call(self, cmd, args=None, timeout=10.0):
+        armoury = cmd.startswith("armoury_")
+        if armoury:
+            self.armoury_inflight += 1
+        try:
+            return await self._call(cmd, args, timeout)
+        finally:
+            if armoury:
+                self.armoury_inflight -= 1
+
+    async def _call(self, cmd, args, timeout):
         self.calls.append((cmd, args))
         self.timeouts.setdefault(cmd, []).append(timeout)
         if cmd in self.handlers:
