@@ -15,6 +15,7 @@ import logging
 import time
 from typing import Callable, Optional
 
+from .controls import apply_controller
 from .helper_client import RESTARTED
 from .settings import CURVE_MODES, FANS, MODE_POWER, Settings, curve_mode, preset_curve
 
@@ -143,6 +144,17 @@ def mode_write(mode: str, manual_power=None) -> dict:
 
 class Dropped(Exception):
     pass
+
+
+class _StepClient:
+    """A client whose calls go through the reapplier's `_step`, so controls.apply_controller obeys the same lock,
+    generation and Armoury-busy checks (and raises Dropped) as the other reapply steps."""
+
+    def __init__(self, reapplier: "Reapplier", gen: int):
+        self._r, self._gen = reapplier, gen
+
+    async def call(self, cmd: str, args: Optional[dict] = None, timeout: float = 10.0) -> dict:
+        return await self._r._step(self._gen, cmd, args or {})
 
 
 class Reapplier:
@@ -278,6 +290,15 @@ class Reapplier:
                 transport |= transport_failure(r)
                 if not r.get("ok"):
                     problems.append(r.get("message") or "The FPS limit was not applied.")
+            # The controller forgets its mode and vibration on sleep; no controller found means nothing to write.
+            info = await self._step(gen, "controller_info", {})
+            transport |= transport_failure(info)
+            data = info.get("data") if info.get("ok") else None
+            if isinstance(data, dict) and data.get("found"):
+                r = await apply_controller(_StepClient(self, gen), s)
+                transport |= transport_failure(r)
+                if not r.get("ok"):
+                    problems.append(r.get("message") or "The controller settings were not applied.")
         except Dropped:
             self.rerun = True
             self.log.info("Reapply dropped: a newer change was made meanwhile")

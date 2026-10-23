@@ -104,7 +104,8 @@ class FakeClient:
 
     def writes(self):
         return [c for c in self.calls
-                if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello", "frame_sample")]
+                if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello", "frame_sample",
+                             "get_cpu_boost", "get_power_mode", "controller_info", "get_touchscreen", "get_auto_sr")]
 
     @property
     def busy(self):
@@ -142,6 +143,16 @@ class FakeClient:
                     "gpuPowerW": 6, "errors": []})
         if cmd == "frame_sample":
             return ok(dict(FRAME_SAMPLE))
+        if cmd == "get_cpu_boost":
+            return ok({"ac": 0, "dc": 0})
+        if cmd == "get_power_mode":
+            return ok({"overlay": "00000000-0000-0000-0000-000000000000", "mode": "balanced"})
+        if cmd == "controller_info":
+            return ok({"found": False, "pid": "0x1B4C", "xbox": False})   # off by default: no extra writes
+        if cmd == "get_touchscreen":
+            return ok({"found": False, "enabled": False, "instanceId": ""})
+        if cmd == "get_auto_sr":
+            return ok({"installed": False, "value": None})
         return ok(dict(args))
 
 

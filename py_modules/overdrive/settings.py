@@ -22,6 +22,8 @@ CURVE_MODES = ("balanced", "turbo", "silent")          # firmware curves; manual
 PRESETS = ("default", "recommended", "quiet", "cool", "custom")
 FANS = ("cpu", "gpu")                                  # G-Helper AsusFan.CPU / AsusFan.GPU; written in this order
 ALLOWED_FPS = (0, 30, 40, 45, 50, 60, 75, 90, 120)     # 0 = off (the helper maps it to the driver's value)
+CONTROLLER_MODES = ("gamepad", "desktop", "auto")
+CPU_BOOST_ON_DEFAULT = 2                               # Aggressive
 POWER_MIN, POWER_MAX, POWER_DEFAULT = 5, 50, 30
 # Owner-chosen watts per mode (2026-10-23), sent as all three limits with the mode. With Armoury Crate stopped the
 # Ally's firmware mode alone changed the fans but barely the speed. src/curve.ts MODE_POWER mirrors it.
@@ -180,6 +182,9 @@ class Settings:
         self.armoury_recorded: dict = {}
         self.armoury_running: list = []
         self.auto_tdp = False               # Auto TDP: the plugin follows the load and sets the watts itself
+        self.controller_mode = "gamepad"    # "gamepad" | "desktop" | "auto"
+        self.grip_vibration = True
+        self.cpu_boost_on_value = CPU_BOOST_ON_DEFAULT   # 1..6: what CPU Boost "On" writes
         # False until the owner changes something: an untouched install only reads, it never writes the device.
         self.user_set = False
         self.logger = None
@@ -189,7 +194,8 @@ class Settings:
 
     FIELDS = ("mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "default_curve",
               "fan_curve_gpu", "default_curve_gpu",
-              "armoury_replaced", "armoury_recorded", "armoury_running", "auto_tdp", "user_set")
+              "armoury_replaced", "armoury_recorded", "armoury_running", "auto_tdp",
+              "controller_mode", "grip_vibration", "cpu_boost_on_value", "user_set")
 
     # Per-fan attribute names: (custom curve, default curves by mode).
     _FAN_ATTRS = {"cpu": ("fan_curve", "default_curve"), "gpu": ("fan_curve_gpu", "default_curve_gpu")}
@@ -360,6 +366,12 @@ class Settings:
             self.armoury_running = seen
         if isinstance(raw.get("auto_tdp"), bool):
             self.auto_tdp = raw["auto_tdp"]
+        if raw.get("controller_mode") in CONTROLLER_MODES:
+            self.controller_mode = raw["controller_mode"]
+        if isinstance(raw.get("grip_vibration"), bool):
+            self.grip_vibration = raw["grip_vibration"]
+        if _is_int(raw.get("cpu_boost_on_value")) and 1 <= raw["cpu_boost_on_value"] <= 6:
+            self.cpu_boost_on_value = raw["cpu_boost_on_value"]
         if isinstance(raw.get("user_set"), bool):
             self.user_set = raw["user_set"]
 
