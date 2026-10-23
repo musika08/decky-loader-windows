@@ -179,6 +179,7 @@ class Settings:
         self.armoury_replaced = False
         self.armoury_recorded: dict = {}
         self.armoury_running: list = []
+        self.auto_tdp = False               # Auto TDP: the plugin follows the load and sets the watts itself
         # False until the owner changes something: an untouched install only reads, it never writes the device.
         self.user_set = False
         self.logger = None
@@ -188,7 +189,7 @@ class Settings:
 
     FIELDS = ("mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "default_curve",
               "fan_curve_gpu", "default_curve_gpu",
-              "armoury_replaced", "armoury_recorded", "armoury_running", "user_set")
+              "armoury_replaced", "armoury_recorded", "armoury_running", "auto_tdp", "user_set")
 
     # Per-fan attribute names: (custom curve, default curves by mode).
     _FAN_ATTRS = {"cpu": ("fan_curve", "default_curve"), "gpu": ("fan_curve_gpu", "default_curve_gpu")}
@@ -357,6 +358,8 @@ class Settings:
                 if isinstance(name, str) and name in self.armoury_recorded and name not in seen:
                     seen.append(name)
             self.armoury_running = seen
+        if isinstance(raw.get("auto_tdp"), bool):
+            self.auto_tdp = raw["auto_tdp"]
         if isinstance(raw.get("user_set"), bool):
             self.user_set = raw["user_set"]
 

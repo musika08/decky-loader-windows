@@ -99,6 +99,31 @@ def test_custom_preset_without_curve_falls_back(tmp_path):
     assert Settings.load(str(p)).fan_preset == "default"
 
 
+def test_auto_tdp_round_trip(tmp_path):
+    p = str(tmp_path / "overdrive.json")
+    s = Settings.load(p)
+    assert s.auto_tdp is False
+    s.auto_tdp = True
+    s.save()
+    assert Settings.load(p).auto_tdp is True
+    with open(p, encoding="utf-8") as f:
+        assert json.load(f)["auto_tdp"] is True
+
+
+def test_auto_tdp_bad_value_is_false(tmp_path):
+    p = tmp_path / "overdrive.json"
+    for bad in ("yes", 1, None, [True]):
+        p.write_text(json.dumps({"auto_tdp": bad}), encoding="utf-8")
+        assert Settings.load(str(p)).auto_tdp is False
+
+
+def test_auto_tdp_missing_is_false(tmp_path):
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"mode": "turbo", "user_set": True}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert s.auto_tdp is False and s.mode == "turbo"
+
+
 def test_bools_are_not_numbers(tmp_path):
     p = tmp_path / "overdrive.json"
     p.write_text(json.dumps({"spl": True, "fps": False}), encoding="utf-8")
@@ -186,7 +211,8 @@ def _full_settings():
             "fan_curve": None, "default_curve": None,
             "fan_curve_gpu": {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]},
             "default_curve_gpu": {"balanced": dict(GPU_LOW)}, "armoury_replaced": True,
-            "armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"], "user_set": True}
+            "armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"], "auto_tdp": True,
+            "user_set": True}
 
 
 def test_bom_prefixed_file_loads_every_field(tmp_path):
