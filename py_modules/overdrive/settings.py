@@ -19,12 +19,15 @@ from typing import Optional
 
 MODES = ("silent", "balanced", "turbo", "manual")
 CURVE_MODES = ("balanced", "turbo", "silent")          # firmware curves; manual uses balanced's
-PRESETS = ("default", "quiet", "cool", "custom")
+PRESETS = ("default", "recommended", "quiet", "cool", "custom")
 FANS = ("cpu", "gpu")                                  # G-Helper AsusFan.CPU / AsusFan.GPU; written in this order
 ALLOWED_FPS = (0, 30, 40, 45, 50, 60, 75, 90, 120)     # 0 = off (the helper maps it to the driver's value)
 POWER_MIN, POWER_MAX, POWER_DEFAULT = 5, 50, 30
 CURVE_POINTS, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX = 8, 20, 110, 100
 QUIET_DELTA, COOL_DELTA = -10, 15
+# Owner-approved fixed curve for both fans (2026-10-23), derived from the Ally's factory curves and G-Helper's
+# minimum (75 -> 6, 80 -> 12, 90 -> 24 %, all met). src/curve.ts RECOMMENDED_CURVE mirrors it.
+RECOMMENDED_CURVE = {"temps": [40, 50, 60, 65, 70, 75, 80, 90], "speeds": [10, 15, 25, 35, 45, 55, 70, 90]}
 
 # helper\src\ArmouryServices.cs (G-Helper AsusService.cs services + servicesAC). The helper refuses a restore that
 # names anything else, so a hand-edited name is dropped here instead of blocking the switch.
@@ -135,7 +138,10 @@ def preset_curve(name: str, base: Optional[dict]) -> "tuple[Optional[dict], bool
     """Curve for a preset derived from a device default curve, and whether it was raised to the safe minimum.
 
     default = the device curve; quiet = speeds - 10; cool = speeds + 15; each clamped to 0..100 and raised to
-    G-Helper's minimum per point; temps unchanged. (None, False) when the base curve cannot be made valid."""
+    G-Helper's minimum per point; temps unchanged. (None, False) when the base curve cannot be made valid.
+    recommended = RECOMMENDED_CURVE whatever the base (it needs no device curve)."""
+    if name == "recommended":
+        return {"temps": list(RECOMMENDED_CURVE["temps"]), "speeds": list(RECOMMENDED_CURVE["speeds"])}, False
     base = _device_curve(base)
     if base is None or name not in ("default", "quiet", "cool"):
         return None, False

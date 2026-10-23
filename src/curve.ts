@@ -49,6 +49,13 @@ export function validateCurve(temps: number[], speeds: number[]): string | null 
   return null;
 }
 
+// The Recommended preset: one fixed curve for both fans, owner-approved 2026-10-23. Mirrors RECOMMENDED_CURVE in
+// py_modules/overdrive/settings.py (the backend sends it; the panel only shows what get_state returns).
+export const RECOMMENDED_CURVE: Curve = {
+  temps: [40, 50, 60, 65, 70, 75, 80, 90],
+  speeds: [10, 15, 25, 35, 45, 55, 70, 90],
+};
+
 // Starting point for the editor when the backend has no curve yet (device default curve not read).
 export function defaultDraft(): Curve {
   return { temps: [30, 40, 50, 60, 70, 80, 90, 100], speeds: [0, 10, 20, 30, 40, 50, 60, 70] };

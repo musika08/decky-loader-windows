@@ -50,6 +50,7 @@ import {
   dragTo,
   fillPath,
   floorPath,
+  hasStacks,
   hitTest,
   invalidPoint,
   linePath,
@@ -59,6 +60,8 @@ import {
   pressA,
   pressB,
   selectNext,
+  spreadPoints,
+  stackBadge,
   tailFillPath,
   tailPath,
   toChart,
@@ -69,7 +72,7 @@ import {
 // ---------- backend (main.py) ----------
 
 type Mode = 'silent' | 'balanced' | 'turbo' | 'manual';
-type Preset = 'default' | 'quiet' | 'cool' | 'custom';
+type Preset = 'default' | 'recommended' | 'quiet' | 'cool' | 'custom';
 type Support = { supported: boolean; product: string };
 type Result = { ok: boolean; message: string };
 type State = {
@@ -123,6 +126,7 @@ const MODES: { mode: Mode; label: string }[] = [
 const FPS_STEPS = [0, 30, 40, 45, 50, 60, 75, 90, 120];
 const PRESETS: { data: Preset; label: string }[] = [
   { data: 'default', label: 'Armoury default' },
+  { data: 'recommended', label: 'Recommended' },
   { data: 'quiet', label: 'Quiet' },
   { data: 'cool', label: 'Cool' },
   { data: 'custom', label: 'Custom' },
@@ -312,6 +316,26 @@ function ChartSvg(props: {
               strokeWidth={2}
             />
           )}
+          {dotPoints(curve)
+            .filter((d) => d.indices.length > 1)
+            .map((d) => {
+              // "×N" beside a dot that stands for N stacked points; drawn after the selected point so it stays legible.
+              const x = xOf(d.temp);
+              const right = x < PLOT.x1 - 18;
+              return (
+                <text
+                  key={'b' + d.index}
+                  x={right ? x + 7 : x - 7}
+                  y={Math.max(PLOT.y0 + 8, yOf(d.speed) - 6)}
+                  fill="#dcdedf"
+                  fontSize={9}
+                  fontWeight="bold"
+                  textAnchor={right ? 'start' : 'end'}
+                >
+                  {stackBadge(d.indices.length)}
+                </text>
+              );
+            })}
         </>
       ) : (
         <text x={(PLOT.x0 + PLOT.x1) / 2} y={(PLOT.y0 + PLOT.y1) / 2} fill={C_LABEL} fontSize={10} textAnchor="middle">
@@ -890,6 +914,14 @@ function Content() {
               />
             </PanelSectionRow>
             {draftReason && <Note text={draftReason} color="#ff6b6b" />}
+            {hasStacks(draft) && (
+              // Only changes the draft; nothing is sent until Apply.
+              <PanelSectionRow>
+                <ButtonItem layout="below" disabled={disabled} onClick={() => setDraft((c) => spreadPoints(c, minSpeedAt))}>
+                  Spread points
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
             <PanelSectionRow>
               <Stepper
                 label={`Point ${sel + 1} temperature`}

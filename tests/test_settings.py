@@ -375,3 +375,46 @@ def test_gpu_presets_derive_from_the_gpu_default():
     assert fan_note(s) == "Adjusted to the safe minimum"   # only the CPU's LOW curve was raised
     s.default_curve = {m: dict(GPU_LOW) for m in st.CURVE_MODES}
     assert fan_note(s) == ""
+
+
+# ---------- Recommended preset (owner-approved fixed curve, 2026-10-23) ----------
+
+RECOMMENDED = {"temps": [40, 50, 60, 65, 70, 75, 80, 90], "speeds": [10, 15, 25, 35, 45, 55, 70, 90]}
+
+
+def test_recommended_curve_is_fixed_and_valid():
+    assert st.RECOMMENDED_CURVE == RECOMMENDED
+    assert st.check_curve(RECOMMENDED["temps"], RECOMMENDED["speeds"]) is None
+    # G-Helper's minimum ceil((t - 70) * 1.2): 75 -> 6, 80 -> 12, 90 -> 24, all met
+    assert [st.min_speed_at(t) for t in (75, 80, 90)] == [6, 12, 24]
+    for t, s in zip(RECOMMENDED["temps"], RECOMMENDED["speeds"]):
+        assert s >= st.min_speed_at(t)
+    # The same curve whatever the device curve, also with none, and never "adjusted"
+    for base in (None, LOW_CURVE, GPU_LOW):
+        assert st.preset_curve("recommended", base) == (RECOMMENDED, False)
+    curve, _ = st.preset_curve("recommended", None)
+    curve["speeds"][0] = 99
+    assert st.RECOMMENDED_CURVE == RECOMMENDED            # callers get a copy
+
+
+def test_settings_accept_recommended_preset(tmp_path):
+    assert st.PRESETS == ("default", "recommended", "quiet", "cool", "custom")
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"fan_preset": "recommended"}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert s.fan_preset == "recommended"
+    s.save()
+    assert Settings.load(str(p)).fan_preset == "recommended"
+
+
+def test_recommended_plan_for_both_fans_needs_no_device_curve(tmp_path):
+    from overdrive.reapply import fan_note, fan_plan
+    s = Settings.load(str(tmp_path / "overdrive.json"))
+    s.fan_preset = "recommended"
+    for fan in st.FANS:
+        assert fan_plan(s, fan) == (RECOMMENDED, "", "")
+    s.default_curve = {m: LOW_CURVE for m in st.CURVE_MODES}
+    s.default_curve_gpu = {m: GPU_LOW for m in st.CURVE_MODES}
+    for fan in st.FANS:
+        assert fan_plan(s, fan) == (RECOMMENDED, "", "")
+    assert fan_note(s) == ""

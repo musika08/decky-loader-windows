@@ -330,6 +330,8 @@ namespace Overdrive.Helper.Tests
             // Quiet (-10, at least 0) and Cool (+15) as the plugin derives them
             True(Validation.CheckCurve(T(48, 55, 58, 62, 66, 73, 73, 94), T(0, 16, 29, 38, 46, 55, 55, 68), out reason), "turbo quiet: " + reason);
             True(Validation.CheckCurve(T(48, 55, 58, 62, 66, 73, 73, 94), T(24, 41, 54, 63, 71, 80, 80, 93), out reason), "turbo cool: " + reason);
+            // Recommended preset (fixed curve for both fans, owner-approved 2026-10-23)
+            True(Validation.CheckCurve(T(40, 50, 60, 65, 70, 75, 80, 90), T(10, 15, 25, 35, 45, 55, 70, 90), out reason), "recommended: " + reason);
         }
 
         // G-Helper app/Fans.cs (commit in helper\GHELPER_COMMIT): tempMin = 20, tempMax = 110, fansMax = 100

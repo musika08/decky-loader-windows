@@ -61,11 +61,14 @@ def fan_plan(s: Settings, fan: str = "cpu") -> "tuple[Optional[dict], str, str]"
 
     Writing the performance mode puts the firmware curve of both fans back (G-Helper's fan reset), so the "default"
     preset needs no curve write unless the device curve sits below G-Helper's minimum (ruling P6: then the raised
-    curve is written and the note says so). Under "custom", a fan without a custom curve keeps its default curve."""
+    curve is written and the note says so). "recommended" is one fixed curve for both fans, written as is. Under
+    "custom", a fan without a custom curve keeps its default curve."""
     custom = s.custom_curve(fan)
     if s.fan_preset == "custom" and custom:
         return custom, "", ""
     preset = "default" if s.fan_preset == "custom" else s.fan_preset
+    if preset == "recommended":   # a fixed curve: written as is, no device curve needed
+        return preset_curve(preset, None)[0], "", ""
     base = (s.default_curves(fan) or {}).get(curve_mode(s.mode))
     which, tail = ("", "") if fan == "cpu" else ("GPU ", " to the GPU fan")
     if base is None:

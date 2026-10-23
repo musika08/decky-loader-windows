@@ -259,7 +259,7 @@ class Plugin:
             return refused
         s = self.settings
         if name not in PRESETS:
-            return _fail("Fan preset must be default, quiet, cool or custom.")
+            return _fail("Fan preset must be default, recommended, quiet, cool or custom.")
         if name == "custom" and not s.has_custom():
             return _fail("There is no custom fan curve yet; use Edit curve first.")
         async with self.reapplier.user_change():

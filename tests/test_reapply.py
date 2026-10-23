@@ -452,3 +452,17 @@ def test_reapply_gpu_curve_refusal_is_reported(tmp_path):
         await r.apply_all()
         assert r.warning == "The GPU fan curve was not applied."
     run(go())
+
+
+def test_recommended_preset_is_written_to_both_fans_after_mode(tmp_path):
+    rec = {"temps": [40, 50, 60, 65, 70, 75, 80, 90], "speeds": [10, 15, 25, 35, 45, 55, 70, 90]}
+
+    async def go():
+        c = FakeClient()
+        s = make(tmp_path, mode="silent", fan_preset="recommended")
+        await Reapplier(c, s, clock=Clock(), power_source=Power()).apply_all()
+        w = c.writes()
+        assert [(cmd, a.get("fan")) for cmd, a in w] == [("set_mode", None), ("set_fans", None), ("set_fans", "gpu")]
+        for _, a in w[1:]:
+            assert (a["temps"], a["speeds"]) == (rec["temps"], rec["speeds"])
+    run(go())

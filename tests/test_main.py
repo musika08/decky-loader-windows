@@ -833,3 +833,31 @@ def test_get_state_gpu_curve_follows_preset(tmp_path):
 def test_get_sensors_without_helper_has_gpu_field():
     r = asyncio.run(main.Plugin().get_sensors())
     assert r["gpuFanRpm"] is None and r["ok"] is False
+
+
+RECOMMENDED = {"temps": [40, 50, 60, 65, 70, 75, 80, 90], "speeds": [10, 15, 25, 35, 45, 55, 70, 90]}
+
+
+def test_recommended_preset_writes_one_curve_to_both_fans(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)                    # no device curves read yet: not needed
+        r = await p.set_fan_preset("recommended")
+        assert r["ok"] is True, r
+        assert [(cmd, a.get("fan")) for cmd, a in c.writes()] == [("set_fans", None), ("set_fans", "gpu")]
+        for _, a in c.writes():
+            assert (a["temps"], a["speeds"]) == (RECOMMENDED["temps"], RECOMMENDED["speeds"])
+        assert s.fan_preset == "recommended"
+        st = await p.get_state()
+        assert st["fan_preset"] == "recommended"
+        assert st["fan_curve"] == RECOMMENDED and st["fan_curve_gpu"] == RECOMMENDED
+        assert st["fan_note"] == ""
+        saved = Settings.load(s.path)
+        assert saved.fan_preset == "recommended"
+        # Editing one fan from Recommended keeps the other fan on the Recommended curve
+        c.calls.clear()
+        temps, speeds = [30, 40, 50, 60, 70, 80, 90, 100], [10, 20, 30, 40, 50, 60, 70, 80]
+        assert (await p.set_fan_curve(temps, speeds, "gpu"))["ok"] is True
+        assert (s.fan_preset, s.fan_curve) == ("custom", RECOMMENDED)
+        assert (await p.set_fan_preset("loud"))["message"] == \
+            "Fan preset must be default, recommended, quiet, cool or custom."
+    run(go())

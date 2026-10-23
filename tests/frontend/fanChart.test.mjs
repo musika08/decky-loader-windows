@@ -33,8 +33,12 @@ import {
   tailFillPath,
   dotPoints,
   FANS,
+  stackBadge,
+  hasStacks,
+  spreadPoints,
+  selectNext as stepSelect,
 } from '../../src/fanChart.ts';
-import { validateCurve, minSpeedAt, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX } from '../../src/curve.ts';
+import { validateCurve, minSpeedAt, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX, RECOMMENDED_CURVE } from '../../src/curve.ts';
 
 const r1 = (n) => Math.round(n * 10) / 10;
 const CURVE = { temps: [30, 40, 50, 60, 70, 80, 90, 100], speeds: [0, 10, 20, 30, 40, 50, 60, 70] };
@@ -158,13 +162,13 @@ test('invalid point index comes from the validation reason', () => {
 test('caption names the point and the active mode', () => {
   const c = { temps: [48, 54, 59, 62, 62, 62, 62, 62], speeds: [1, 9, 18, 22, 22, 22, 22, 22] };
   const p = caption(c, 2, 'point');
-  assert.equal(p.title, 'Point 3 · 59 °C · 18 %');
+  assert.equal(p.title, 'Point 3 of 8 · 59 °C · 18 %');
   assert.match(p.hint, /^Editing: .* · B to finish$/);
   const idle = caption(c, 2, 'idle');
-  assert.equal(idle.title, 'Point 3 · 59 °C · 18 %');
+  assert.equal(idle.title, 'Point 3 of 8 · 59 °C · 18 %');
   assert.equal(idle.hint, 'Press A to edit the curve');
   const t = caption(c, 2, 'temp');
-  assert.equal(t.title, 'Point 3 · 59 °C · 18 %');
+  assert.equal(t.title, 'Point 3 of 8 · 59 °C · 18 %');
   assert.match(t.hint, /^Editing temperature: .* · B to finish$/);
 });
 
@@ -250,4 +254,104 @@ test('stacked points draw as one dot', () => {
 test('fan switch lists the CPU fan first, then the GPU fan', () => {
   assert.deepEqual(FANS.map((f) => f.fan), ['cpu', 'gpu']);
   assert.deepEqual(FANS.map((f) => f.label), ['CPU fan', 'GPU fan']);
+});
+
+// ---------- stacked points: badge, caption, Spread points ----------
+
+const SILENT = { temps: [47, 49, 54, 54, 54, 54, 54, 54], speeds: [1, 9, 13, 13, 13, 13, 13, 13] };
+const GPU_BALANCED = { temps: [48, 54, 59, 62, 62, 62, 62, 62], speeds: [1, 9, 13, 13, 13, 13, 13, 13] };
+const TURBO = { temps: [48, 55, 58, 62, 66, 73, 73, 94], speeds: [9, 26, 39, 48, 56, 65, 65, 78] };
+
+test('stack badge: one dot with x-N for stacked points, none for single points', () => {
+  assert.deepEqual(dotPoints(STACKED).map((d) => stackBadge(d.indices.length)), ['', '', '', '×5']);
+  assert.deepEqual(dotPoints(SILENT).map((d) => stackBadge(d.indices.length)), ['', '', '×6']);
+  assert.deepEqual(dotPoints(TURBO).map((d) => stackBadge(d.indices.length)), ['', '', '', '', '', '×2', '']);
+  assert.ok(dotPoints(CURVE).every((d) => stackBadge(d.indices.length) === ''));
+  assert.equal(stackBadge(1), '');
+  assert.equal(stackBadge(0), '');
+});
+
+test('caption reads Point K of 8 and the D-pad steps through every stacked point', () => {
+  const seen = [];
+  let i = 0;
+  for (let n = 0; n < 10; n++) {
+    seen.push(caption(STACKED, i, 'point').title);
+    i = stepSelect(i, 1, 8);
+  }
+  assert.deepEqual(seen.slice(0, 8), [
+    'Point 1 of 8 · 48 °C · 1 %',
+    'Point 2 of 8 · 54 °C · 9 %',
+    'Point 3 of 8 · 59 °C · 18 %',
+    'Point 4 of 8 · 62 °C · 22 %',
+    'Point 5 of 8 · 62 °C · 22 %',
+    'Point 6 of 8 · 62 °C · 22 %',
+    'Point 7 of 8 · 62 °C · 22 %',
+    'Point 8 of 8 · 62 °C · 22 %',
+  ]);
+  assert.equal(seen[9], 'Point 8 of 8 · 62 °C · 22 %', 'stops at the last point');
+  assert.equal(caption(STACKED, 5, 'idle').title, 'Point 6 of 8 · 62 °C · 22 %');
+});
+
+test('hasStacks finds neighbouring identical points only', () => {
+  assert.equal(hasStacks(STACKED), true);
+  assert.equal(hasStacks(SILENT), true);
+  assert.equal(hasStacks(TURBO), true);
+  assert.equal(hasStacks(CURVE), false);
+  assert.equal(hasStacks(RECOMMENDED_CURVE), false);
+});
+
+function checkSpread(before, after) {
+  assert.equal(validateCurve(after.temps, after.speeds), null, JSON.stringify(after));
+  assert.equal(hasStacks(after), false);
+  for (let i = 1; i < 8; i++) assert.ok(after.temps[i] > after.temps[i - 1], 'strictly increasing');
+  for (let i = 0; i < 8; i++) {
+    assert.ok(Number.isInteger(after.temps[i]));
+    assert.ok(after.speeds[i] >= minSpeedAt(after.temps[i]));
+  }
+  assert.notEqual(after, before);
+}
+
+test('Spread points: Ally balanced CPU curve', () => {
+  const r = spreadPoints(STACKED, minSpeedAt);
+  assert.deepEqual(r, { temps: [48, 54, 59, 62, 72, 81, 91, 100], speeds: [1, 9, 18, 22, 22, 22, 26, 36] });
+  checkSpread(STACKED, r);
+  assert.deepEqual(STACKED.temps, [48, 54, 59, 62, 62, 62, 62, 62], 'input untouched');
+});
+
+test('Spread points: Ally balanced GPU curve', () => {
+  const r = spreadPoints(GPU_BALANCED, minSpeedAt);
+  assert.deepEqual(r, { temps: [48, 54, 59, 62, 72, 81, 91, 100], speeds: [1, 9, 13, 13, 13, 14, 26, 36] });
+  checkSpread(GPU_BALANCED, r);
+});
+
+test('Spread points: Ally silent curve', () => {
+  const r = spreadPoints(SILENT, minSpeedAt);
+  // 54 + 46 * m / 5 -> 63.2, 72.4, 81.6, 90.8, 100
+  assert.deepEqual(r, { temps: [47, 49, 54, 63, 72, 82, 91, 100], speeds: [1, 9, 13, 13, 13, 15, 26, 36] });
+  checkSpread(SILENT, r);
+});
+
+test('Spread points: a stack inside the curve spreads before the next point and keeps it', () => {
+  const r = spreadPoints(TURBO, minSpeedAt);
+  assert.deepEqual(r, { temps: [48, 55, 58, 62, 66, 73, 84, 94], speeds: [9, 26, 39, 48, 56, 65, 65, 78] });
+  checkSpread(TURBO, r);
+});
+
+test('Spread points: no room near the top goes to 110 °C, no room at all leaves the stack', () => {
+  const high = { temps: [60, 70, 80, 90, 98, 98, 98, 98], speeds: [10, 20, 30, 40, 50, 50, 50, 50] };
+  const r = spreadPoints(high, minSpeedAt);
+  assert.deepEqual(r.temps, [60, 70, 80, 90, 98, 102, 106, 110]);
+  checkSpread(high, r);
+  const full = { temps: [104, 104, 104, 104, 104, 104, 104, 104], speeds: [50, 50, 50, 50, 50, 50, 50, 50] };
+  assert.deepEqual(spreadPoints(full, minSpeedAt), full, '7 points do not fit in 105..110');
+  assert.deepEqual(spreadPoints(CURVE, minSpeedAt), CURVE, 'nothing stacked: unchanged');
+});
+
+test('Recommended preset curve is valid and meets the G-Helper minimum', () => {
+  assert.deepEqual(RECOMMENDED_CURVE, {
+    temps: [40, 50, 60, 65, 70, 75, 80, 90],
+    speeds: [10, 15, 25, 35, 45, 55, 70, 90],
+  });
+  assert.equal(validateCurve(RECOMMENDED_CURVE.temps, RECOMMENDED_CURVE.speeds), null);
+  assert.deepEqual([75, 80, 90].map(minSpeedAt), [6, 12, 24]);
 });

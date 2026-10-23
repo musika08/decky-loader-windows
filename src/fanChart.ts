@@ -117,6 +117,58 @@ export function dotPoints(c: ChartCurve): { index: number; indices: number[]; te
   return dots;
 }
 
+// Badge for a dot that stands for several stacked points ("×5"); '' for a single point.
+export function stackBadge(count: number): string {
+  return count > 1 ? '×' + count : '';
+}
+
+// True when two neighbouring points share temperature and speed (what Spread points separates).
+export function hasStacks(c: ChartCurve): boolean {
+  for (let i = 1; i < c.temps.length; i++) {
+    if (c.temps[i] === c.temps[i - 1] && c.speeds[i] === c.speeds[i - 1]) return true;
+  }
+  return false;
+}
+
+// Spread points: every run of stacked points (same temperature and speed) keeps its first point where it is and
+// spreads the others evenly in whole degrees, strictly increasing: up to 100 °C when the stack ends the curve (110 °C
+// if 100 leaves too little room), else strictly between the stack and the next point. Each moved point's fan % is
+// max(stack speed, the G-Helper minimum at its new temperature), never below the point before it. A stack with no
+// room is left as it is. minAt is minSpeedAt from curve.ts.
+export const SPREAD_TO = 100;
+
+export function spreadPoints(c: ChartCurve, minAt: (temp: number) => number): ChartCurve {
+  const temps = [...c.temps];
+  const speeds = [...c.speeds];
+  const n = temps.length;
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && temps[j + 1] === temps[i] && speeds[j + 1] === speeds[i]) j++;
+    const k = j - i; // points to move
+    if (k > 0) {
+      const t = temps[i];
+      let pos: number[] | null = null;
+      if (j === n - 1) {
+        const hi = SPREAD_TO - t >= k ? SPREAD_TO : TEMP_MAX;
+        if (hi - t >= k) pos = Array.from({ length: k }, (_, m) => t + Math.round(((hi - t) * (m + 1)) / k));
+      } else {
+        const hi = temps[j + 1];
+        if (hi - t - 1 >= k) pos = Array.from({ length: k }, (_, m) => t + Math.round(((hi - t) * (m + 1)) / (k + 1)));
+      }
+      if (pos) {
+        for (let m = 0; m < k; m++) {
+          const at = i + 1 + m;
+          temps[at] = pos[m];
+          speeds[at] = Math.min(SPEED_MAX, Math.max(speeds[i], minAt(pos[m]), speeds[at - 1]));
+        }
+      }
+    }
+    i = j + 1;
+  }
+  return { temps, speeds };
+}
+
 // The safety floor: the lowest fan % allowed at each whole temperature.
 export function floorPath(minAt: (temp: number) => number): string {
   const parts: string[] = [];
@@ -230,8 +282,10 @@ export function aLabel(mode: EditMode): string {
 
 // ---------- caption ----------
 
+// Always names the point by its own number, also inside a stack ("Point 6 of 8"), so the D-pad steps through all 8.
+
 export function caption(c: ChartCurve, i: number, mode: EditMode): { title: string; hint: string } {
-  const title = 'Point ' + (i + 1) + ' · ' + c.temps[i] + ' °C · ' + c.speeds[i] + ' %';
+  const title = 'Point ' + (i + 1) + ' of ' + c.temps.length + ' · ' + c.temps[i] + ' °C · ' + c.speeds[i] + ' %';
   const hint =
     mode === 'idle'
       ? 'Press A to edit the curve'
