@@ -14,6 +14,7 @@ import {
   staticClasses,
 } from '@decky/ui';
 import { useEffect, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { FaBolt } from 'react-icons/fa';
 import {
   CURVE_POINTS,
@@ -25,11 +26,35 @@ import {
   MODE_OTHER_TEXT,
   defaultDraft,
   liveLine,
+  minSpeedAt,
   powerLine,
   shownMode,
   stepValue,
   validateCurve,
 } from './curve';
+import {
+  CHART,
+  EditMode,
+  GRID_SPEEDS,
+  GRID_TEMPS,
+  LABEL_SPEEDS,
+  LABEL_TEMPS,
+  PLOT,
+  caption,
+  dragTo,
+  fillPath,
+  floorPath,
+  hitTest,
+  invalidPoint,
+  linePath,
+  markerLabel,
+  markerX,
+  movePoint,
+  selectNext,
+  toChart,
+  xOf,
+  yOf,
+} from './fanChart';
 
 // ---------- backend (main.py) ----------
 
@@ -170,6 +195,195 @@ function Stepper(props: {
   );
 }
 
+// ---------- fan curve chart ----------
+
+// Steam's GamepadButton values (FooterLegend.d.ts); kept local so the bundle does not depend on the enum export.
+const BTN_UP = 9;
+const BTN_DOWN = 10;
+const BTN_LEFT = 11;
+const BTN_RIGHT = 12;
+
+const C_LINE = '#1a9fff';
+const C_FILL = 'rgba(26, 159, 255, 0.18)';
+const C_GRID = 'rgba(255, 255, 255, 0.08)';
+const C_AXIS = 'rgba(255, 255, 255, 0.25)';
+const C_LABEL = '#8b929a';
+const C_FLOOR = 'rgba(255, 183, 77, 0.6)';
+const C_MARKER = 'rgba(220, 222, 223, 0.7)';
+const C_BAD = '#ff6b6b';
+const FLOOR_PATH = floorPath(minSpeedAt);
+
+function ChartSvg(props: {
+  curve: Curve | null;
+  selected: number;
+  invalid: number;
+  cpuTemp: number | null;
+  editable: boolean;
+  onPointerDown?: (e: ReactPointerEvent<SVGSVGElement>) => void;
+  onPointerMove?: (e: ReactPointerEvent<SVGSVGElement>) => void;
+  onPointerEnd?: (e: ReactPointerEvent<SVGSVGElement>) => void;
+}) {
+  const { curve, selected, invalid, cpuTemp, editable } = props;
+  const mx = markerX(cpuTemp);
+  const labelAnchor = mx !== null && mx > PLOT.x1 - 24 ? 'end' : mx !== null && mx < PLOT.x0 + 24 ? 'start' : 'middle';
+  return (
+    <svg
+      viewBox={`0 0 ${CHART.width} ${CHART.height}`}
+      width="100%"
+      style={{ display: 'block', touchAction: editable ? 'none' : 'auto', userSelect: 'none' }}
+      onPointerDown={props.onPointerDown}
+      onPointerMove={props.onPointerMove}
+      onPointerUp={props.onPointerEnd}
+      onPointerCancel={props.onPointerEnd}
+    >
+      {GRID_TEMPS.map((t) => (
+        <line key={'gx' + t} x1={xOf(t)} x2={xOf(t)} y1={PLOT.y0} y2={PLOT.y1} stroke={C_GRID} strokeWidth={1} />
+      ))}
+      {GRID_SPEEDS.map((s) => (
+        <line key={'gy' + s} x1={PLOT.x0} x2={PLOT.x1} y1={yOf(s)} y2={yOf(s)} stroke={C_GRID} strokeWidth={1} />
+      ))}
+      <line x1={PLOT.x0} x2={PLOT.x1} y1={PLOT.y1} y2={PLOT.y1} stroke={C_AXIS} strokeWidth={1} />
+      <line x1={PLOT.x0} x2={PLOT.x0} y1={PLOT.y0} y2={PLOT.y1} stroke={C_AXIS} strokeWidth={1} />
+      {LABEL_TEMPS.map((t) => (
+        <text key={'lx' + t} x={xOf(t)} y={CHART.height - 7} fill={C_LABEL} fontSize={9} textAnchor="middle">
+          {t + '°'}
+        </text>
+      ))}
+      {LABEL_SPEEDS.map((s) => (
+        <text key={'ly' + s} x={PLOT.x0 - 4} y={yOf(s) + 3} fill={C_LABEL} fontSize={9} textAnchor="end">
+          {s + '%'}
+        </text>
+      ))}
+      <path d={FLOOR_PATH} fill="none" stroke={C_FLOOR} strokeWidth={1} strokeDasharray="3 3" />
+      {mx !== null && cpuTemp !== null && (
+        <>
+          <line x1={mx} x2={mx} y1={PLOT.y0 + 10} y2={PLOT.y1} stroke={C_MARKER} strokeWidth={1} />
+          <text x={mx} y={PLOT.y0 + 7} fill={C_MARKER} fontSize={9} textAnchor={labelAnchor}>
+            {markerLabel(cpuTemp)}
+          </text>
+        </>
+      )}
+      {curve ? (
+        <>
+          <path d={fillPath(curve)} fill={C_FILL} stroke="none" />
+          <path d={linePath(curve)} fill="none" stroke={C_LINE} strokeWidth={2} strokeLinejoin="round" />
+          {curve.temps.map((t, i) => (
+            <circle key={'p' + i} cx={xOf(t)} cy={yOf(curve.speeds[i])} r={4} fill={i === invalid ? C_BAD : C_LINE} />
+          ))}
+          {editable && selected >= 0 && selected < curve.temps.length && (
+            // Drawn last so the selected point sits on top of stacked ones.
+            <circle
+              cx={xOf(curve.temps[selected])}
+              cy={yOf(curve.speeds[selected])}
+              r={6}
+              fill={selected === invalid ? C_BAD : C_LINE}
+              stroke="#ffffff"
+              strokeWidth={2}
+            />
+          )}
+        </>
+      ) : (
+        <text x={(PLOT.x0 + PLOT.x1) / 2} y={(PLOT.y0 + PLOT.y1) / 2} fill={C_LABEL} fontSize={10} textAnchor="middle">
+          Curve not read yet
+        </text>
+      )}
+    </svg>
+  );
+}
+
+// The editable chart: one Focusable for the controller, pointer drag for touch and mouse.
+function FanChartEditor(props: {
+  curve: Curve;
+  selected: number;
+  invalid: number;
+  cpuTemp: number | null;
+  disabled: boolean;
+  onSelect: (i: number) => void;
+  onEdit: (fn: (c: Curve) => Curve) => void;
+}) {
+  const { curve, selected, disabled, onSelect, onEdit } = props;
+  const [mode, setMode] = useState<EditMode>('point');
+  const dragging = useRef(-1);
+  const count = curve.temps.length;
+
+  const onButtonDown = (evt: CustomEvent<{ button: number; is_repeat?: boolean }>) => {
+    const b = evt.detail?.button;
+    if (b !== BTN_UP && b !== BTN_DOWN && b !== BTN_LEFT && b !== BTN_RIGHT) return;
+    if (disabled) return;
+    // Held buttons arrive again with is_repeat from Steam's navigation, so holding keeps stepping.
+    if (b === BTN_UP || b === BTN_DOWN) {
+      onEdit((c) => movePoint(c, selected, 0, b === BTN_UP ? 1 : -1));
+    } else {
+      const dir = b === BTN_RIGHT ? 1 : -1;
+      if (mode === 'temp') onEdit((c) => movePoint(c, selected, dir, 0));
+      else onSelect(selectNext(selected, dir, count));
+    }
+    // Keep the press inside the chart instead of moving focus.
+    evt.preventDefault();
+    evt.stopPropagation();
+  };
+
+  const pointer = (e: ReactPointerEvent<SVGSVGElement>) => toChart(e.clientX, e.clientY, e.currentTarget.getBoundingClientRect());
+
+  const onPointerDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (disabled) return;
+    const p = pointer(e);
+    const i = hitTest(curve, p.x, p.y, selected);
+    if (i < 0) return;
+    onSelect(i);
+    dragging.current = i;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {
+      // Capture is a nicety; the drag still works while the pointer stays over the chart.
+    }
+    e.preventDefault();
+  };
+
+  const onPointerMove = (e: ReactPointerEvent<SVGSVGElement>) => {
+    const i = dragging.current;
+    if (i < 0 || disabled) return;
+    const p = pointer(e);
+    onEdit((c) => dragTo(c, i, p.x, p.y));
+    e.preventDefault();
+  };
+
+  const onPointerEnd = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (dragging.current < 0) return;
+    dragging.current = -1;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // Already released.
+    }
+  };
+
+  const cap = caption(curve, Math.min(Math.max(selected, 0), count - 1), mode);
+  return (
+    <Focusable
+      onButtonDown={onButtonDown}
+      onOKButton={() => {
+        if (!disabled) setMode((m) => (m === 'point' ? 'temp' : 'point'));
+      }}
+      onOKActionDescription={mode === 'point' ? 'Temperature mode' : 'Point mode'}
+      style={{ width: '100%' }}
+    >
+      <ChartSvg
+        curve={curve}
+        selected={selected}
+        invalid={props.invalid}
+        cpuTemp={props.cpuTemp}
+        editable={true}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerEnd={onPointerEnd}
+      />
+      <div style={{ fontSize: '12px', color: '#dcdedf', marginTop: '4px' }}>{cap.title}</div>
+      <div style={{ fontSize: '11px', color: C_LABEL, whiteSpace: 'normal' }}>{cap.hint}</div>
+    </Focusable>
+  );
+}
+
 // ---------- panel ----------
 
 function Content() {
@@ -177,6 +391,8 @@ function Content() {
   const [startError, setStartError] = useState('');
   const [state, setState] = useState<State | null>(null);
   const [sensors, setSensors] = useState('');
+  const [cpuTemp, setCpuTemp] = useState<number | null>(null);
+  const [selected, setSelected] = useState(0);
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [working, setWorking] = useState(false);
   const [armouryBusy, setArmouryBusy] = useState(armouryPending !== null);
@@ -265,9 +481,13 @@ function Content() {
       inFlight = true;
       try {
         const s = await getSensors();
-        if (mounted.current) setSensors(s.ok ? liveLine(s.cpuTempC, s.fanRpm) : s.message || 'Sensors not available');
+        if (!mounted.current) return;
+        setSensors(s.ok ? liveLine(s.cpuTempC, s.fanRpm) : s.message || 'Sensors not available');
+        setCpuTemp(s.ok && typeof s.cpuTempC === 'number' && isFinite(s.cpuTempC) ? s.cpuTempC : null);
       } catch (e) {
-        if (mounted.current) setSensors('Sensors not available: ' + errorText(e));
+        if (!mounted.current) return;
+        setSensors('Sensors not available: ' + errorText(e));
+        setCpuTemp(null);
       } finally {
         inFlight = false;
       }
@@ -404,6 +624,7 @@ function Content() {
       ? { temps: [...c.temps], speeds: [...c.speeds] }
       : defaultDraft());
     setStatuses((s) => ({ ...s, curve: undefined }));
+    setSelected(0);
     setEditing(true);
   };
 
@@ -413,6 +634,12 @@ function Content() {
       next[kind][i] = v;
       return next;
     });
+  };
+
+  const choosePreset = (p: Preset) => {
+    // The chart then shows the preset's curve as soon as the state is re-read.
+    setEditing(false);
+    run('fans', () => setFanPreset(p));
   };
 
   const applyCurve = async () => {
@@ -450,6 +677,12 @@ function Content() {
   };
 
   const draftReason = validateCurve(draft.temps, draft.speeds);
+  const sel = Math.min(Math.max(selected, 0), CURVE_POINTS - 1);
+  const sc = state.fan_curve;
+  const shownCurve: Curve | null =
+    sc && Array.isArray(sc.temps) && Array.isArray(sc.speeds) && sc.temps.length === CURVE_POINTS && sc.speeds.length === CURVE_POINTS
+      ? sc
+      : null;
   const fpsOptions = FPS_STEPS.map((f) => ({ data: f, label: f === 0 ? 'Off' : `${f} FPS` }));
 
   // ---------- layout ----------
@@ -542,49 +775,61 @@ function Content() {
             rgOptions={PRESETS}
             selectedOption={state.fan_preset}
             disabled={disabled}
-            onChange={(o) => run('fans', () => setFanPreset(o.data as Preset))}
+            onChange={(o) => choosePreset(o.data as Preset)}
           />
         </PanelSectionRow>
         {state.fan_note && <Note text={state.fan_note} color="#ffb74d" />}
         <StatusRow status={statuses.fans} />
         {!editing && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" disabled={disabled} onClick={openEditor}>
-              Edit curve
-            </ButtonItem>
-          </PanelSectionRow>
+          <>
+            <PanelSectionRow>
+              <ChartSvg curve={shownCurve} selected={-1} invalid={-1} cpuTemp={cpuTemp} editable={false} />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" disabled={disabled} onClick={openEditor}>
+                Edit curve
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
         )}
         {editing && (
           <>
-            {draft.temps.map((t, i) => (
-              <div key={i}>
-                <PanelSectionRow>
-                  <Stepper
-                    label={`Point ${i + 1}`}
-                    value={t}
-                    min={CURVE_TEMP_MIN}
-                    max={CURVE_TEMP_MAX}
-                    unit="°C"
-                    disabled={disabled}
-                    onChange={(v) => editPoint('temps', i, v)}
-                  />
-                </PanelSectionRow>
-                <PanelSectionRow>
-                  <Stepper
-                    label="Fan"
-                    value={draft.speeds[i]}
-                    min={0}
-                    max={CURVE_SPEED_MAX}
-                    unit="%"
-                    disabled={disabled}
-                    onChange={(v) => editPoint('speeds', i, v)}
-                  />
-                </PanelSectionRow>
-              </div>
-            ))}
+            <PanelSectionRow>
+              <FanChartEditor
+                curve={draft}
+                selected={sel}
+                invalid={invalidPoint(draftReason)}
+                cpuTemp={cpuTemp}
+                disabled={disabled}
+                onSelect={setSelected}
+                onEdit={(fn) => setDraft((d) => fn(d))}
+              />
+            </PanelSectionRow>
             {draftReason && <Note text={draftReason} color="#ff6b6b" />}
             <PanelSectionRow>
-              <ButtonItem layout="below" disabled={disabled} onClick={applyCurve}>
+              <Stepper
+                label={`Point ${sel + 1} temperature`}
+                value={draft.temps[sel]}
+                min={CURVE_TEMP_MIN}
+                max={CURVE_TEMP_MAX}
+                unit="°C"
+                disabled={disabled}
+                onChange={(v) => editPoint('temps', sel, v)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <Stepper
+                label={`Point ${sel + 1} fan`}
+                value={draft.speeds[sel]}
+                min={0}
+                max={CURVE_SPEED_MAX}
+                unit="%"
+                disabled={disabled}
+                onChange={(v) => editPoint('speeds', sel, v)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" disabled={disabled || !!draftReason} onClick={applyCurve}>
                 Apply curve
               </ButtonItem>
             </PanelSectionRow>
