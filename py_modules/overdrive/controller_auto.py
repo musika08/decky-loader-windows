@@ -14,6 +14,8 @@ docs/specs/2026-10-24-overdrive-controls-design.md sections 3.3, 4 and 5.2.
   same (non-reentrant) lock.
 - The written mode is forgotten after a reapply (reapplier.applies changed) or an Armoury switch, so the next streak
   writes again; no write lands while a reapply runs (reapplier.applying).
+- A write refused with "Controller not found" (no controller attached) is not tried again for NOT_FOUND_RETRY seconds,
+  so a missing controller is not searched for (every HID device listed) at every tick.
 - An error inside the loop is logged (once a minute at most), Gamepad is written and the loop goes on.
 - stop() writes Gamepad.
 """
@@ -28,6 +30,8 @@ from .auto_tdp_loop import ERROR_LOG_EVERY, SAMPLE_TIMEOUT, _finite
 STEAM_EXES = ("steam.exe", "steamwebhelper.exe")
 STREAK = 3
 FRESH = 0.6            # seconds: Auto TDP's sample is used when younger than this
+NOT_FOUND_RETRY = 5.0  # seconds between writes while the helper reports no controller
+NOT_FOUND = "controller not found"   # the helper's AsusHid.NotFound message, compared in lower case
 GAMEPAD, DESKTOP = "gamepad", "desktop"
 
 
@@ -49,6 +53,7 @@ class ControllerAuto:
         self._write_failed_logged_at: Optional[float] = None
         self._applies_seen = 0     # reapplier.applies at the last tick: a reapply may have rewritten the controller
         self._busy_seen = False    # an Armoury switch was seen: the controller state is no longer known
+        self._not_found_at: Optional[float] = None   # monotonic time of the last "Controller not found" refusal
 
     # ---------- control ----------
 
@@ -63,6 +68,7 @@ class ControllerAuto:
         self._on = True
         self._candidate, self._count, self._written = None, 0, None
         self._applies_seen, self._busy_seen = self.reapplier.applies, False
+        self._not_found_at = None
         self.log.info("Controller Auto started")
         if self._task is None:
             self._task = asyncio.ensure_future(self._run())
@@ -123,6 +129,7 @@ class ControllerAuto:
             # may have forgotten or been given another mode. Unknown again: the next 3-in-a-row decision is written.
             self._applies_seen, self._busy_seen = rp.applies, False
             self._written, self._candidate, self._count = None, None, 0
+            self._not_found_at = None   # the reapply may have found the controller: try again at once
         r = await self.client.call("foreground", {}, SAMPLE_TIMEOUT)
         data = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
         exe = data.get("exe") if isinstance(data.get("exe"), str) else ""   # a failed reply: no window, Gamepad
@@ -139,8 +146,14 @@ class ControllerAuto:
         if self._count >= STREAK and d != self._written:
             await self._write(d)
 
+    def _backing_off(self) -> bool:
+        return (self._not_found_at is not None
+                and self.clock.monotonic() - self._not_found_at < NOT_FOUND_RETRY)
+
     async def _write(self, mode: str) -> None:
         rp = self.reapplier
+        if self._backing_off():
+            return   # no controller a moment ago: tried again once NOT_FOUND_RETRY has passed
         async with rp.lock:
             if not self._on or rp.applying or rp._busy():
                 # Stopped meanwhile, a reapply in progress (its steps release the lock in between) or an Armoury
@@ -151,9 +164,11 @@ class ControllerAuto:
             r = await self.client.call("set_controller_mode", {"mode": mode})
         if r.get("ok"):
             self._written = mode
-            self._write_failed_logged_at = None
+            self._write_failed_logged_at = self._not_found_at = None
             return
         self._written = None
+        if NOT_FOUND in str(r.get("message") or "").lower():
+            self._not_found_at = self.clock.monotonic()
         if mode != GAMEPAD:
             self._count = 0   # Desktop is tried again after another 3 equal decisions (about 1 s), not every tick
         # Gamepad keeps the streak: tried again at the next tick (Big Picture must get its gamepad back).

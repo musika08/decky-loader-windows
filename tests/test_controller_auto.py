@@ -396,3 +396,45 @@ def test_failed_gamepad_write_retried_next_tick(tmp_path):
         assert mode_writes(c) == ["gamepad", "gamepad", "desktop", "desktop"]
         await ca.stop()
     run(go())
+
+
+def test_no_controller_retried_every_five_seconds(tmp_path):
+    async def go():
+        c, r, ca, clock = setup(tmp_path)
+        ca.start()
+        found = {"on": False}
+
+        async def set_mode(args):
+            return ok(dict(args)) if found["on"] else fail("Controller not found")
+        c.handlers["set_controller_mode"] = set_mode
+        front(c, ["steam.exe"])
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["gamepad"]          # refused: no controller
+        for _ in range(10):                           # 3 s of ticks: not tried again
+            clock.mono += 0.3
+            await ca.run_once()
+        assert mode_writes(c) == ["gamepad"]
+        clock.mono += 2.1                             # 5 s after the refusal: one more try
+        await ca.run_once()
+        assert mode_writes(c) == ["gamepad", "gamepad"]
+        await ca.run_once()
+        assert len(mode_writes(c)) == 2
+        found["on"] = True                            # the controller is back: the next try after 5 s writes
+        clock.mono += 5.0
+        await ca.run_once()
+        assert mode_writes(c) == ["gamepad"] * 3
+        await ca.run_once()
+        assert len(mode_writes(c)) == 3               # written: only a change is written
+        # Another refusal (not "not found") keeps the old rule: Gamepad is retried at the next tick.
+        found["on"] = False
+        c.handlers["set_controller_mode"] = lambda args: _refuse()
+        r.applies += 1                                # a reapply: the state is unknown again
+        for _ in range(4):
+            await ca.run_once()
+        assert len(mode_writes(c)) == 5
+        await ca.stop()
+
+    async def _refuse():
+        return fail("controller busy")
+    run(go())
