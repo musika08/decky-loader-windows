@@ -1074,7 +1074,10 @@ function Content() {
             <ToggleField
               label={confirm === 'armoury' ? CONFIRM_LABEL : 'Use Overdrive instead of Armoury Crate'}
               description="Stops the Armoury Crate services so they do not undo these settings. Turning it off restores them."
-              checked={state.armoury.replaced}
+              // Steam's toggle flips itself on every press, so it is fed what it should show: the target while
+              // waiting for the confirming press or while switching, else the stored state. When the 3 s confirm
+              // window lapses the value changes back and the toggle follows, instead of staying on with nothing done.
+              checked={confirm === 'armoury' || busy ? !state.armoury.replaced : state.armoury.replaced}
               disabled={working || busy || !!unavailable}
               onChange={toggleArmoury}
             />
