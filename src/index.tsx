@@ -595,7 +595,7 @@ function Content() {
   const [editing, setEditing] = useState(false);
   // One draft per fan, so switching fans while editing keeps both; Apply sends the selected fan's.
   const [drafts, setDrafts] = useState<Record<Fan, Curve>>({ cpu: defaultDraft(), gpu: defaultDraft() });
-  const [confirm, setConfirm] = useState<'reset' | 'armoury' | null>(null);
+  const [confirm, setConfirm] = useState<'reset' | null>(null);
   const mounted = useRef(true);
   const powerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -730,8 +730,8 @@ function Content() {
     setWorking(false);
   };
 
-  // Destructive actions take two presses within 3 s.
-  const confirmed = (key: 'reset' | 'armoury'): boolean => {
+  // Reset to defaults takes two presses within 3 s.
+  const confirmed = (key: 'reset'): boolean => {
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
     confirmTimer.current = null;
     if (confirm === key) {
@@ -862,9 +862,8 @@ function Content() {
 
   const toggleArmoury = () => {
     if (armouryPending) return;
-    // The target is always the opposite of the stored value, whatever the toggle reported on either press.
+    // The target is always the opposite of the stored value, whatever the toggle reported.
     const on = !state.armoury.replaced;
-    if (!confirmed('armoury')) return;
     cancelPowerTimer();
     setStatuses((s) => ({ ...s, armoury: undefined }));
     armouryResult = null;
@@ -1072,12 +1071,11 @@ function Content() {
         {(state.armoury.installed || state.armoury.replaced) && (
           <PanelSectionRow>
             <ToggleField
-              label={confirm === 'armoury' ? CONFIRM_LABEL : 'Use Overdrive instead of Armoury Crate'}
+              label="Use Overdrive instead of Armoury Crate"
               description="Stops the Armoury Crate services so they do not undo these settings. Turning it off restores them."
               // Steam's toggle flips itself on every press, so it is fed what it should show: the target while
-              // waiting for the confirming press or while switching, else the stored state. When the 3 s confirm
-              // window lapses the value changes back and the toggle follows, instead of staying on with nothing done.
-              checked={confirm === 'armoury' || busy ? !state.armoury.replaced : state.armoury.replaced}
+              // switching, else the stored state. A failed switch changes the value back and the toggle follows.
+              checked={busy ? !state.armoury.replaced : state.armoury.replaced}
               disabled={working || busy || !!unavailable}
               onChange={toggleArmoury}
             />
