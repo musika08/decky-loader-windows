@@ -5,13 +5,18 @@ Update this Windows fork of Decky Loader to the latest official version, then te
   powershell -ExecutionPolicy Bypass -File tools\update-decky.ps1 -Rebuild   # no merge needed: just test, build and install this branch
   Options: -NoInstall (stop after building), -NoPush (don't push to the backup remote)
 
+  powershell -ExecutionPolicy Bypass -File tools\update-decky.ps1 -Package -Version 0.1.0
+    Release packaging only: builds the frontend, runs the tests, builds the installer folder in a temporary folder and
+    zips it (python\, app\ with app\VERSION = the version, LICENSE) into ..\build\release\decky-windows-<version>.zip
+    (or -OutDir). Does not merge, install, push, restart anything or touch build\installer\DeckyLoader. -Version must be x.y.z.
+
 Stops (exit 2) when official changes clash with ours, leaving the branch as it was, and (exit 3) when tests or the
 build fail. Plugins and settings in C:\ProgramData\decky are never touched; --install keeps them.
 
 The installer folder (build\installer\DeckyLoader) is a private copy of the PSF-signed Python runtime (python\) plus
 Decky's source and dependencies (app\), made by tools\build_win_runtime.py. No PyInstaller exe is installed.
 #>
-param([switch]$Rebuild, [switch]$NoInstall, [switch]$NoPush)
+param([switch]$Rebuild, [switch]$NoInstall, [switch]$NoPush, [switch]$Package, [string]$Version, [string]$OutDir)
 # Not 'Stop': Windows PowerShell 5.1 then treats any stderr line of a native tool (PyInstaller's
 # progress output, for one) as a terminating error. Native tools are checked by $LASTEXITCODE and
 # the file operations below use -ErrorAction Stop.
@@ -30,6 +35,12 @@ $upstream = 'origin/main'
 function Step($msg) { Write-Host "`n== $msg" -ForegroundColor Cyan }
 function Fail($code, $msg) { Write-Host "`nSTOPPED: $msg" -ForegroundColor Red; exit $code }
 function Invoke-Git { & git.exe -C $repo @args; if ($LASTEXITCODE -ne 0) { throw "git $args failed ($LASTEXITCODE)" } }
+
+if ($Package) {
+    if ($Version -notmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$') { Fail 1 '-Package needs -Version x.y.z (digits only)' }
+    $Rebuild = $true; $NoInstall = $true; $NoPush = $true
+    if (-not $OutDir) { $OutDir = Join-Path $buildDir 'release' }
+}
 
 Step 'Checking the repository'
 if ((& git.exe -C $repo branch --show-current) -ne $branch) { Fail 1 "check out '$branch' first" }
@@ -90,6 +101,35 @@ Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 'building the installer folder failed (see above)' }
 & (Join-Path $work 'python\python.exe') -I (Join-Path $work 'app\main.py') --check-imports linecache netrc pdb keyword reprlib sqlite3 psutil PIL pystray watchdog aiohttp certifi winreg
 if ($LASTEXITCODE -ne 0) { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 'the installer folder is missing modules (--check-imports)' }
+
+if ($Package) {
+    Step 'Zipping the installer folder'
+    try {
+        # app\VERSION is what the dashboard reads as the installed Decky version (strict x.y.z)
+        [System.IO.File]::WriteAllText((Join-Path $work 'app\VERSION'), $Version, (New-Object System.Text.UTF8Encoding($false)))
+        Copy-Item -ErrorAction Stop (Join-Path $repo 'LICENSE') (Join-Path $work 'LICENSE')
+        New-Item -ItemType Directory -Force $OutDir -ErrorAction Stop | Out-Null
+        $zipPath = Join-Path $OutDir "decky-windows-$Version.zip"
+        if (Test-Path $zipPath) { Remove-Item -Force $zipPath -ErrorAction Stop }
+        Add-Type -AssemblyName System.IO.Compression
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $fs = [System.IO.File]::Open($zipPath, [System.IO.FileMode]::CreateNew)
+        $za = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
+        try {
+            $rootLen = (Resolve-Path $work).Path.TrimEnd('\').Length + 1
+            # Forward-slash entry names (Compress-Archive in Windows PowerShell 5.1 writes backslashes, which the dashboard refuses)
+            foreach ($f in (Get-ChildItem -LiteralPath $work -Recurse -File | Sort-Object FullName)) {
+                $name = $f.FullName.Substring($rootLen).Replace('\', '/')
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $name, [System.IO.Compression.CompressionLevel]::Optimal)
+            }
+        } finally { $za.Dispose(); $fs.Dispose() }
+    } catch { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 "could not zip the installer folder: $_" }
+    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    $item = Get-Item $zipPath
+    Write-Host "Package: $zipPath ($([math]::Round($item.Length / 1MB, 1)) MB)"
+    Write-Host 'Done (package only: nothing was installed or pushed).' -ForegroundColor Green
+    exit 0
+}
 
 try {
     New-Item -ItemType Directory -Force (Split-Path $staged) -ErrorAction Stop | Out-Null
