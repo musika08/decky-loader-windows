@@ -34,6 +34,14 @@ namespace Overdrive.Helper
 
         private static readonly string[] TopLevel = { "id", "cmd", "args" };
 
+        // Commands that change hardware or services; refused outright on a device that is not an Ally.
+        private static readonly string[] Writes =
+        {
+            "set_mode", "set_power", "set_fans", "reset_fans", "set_fps_limit", "armoury_stop", "armoury_restore"
+        };
+
+        public const string NotAllyMessage = "Overdrive supports the ROG Ally family only";
+
         private readonly IAcpi acpi;
         private readonly IAdl adl;
         private readonly IServices services;
@@ -106,6 +114,7 @@ namespace Overdrive.Helper
 
         private string Dispatch(object id, string cmd, Dictionary<string, object> args)
         {
+            if (!ally && Array.IndexOf(Writes, cmd) >= 0) return Reply(id, false, NotAllyMessage, null);
             switch (cmd)
             {
                 case "hello": return Hello(id);
@@ -153,19 +162,48 @@ namespace Overdrive.Helper
             }
             catch (Exception ex) { errors.Add("fps: " + ex.Message); }
             d["fpsLimit"] = fps;
+            ReadSensors(acpi, d, errors);
             d["errors"] = errors;
             return Reply(id, true, "", d);
         }
 
-        // Raw readings; Task 3 adds G-Helper's conversions to degrees C and RPM.
         private string Sensors(object id)
         {
             var d = new Dictionary<string, object>();
             var errors = new List<string>();
-            d["cpuTempRaw"] = Read(DeviceIds.TempCpu, "cpuTemp", errors);
-            d["cpuFanRaw"] = Read(DeviceIds.CpuFan, "cpuFan", errors);
+            ReadSensors(acpi, d, errors);
             d["errors"] = errors;
             return Reply(id, true, "", d);
+        }
+
+        // cpuTempC and fanRpm, converted as G-Helper does (GHelperSensors); null plus an error when not reported.
+        // Shared by status, sensors and --probe.
+        public static void ReadSensors(IAcpi acpi, Dictionary<string, object> d, List<string> errors)
+        {
+            int? temp = ReadRaw(acpi, DeviceIds.TempCpu, "cpuTemp", errors);
+            int? tempC = null;
+            if (temp.HasValue)
+            {
+                tempC = GHelperSensors.CpuTempC(temp.Value);
+                if (!tempC.HasValue) errors.Add("cpuTemp: not reported by the device (raw " + temp.Value + ").");
+            }
+            d["cpuTempC"] = tempC;
+
+            int? fan = ReadRaw(acpi, DeviceIds.CpuFan, "cpuFan", errors);
+            int? rpm = null;
+            if (fan.HasValue)
+            {
+                rpm = GHelperSensors.FanRpm(fan.Value);
+                if (!rpm.HasValue) errors.Add("cpuFan: not reported by the device (raw " + fan.Value + ").");
+            }
+            d["fanRpm"] = rpm;
+        }
+
+        // One DeviceGet; a failure becomes "name: message" in errors and null.
+        public static int? ReadRaw(IAcpi acpi, uint devId, string name, List<string> errors)
+        {
+            try { return acpi.DeviceGet(devId); }
+            catch (Exception ex) { errors.Add(name + ": " + ex.Message); return null; }
         }
 
         private string SetMode(object id, Dictionary<string, object> args)
@@ -246,13 +284,19 @@ namespace Overdrive.Helper
             return Reply(id, true, "", d);
         }
 
-        // G-Helper returns to the firmware fan curve by writing the performance mode again
-        // (app/Mode/ModeControl.cs AutoFans, "resetting to default profile").
+        // G-Helper returns to the firmware fan curve by writing the current performance mode again
+        // (app/Mode/ModeControl.cs AutoFans: DeviceSet(PerformanceMode, Modes.GetCurrentBase(), "Reset Mode")).
+        // Like G-Helper, "current" is the mode this program set (it never reads the mode back from the device).
+        // It never switches modes: without a mode set by this helper, or with a different mode, it refuses.
         private string ResetFans(object id, Dictionary<string, object> args)
         {
             string mode, err;
             if (!GetMode(args, false, out mode, out err)) return Reply(id, false, err, null);
-            if (mode == null) mode = lastMode ?? "balanced";
+            if (lastMode == null)
+                return Reply(id, false, "Refused: set a performance mode first; reset_fans only resets the current mode's fan curve.", null);
+            if (mode != null && mode != lastMode)
+                return Reply(id, false, "Refused: reset_fans only resets the current mode's fan curve (current mode: " + lastMode + ").", null);
+            mode = lastMode;
             if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return Reply(id, false, err, null);
             lastMode = mode;
             bool reapplied = false;
@@ -327,8 +371,9 @@ namespace Overdrive.Helper
 
         private object Read(uint devId, string name, List<string> errors)
         {
-            try { return acpi.DeviceGet(devId); }
-            catch (Exception ex) { errors.Add(name + ": " + ex.Message); return null; }
+            int? v = ReadRaw(acpi, devId, name, errors);
+            if (v.HasValue) return v.Value;
+            return null;
         }
 
         private static int ModeValue(string mode)

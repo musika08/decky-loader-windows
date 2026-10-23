@@ -69,6 +69,7 @@ namespace Overdrive.Helper.Tests
             public FakeServices Services = new FakeServices();
             public HelperCore Core;
             public Rig() { Core = new HelperCore(Acpi, Adl, Services, true); }
+            public Rig(bool ally) { Core = new HelperCore(Acpi, Adl, Services, ally); }
 
             public Dictionary<string, object> Send(string line)
             {
@@ -348,6 +349,245 @@ namespace Overdrive.Helper.Tests
 
             rig.Acpi.Curves.Clear();
             True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"get_fans\"}")), "all-zero curve is invalid (G-Helper IsInvalidCurve)");
+        }
+
+        // ---------- sensors (Task 3) ----------
+
+        // G-Helper @ c09017453d9ed0c52261b67a48d02bd55232e6ac:
+        //   CPU temperature: app/HardwareControl.cs 455 `cpuTemp = Program.acpi.DeviceGet(AsusACPI.Temp_CPU);`, used as °C;
+        //     457 `if (cpuTemp < 0)` = not reported by ACPI (G-Helper then tries a Windows thermal zone, not ported).
+        //   Fan: app/AsusACPI.cs 559-561 GetFan `int fan = raw & 0xFFFF; if (fan > 120 || (fan == 0 && raw < 0)) fan = -1;`
+        //     (raw = DeviceGet(CPU_Fan), already minus 65536, AsusACPI.cs 486),
+        //     RPM = value * 100: app/HardwareControl.cs 859 `cpuFanRPM = Program.acpi.GetFan(AsusFan.CPU) * 100;`
+        //     and app/Fan/FanSensorControl.cs 127/132 (value < 0 -> null; `(value * 100) + "RPM"`).
+        public static void Sensors_ConvertLikeGHelper()
+        {
+            Equal((int?)45, GHelperSensors.CpuTempC(45), "temp is DeviceGet value in °C");
+            Equal((int?)0, GHelperSensors.CpuTempC(0), "0 °C is a reading");
+            Equal((int?)null, GHelperSensors.CpuTempC(-1), "negative = not reported");
+            Equal((int?)null, GHelperSensors.CpuTempC(-65536), "empty DSTS reply = not reported");
+
+            Equal((int?)3500, GHelperSensors.FanRpm(35), "35 -> 3500 RPM");
+            Equal((int?)0, GHelperSensors.FanRpm(0), "stopped fan");
+            Equal((int?)12000, GHelperSensors.FanRpm(120), "120 is still valid");
+            Equal((int?)null, GHelperSensors.FanRpm(121), "above 120 = invalid");
+            Equal((int?)3500, GHelperSensors.FanRpm(0x00010023), "only the low 16 bits count");
+            Equal((int?)null, GHelperSensors.FanRpm(-65536), "zero with a negative raw = not reported");
+
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = 61;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 42;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"sensors\"}");
+            True(Ok(r), "sensors ok");
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(61, d["cpuTempC"], "sensors cpuTempC");
+            Equal(4200, d["fanRpm"], "sensors fanRpm");
+            Equal(0, ((object[])d["errors"]).Length, "no errors");
+
+            r = rig.Send("{\"id\":2,\"cmd\":\"status\"}");
+            d = (Dictionary<string, object>)r["data"];
+            Equal(61, d["cpuTempC"], "status cpuTempC");
+            Equal(4200, d["fanRpm"], "status fanRpm");
+        }
+
+        public static void Sensors_NotReported_NullWithError()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = -65536;
+            rig.Acpi.Values[DeviceIds.CpuFan] = -65536;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"sensors\"}");
+            True(Ok(r), "sensors ok");
+            var d = (Dictionary<string, object>)r["data"];
+            True(d["cpuTempC"] == null, "temp null");
+            True(d["fanRpm"] == null, "fan null");
+            Equal(2, ((object[])d["errors"]).Length, "one error per missing sensor");
+        }
+
+        // G-Helper app/AsusACPI.cs 629-635: "because it's asus, and modes are swapped here".
+        public static void FanCurve_ModeSwapLikeGHelper()
+        {
+            Equal(0u, Overdrive.Helper.GHelper.AsusACPI.FanCurveMode(0), "balanced");
+            Equal(2u, Overdrive.Helper.GHelper.AsusACPI.FanCurveMode(1), "turbo -> 2");
+            Equal(1u, Overdrive.Helper.GHelper.AsusACPI.FanCurveMode(2), "silent -> 1");
+            Equal(0u, Overdrive.Helper.GHelper.AsusACPI.FanCurveMode(7), "anything else -> 0");
+        }
+
+        // ---------- status / sensors shapes, non-Ally refusal, reset_fans (Task 2 review) ----------
+
+        public static void Status_Shape()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.PerformanceMode] = 0;
+            rig.Acpi.Values[DeviceIds.Spl] = 15;
+            rig.Acpi.Values[DeviceIds.Sppt] = 20;
+            rig.Acpi.Values[DeviceIds.Fppt] = 25;
+            rig.Acpi.Values[DeviceIds.TempCpu] = 40;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 20;
+            rig.Adl.Limit = 60;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"status\"}");
+            True(Ok(r), "status ok");
+            var d = (Dictionary<string, object>)r["data"];
+            SeqEqual(new[] { "modeRaw", "spl", "sppt", "fppt", "lastMode", "fpsLimit", "cpuTempC", "fanRpm", "errors" },
+                new List<string>(d.Keys), "status keys");
+            Equal(0, d["modeRaw"], "modeRaw");
+            Equal(15, d["spl"], "spl");
+            Equal(20, d["sppt"], "sppt");
+            Equal(25, d["fppt"], "fppt");
+            True(d["lastMode"] == null, "no mode set yet");
+            Equal(60, d["fpsLimit"], "fps");
+            Equal(40, d["cpuTempC"], "temp");
+            Equal(2000, d["fanRpm"], "fan");
+            Equal(0, ((object[])d["errors"]).Length, "no errors");
+            foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get "), "status only reads: " + c);
+        }
+
+        public static void Status_ReadFailures_InErrors()
+        {
+            var rig = new Rig();
+            rig.Acpi.ThrowOnRead = true;
+            rig.Adl.Missing = true;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"status\"}");
+            True(Ok(r), "status still answers");
+            var d = (Dictionary<string, object>)r["data"];
+            True(d["spl"] == null && d["cpuTempC"] == null && d["fpsLimit"] == null, "nulls");
+            Equal(7, ((object[])d["errors"]).Length, "mode, spl, sppt, fppt, fps, cpuTemp, cpuFan");
+        }
+
+        public static void Sensors_Shape()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = 50;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 30;
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"sensors\"}")["data"];
+            SeqEqual(new[] { "cpuTempC", "fanRpm", "errors" }, new List<string>(d.Keys), "sensors keys");
+        }
+
+        public static void NotAlly_RefusesEveryWrite()
+        {
+            var rig = new Rig(false);
+            string[] writes =
+            {
+                "{\"id\":1,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"turbo\"}}",
+                "{\"id\":2,\"cmd\":\"set_power\",\"args\":{\"spl\":20,\"sppt\":25,\"fppt\":30}}",
+                "{\"id\":3,\"cmd\":\"set_fans\",\"args\":{\"temps\":[30,40,50,60,70,80,90,100],\"speeds\":[0,10,20,30,40,50,60,70]}}",
+                "{\"id\":4,\"cmd\":\"reset_fans\"}",
+                "{\"id\":5,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":60}}",
+                "{\"id\":6,\"cmd\":\"armoury_stop\"}",
+                "{\"id\":7,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{},\"running\":[]}}",
+            };
+            foreach (string w in writes)
+            {
+                var r = rig.Send(w);
+                True(!Ok(r), "refused: " + w);
+                Equal(HelperCore.NotAllyMessage, Msg(r), "message for " + w);
+            }
+            Equal("Overdrive supports the ROG Ally family only", HelperCore.NotAllyMessage, "message text");
+            Equal(0, rig.Acpi.Calls.Count, "no ACPI call");
+            Equal(0, rig.Adl.Sets.Count, "no ADL call");
+            Equal(0, rig.Services.Calls.Count, "no service call");
+
+            True(Ok(rig.Send("{\"id\":8,\"cmd\":\"hello\"}")), "hello still works");
+            True(Ok(rig.Send("{\"id\":9,\"cmd\":\"sensors\"}")), "reads still work");
+        }
+
+        public static void ResetFans_NeverSwitchesMode()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"reset_fans\"}");
+            True(!Ok(r), "refused before any mode is set");
+            r = rig.Send("{\"id\":2,\"cmd\":\"reset_fans\",\"args\":{\"mode\":\"turbo\"}}");
+            True(!Ok(r), "refused: would switch to turbo");
+            Equal(0, rig.Acpi.Calls.Count, "no hardware call");
+
+            True(Ok(rig.Send("{\"id\":3,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"silent\"}}")), "set silent");
+            rig.Acpi.Calls.Clear();
+            r = rig.Send("{\"id\":4,\"cmd\":\"reset_fans\",\"args\":{\"mode\":\"turbo\"}}");
+            True(!Ok(r), "other mode refused");
+            True(Msg(r).Contains("silent"), "names the current mode: " + Msg(r));
+            Equal(0, rig.Acpi.Calls.Count, "no hardware call");
+
+            r = rig.Send("{\"id\":5,\"cmd\":\"reset_fans\"}");
+            True(Ok(r), "reset current mode: " + Msg(r));
+            SeqEqual(new[] { "set 0x00120075=2" }, rig.Acpi.Calls, "rewrites silent only");
+            Equal("silent", ((Dictionary<string, object>)r["data"])["mode"], "mode in reply");
+            True(Ok(rig.Send("{\"id\":6,\"cmd\":\"reset_fans\",\"args\":{\"mode\":\"silent\"}}")), "same mode explicitly is fine");
+        }
+
+        public static void ResetFans_Manual_ReappliesPower()
+        {
+            var rig = new Rig();
+            True(Ok(rig.Send("{\"id\":1,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"manual\",\"spl\":20,\"sppt\":25,\"fppt\":30}}")), "manual");
+            rig.Acpi.Calls.Clear();
+            var r = rig.Send("{\"id\":2,\"cmd\":\"reset_fans\"}");
+            True(Ok(r), "reset ok: " + Msg(r));
+            SeqEqual(new[] { "set 0x00120075=0", "set 0x001200A3=20", "set 0x001200A0=25", "set 0x001200C1=30" },
+                rig.Acpi.Calls, "balanced base then the manual limits again");
+            Equal(true, ((Dictionary<string, object>)r["data"])["powerReapplied"], "powerReapplied");
+        }
+
+        // ---------- probe (Task 3) ----------
+
+        public static void Probe_UsesOnlyReads()
+        {
+            var acpi = new FakeAcpi();
+            acpi.ThrowOnWrite = true;
+            acpi.Values[DeviceIds.PerformanceMode] = DeviceIds.ModeTurbo;
+            acpi.Values[DeviceIds.Spl] = 25;
+            acpi.Values[DeviceIds.Sppt] = 30;
+            acpi.Values[DeviceIds.Fppt] = 35;
+            acpi.Values[DeviceIds.TempCpu] = 58;
+            acpi.Values[DeviceIds.CpuFan] = 31;
+            acpi.Curves[DeviceIds.ModeTurbo] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 10, 20, 30, 40, 50, 60, 70, 80 };
+
+            string json = Probe.Run(acpi, "ROG Xbox Ally X RC73XA_RC73XA");
+            True(json.IndexOf('\n') < 0, "one line");
+            var p = (Dictionary<string, object>)Json.DeserializeObject(json);
+            SeqEqual(new[] { "product", "mode", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "fanCurve", "errors" },
+                new List<string>(p.Keys), "keys in brief order");
+            Equal("ROG Xbox Ally X RC73XA_RC73XA", p["product"], "product");
+            Equal(1, p["mode"], "mode raw");
+            Equal(25, p["spl"], "spl");
+            Equal(30, p["sppt"], "sppt");
+            Equal(35, p["fppt"], "fppt");
+            Equal(58, p["cpuTempC"], "temp converted");
+            Equal(3100, p["fanRpm"], "fan converted");
+            var curve = (Dictionary<string, object>)p["fanCurve"];
+            Equal("30,40,50,60,70,80,90,100", string.Join(",", (object[])curve["temps"]), "curve temps");
+            Equal("10,20,30,40,50,60,70,80", string.Join(",", (object[])curve["speeds"]), "curve speeds");
+            Equal(0, ((object[])p["errors"]).Length, "no errors");
+            foreach (string c in acpi.Calls)
+                True(c.StartsWith("get ") || c.StartsWith("getcurve "), "only reads: " + c);
+            True(acpi.Calls.Contains("getcurve 0 1"), "curve of the current mode, CPU fan");
+        }
+
+        public static void Probe_ReadOnlyWrapperRefusesWrites()
+        {
+            var acpi = new FakeAcpi();
+            var ro = new ReadOnlyAcpi(acpi);
+            bool threw = false;
+            try { ro.DeviceSet(DeviceIds.PerformanceMode, 0); } catch (InvalidOperationException) { threw = true; }
+            True(threw, "DeviceSet throws");
+            threw = false;
+            try { ro.SetFanCurve(0, new byte[16]); } catch (InvalidOperationException) { threw = true; }
+            True(threw, "SetFanCurve throws");
+            Equal(0, acpi.Calls.Count, "nothing reached the device");
+            acpi.Values[DeviceIds.TempCpu] = 50;
+            Equal(50, ro.DeviceGet(DeviceIds.TempCpu), "reads pass through");
+        }
+
+        public static void Probe_ReadFailures_ReportedNotThrown()
+        {
+            var acpi = new FakeAcpi();
+            acpi.ThrowOnRead = true;
+            string json = Probe.Run(acpi, null);
+            var p = (Dictionary<string, object>)Json.DeserializeObject(json);
+            True(p["product"] == null && p["mode"] == null && p["cpuTempC"] == null && p["fanCurve"] == null, "nulls");
+            True(((object[])p["errors"]).Length >= 7, "every failed read listed: " + json);
+
+            acpi = new FakeAcpi();   // device answers, but with an all-zero curve and no mode
+            p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "X"));
+            True(p["fanCurve"] == null, "invalid curve not reported as a curve");
+            True(acpi.Calls.Contains("getcurve 0 0"), "falls back to the balanced curve when the mode is unknown");
         }
     }
 }

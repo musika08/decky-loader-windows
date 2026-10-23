@@ -11,10 +11,31 @@ namespace Overdrive.Helper
         public static int Main(string[] args)
         {
             var utf8 = new UTF8Encoding(false);
-            var input = new StreamReader(Console.OpenStandardInput(), utf8);
             var output = new StreamWriter(Console.OpenStandardOutput(), utf8);
-            var hw = new UnavailableHardware();
-            Run(input, output, new HelperCore(hw, hw, hw, IsAlly()));
+
+            if (args.Length == 1 && args[0] == "--probe")
+            {
+                // Read-only: Probe wraps the device in ReadOnlyAcpi and only reads.
+                using (var acpi = new AcpiHardware())
+                {
+                    output.Write(Probe.Run(acpi, ReadProductName()));
+                    output.Write('\n');
+                    output.Flush();
+                }
+                return 0;
+            }
+            if (args.Length != 0)
+            {
+                Console.Error.WriteLine("Usage: asus-helper.exe [--probe]");
+                return 2;
+            }
+
+            var input = new StreamReader(Console.OpenStandardInput(), utf8);
+            var hw = new UnavailableHardware();   // ADL and services until Task 4
+            using (var acpi = new AcpiHardware())
+            {
+                Run(input, output, new HelperCore(acpi, hw, hw, IsAlly()));
+            }
             return 0;
         }
 
@@ -50,20 +71,26 @@ namespace Overdrive.Helper
         // Spec: BIOS SystemProductName contains "RC7" (owner device "ROG Xbox Ally X RC73XA_RC73XA"). Read only.
         public static bool IsAlly()
         {
+            string name = ReadProductName();
+            return name != null && name.Contains("RC7");
+        }
+
+        // BIOS SystemProductName, or null when it cannot be read. Read only.
+        public static string ReadProductName()
+        {
             try
             {
                 using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"HARDWARE\DESCRIPTION\System\BIOS", false))
                 {
-                    if (k == null) return false;
-                    string name = k.GetValue("SystemProductName") as string;
-                    return name != null && name.Contains("RC7");
+                    if (k == null) return null;
+                    return k.GetValue("SystemProductName") as string;
                 }
             }
-            catch (Exception) { return false; }
+            catch (Exception) { return null; }
         }
     }
 
-    // Placeholder until the ported G-Helper layers land (Task 3 ACPI, Task 4 ADL and services):
+    // Placeholder until the ported G-Helper layers land (Task 4 ADL and services; ACPI is AcpiHardware):
     // every hardware call fails with a clear message and nothing is touched.
     public class UnavailableHardware : IAcpi, IAdl, IServices
     {

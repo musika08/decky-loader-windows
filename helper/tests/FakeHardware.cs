@@ -11,9 +11,11 @@ namespace Overdrive.Helper.Tests
         public readonly Dictionary<int, byte[]> Curves = new Dictionary<int, byte[]>();
         public int SetResult = 1;          // G-Helper treats DeviceSet result 1 as OK
         public bool ThrowOnWrite;
+        public bool ThrowOnRead;
 
         public int DeviceGet(uint id)
         {
+            if (ThrowOnRead) throw new InvalidOperationException("read failed");
             Calls.Add("get 0x" + id.ToString("X8"));
             int v;
             return Values.TryGetValue(id, out v) ? v : -1;
@@ -29,6 +31,7 @@ namespace Overdrive.Helper.Tests
 
         public byte[] GetFanCurve(int fan, int mode)
         {
+            if (ThrowOnRead) throw new InvalidOperationException("read failed");
             Calls.Add("getcurve " + fan + " " + mode);
             byte[] c;
             return Curves.TryGetValue(mode, out c) ? (byte[])c.Clone() : new byte[16];
