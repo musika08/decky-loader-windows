@@ -176,6 +176,31 @@ export function autoTdpToggleDisabled(supported: boolean, on: boolean): boolean 
   return !supported && !on;
 }
 
+// ---------- CPU Boost, Battery performance, controller ----------
+
+export type PowerMode = 'eco' | 'balanced' | 'best' | 'other';
+export type ControllerMode = 'gamepad' | 'desktop' | 'auto';
+
+export const CPU_BOOST_DESCRIPTION = 'Lets the CPU run above its base clock. Off: cooler and longer battery, a little slower.';
+export const POWER_MODE_DESCRIPTION = 'Windows power mode for the power source in use now (battery or plugged in).';
+export const GRIP_VIBRATION_DESCRIPTION = 'Vibration motors in the grips.';
+export const TOUCHSCREEN_DESCRIPTION = 'Turns the touch screen off, e.g. to avoid stray touches.';
+export const AUTO_SR_DESCRIPTION = 'Windows Automatic Super Resolution for games started from now on (per-game choice stays in Game Bar).';
+export const CONTROLLER_NOT_FOUND = 'Controller not found';
+
+export function powerModeLabel(value: string | null | undefined): string {
+  if (value === 'eco') return 'Eco';
+  if (value === 'balanced') return 'Balanced';
+  if (value === 'best') return 'Best performance';
+  return 'Set in Windows';
+}
+
+export function controllerModeDescription(mode: string | null | undefined): string {
+  if (mode === 'desktop') return 'Sticks and triggers work as a mouse; Steam menus cannot be steered.';
+  if (mode === 'auto') return 'Gamepad in Steam and games, mouse on the desktop.';
+  return 'The controller works as a gamepad (Steam and games).';
+}
+
 // Power limits line outside Manual: the firmware's limits apply. The device reads 0 (not reported) on the Ally,
 // so watts are only added when it reports real values.
 export function powerLine(spl: number | null | undefined, sppt: number | null | undefined, fppt: number | null | undefined): string {

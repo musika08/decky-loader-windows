@@ -154,3 +154,19 @@ test('Auto TDP line after a refusal and the switch when unsupported', async () =
   assert.equal(autoTdpToggleDisabled(false, true), false);   // stored on but unsupported: can be turned off
   assert.equal(autoTdpToggleDisabled(false, false), true);   // cannot be turned on
 });
+
+test('powerModeLabel names the three Windows power modes and anything else', async () => {
+  const { powerModeLabel } = await import('../../src/curve.ts');
+  assert.equal(powerModeLabel('eco'), 'Eco');
+  assert.equal(powerModeLabel('balanced'), 'Balanced');
+  assert.equal(powerModeLabel('best'), 'Best performance');
+  assert.equal(powerModeLabel('other'), 'Set in Windows');
+  assert.equal(powerModeLabel(undefined), 'Set in Windows');
+});
+
+test('controllerModeDescription gives the spec 3.3 texts', async () => {
+  const { controllerModeDescription } = await import('../../src/curve.ts');
+  assert.equal(controllerModeDescription('gamepad'), 'The controller works as a gamepad (Steam and games).');
+  assert.equal(controllerModeDescription('desktop'), 'Sticks and triggers work as a mouse; Steam menus cannot be steered.');
+  assert.equal(controllerModeDescription('auto'), 'Gamepad in Steam and games, mouse on the desktop.');
+});

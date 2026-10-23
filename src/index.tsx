@@ -17,7 +17,17 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 import { FaBolt, FaCheck } from 'react-icons/fa';
 import {
   CURVE_POINTS,
+  AUTO_SR_DESCRIPTION,
   AUTO_TDP_UNSUPPORTED,
+  CONTROLLER_NOT_FOUND,
+  CPU_BOOST_DESCRIPTION,
+  ControllerMode,
+  GRIP_VIBRATION_DESCRIPTION,
+  POWER_MODE_DESCRIPTION,
+  PowerMode,
+  TOUCHSCREEN_DESCRIPTION,
+  controllerModeDescription,
+  powerModeLabel,
   CURVE_SPEED_MAX,
   CURVE_TEMP_MAX,
   CURVE_TEMP_MIN,
@@ -98,6 +108,12 @@ type State = {
   fan_note: string;
   busy?: boolean; // ruling P12; read when the backend reports it
   auto_tdp?: { on: boolean; supported: boolean };
+  cpu_boost?: { on: boolean; supported: boolean };
+  power_mode?: { value: PowerMode; supported: boolean };
+  controller?: { mode: ControllerMode; found: boolean };
+  grip_vibration?: boolean;
+  touchscreen?: { found: boolean; enabled: boolean };
+  auto_sr?: { installed: boolean; on: boolean | null }; // on null = "Set in Windows"
   user_set?: boolean;
   power_set?: boolean;
   // What the device reports (read only): mode "other" = a mode Overdrive does not set; null = not reported.
@@ -127,7 +143,13 @@ const setFanPreset = callable<[Preset], Result>('set_fan_preset');
 const setFanCurve = callable<[number[], number[], Fan], Result>('set_fan_curve');
 const resetDefaults = callable<[], Result>('reset_defaults');
 const setAutoTdp = callable<[boolean], Result>('set_auto_tdp');
-const setArmouryReplaced = callable<[boolean], Result>('set_armoury_replaced');
+const setCpuBoost = callable<[boolean], Result>('set_cpu_boost');
+const setPowerMode = callable<[PowerMode], Result>('set_power_mode');
+const setControllerMode = callable<[ControllerMode], Result>('set_controller_mode');
+const setGripVibration = callable<[boolean], Result>('set_grip_vibration');
+const setTouchscreen = callable<[boolean], Result>('set_touchscreen');
+const setAutoSr = callable<[boolean], Result>('set_auto_sr');
+const setArmouryReplaced =callable<[boolean], Result>('set_armoury_replaced');
 
 const NOT_ALLY = 'Overdrive supports the ROG Ally family only';
 const ARMOURY_BUSY = 'Switching Armoury Crate services, this can take a few minutes';
@@ -199,6 +221,8 @@ function InlinePicker<T>(props: {
   options: PickerOption<T>[];
   value: T;
   disabled?: boolean;
+  // Row value when the current value is not one of the options (e.g. "Set in Windows").
+  unknownText?: string;
   onChange: (v: T) => void;
 }) {
   const { label, options, value, disabled, onChange } = props;
@@ -256,7 +280,10 @@ function InlinePicker<T>(props: {
         onOKActionDescription={open ? 'Close' : 'Choose'}
       >
         <span>{label}</span>
-        <span style={{ color: disabled ? '#8b929a' : '#ffffff' }}>{rowValue(options, value, open)}</span>
+        <span style={{ color: disabled ? '#8b929a' : '#ffffff' }}>{options.some((o) => o.data === value) || !props.unknownText
+            ? rowValue(options, value, open)
+            : props.unknownText + (open ? ' ▴' : ' ▾')}
+        </span>
       </Focusable>
       {open &&
         options.map((o, i) => {
@@ -601,6 +628,8 @@ function Content() {
   const [autoLine, setAutoLine] = useState<string | null>(null);
   // The value Auto TDP is being switched to; the toggle shows it meanwhile, else the stored state.
   const [autoTarget, setAutoTarget] = useState<boolean | null>(null);
+  // Same for the other toggles: the target while the call runs, so a failed change falls back to the stored value.
+  const [toggleTarget, setToggleTarget] = useState<Record<string, boolean | undefined>>({});
   const [armouryBusy, setArmouryBusy] = useState(armouryPending !== null);
   const [power, setPower] = useState({ spl: 30, sppt: 30, fppt: 30 });
   const [editing, setEditing] = useState(false);
@@ -881,6 +910,14 @@ function Content() {
     if (mounted.current) setAutoTarget(null);
   };
 
+  const toggleSetting = async (key: string, stored: boolean, call: (on: boolean) => Promise<Result>) => {
+    // A single press; the target is always the opposite of the stored value, whatever the toggle reported.
+    const on = !stored;
+    setToggleTarget((t) => ({ ...t, [key]: on }));
+    await run(key, () => call(on));
+    if (mounted.current) setToggleTarget((t) => ({ ...t, [key]: undefined }));
+  };
+
   const toggleArmoury = () => {
     if (armouryPending) return;
     // The target is always the opposite of the stored value, whatever the toggle reported.
@@ -900,6 +937,19 @@ function Content() {
   const draftReason = validateCurve(draft.temps, draft.speeds);
   const sel = Math.min(Math.max(selected, 0), CURVE_POINTS - 1);
   const shownCurve = usableCurve(fan === 'gpu' ? state.fan_curve_gpu : state.fan_curve);
+  const powerOptions: { data: PowerMode; label: string }[] = [
+    { data: 'eco', label: powerModeLabel('eco') },
+    { data: 'balanced', label: powerModeLabel('balanced') },
+    { data: 'best', label: powerModeLabel('best') },
+  ];
+  const controllerOptions: { data: ControllerMode; label: string }[] = [
+    { data: 'gamepad', label: 'Gamepad' },
+    { data: 'desktop', label: 'Desktop' },
+    { data: 'auto', label: 'Auto' },
+  ];
+  const controllerFound = !!state.controller?.found;
+  const touch = state.touchscreen;
+  const autoSr = state.auto_sr;
   const fpsOptions = FPS_STEPS.map((f) => ({ data: f, label: f === 0 ? 'Off' : `${f} FPS` }));
 
   // ---------- layout ----------
@@ -998,6 +1048,91 @@ function Content() {
         {!state.auto_tdp?.supported && <Note text={AUTO_TDP_UNSUPPORTED} />}
         {state.auto_tdp?.on && autoLine && <Note text={autoLine} />}
         <StatusRow status={statuses.autotdp} />
+        <PanelSectionRow>
+          <ToggleField
+            label="CPU Boost"
+            description={CPU_BOOST_DESCRIPTION}
+            checked={toggleTarget.cpuboost ?? !!state.cpu_boost?.on}
+            disabled={disabled || state.cpu_boost?.supported === false}
+            onChange={() => toggleSetting('cpuboost', !!state.cpu_boost?.on, setCpuBoost)}
+          />
+        </PanelSectionRow>
+        <StatusRow status={statuses.cpuboost} />
+        {state.power_mode?.supported !== false && (
+          <>
+            <PanelSectionRow>
+              <InlinePicker
+                label="Battery performance"
+                options={powerOptions}
+                value={state.power_mode?.value ?? 'other'}
+                unknownText={powerModeLabel('other')}
+                disabled={disabled}
+                onChange={(v) => run('powermode', () => setPowerMode(v))}
+              />
+            </PanelSectionRow>
+            <Note text={POWER_MODE_DESCRIPTION} />
+            <StatusRow status={statuses.powermode} />
+          </>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Controller & screen">
+        {controllerFound ? (
+          <>
+            <PanelSectionRow>
+              <InlinePicker
+                label="Controller mode"
+                options={controllerOptions}
+                value={state.controller?.mode ?? 'gamepad'}
+                disabled={disabled}
+                onChange={(v) => run('controller', () => setControllerMode(v))}
+              />
+            </PanelSectionRow>
+            <Note text={controllerModeDescription(state.controller?.mode)} />
+            <StatusRow status={statuses.controller} />
+            <PanelSectionRow>
+              <ToggleField
+                label="Grip vibration"
+                description={GRIP_VIBRATION_DESCRIPTION}
+                checked={toggleTarget.grip ?? !!state.grip_vibration}
+                disabled={disabled}
+                onChange={() => toggleSetting('grip', !!state.grip_vibration, setGripVibration)}
+              />
+            </PanelSectionRow>
+            <StatusRow status={statuses.grip} />
+          </>
+        ) : (
+          <Note text={CONTROLLER_NOT_FOUND} />
+        )}
+        {touch?.found && (
+          <>
+            <PanelSectionRow>
+              <ToggleField
+                label="Touchscreen"
+                description={TOUCHSCREEN_DESCRIPTION}
+                checked={toggleTarget.touch ?? touch.enabled}
+                disabled={disabled}
+                onChange={() => toggleSetting('touch', touch.enabled, setTouchscreen)}
+              />
+            </PanelSectionRow>
+            <StatusRow status={statuses.touch} />
+          </>
+        )}
+        {autoSr?.installed && (
+          <>
+            <PanelSectionRow>
+              <ToggleField
+                label="Auto SR"
+                description={AUTO_SR_DESCRIPTION}
+                checked={toggleTarget.autosr ?? autoSr.on === true}
+                disabled={disabled}
+                onChange={() => toggleSetting('autosr', autoSr.on === true, setAutoSr)}
+              />
+            </PanelSectionRow>
+            {autoSr.on === null && <Note text={powerModeLabel('other')} />}
+            <StatusRow status={statuses.autosr} />
+          </>
+        )}
       </PanelSection>
 
       <PanelSection title="Fans">
