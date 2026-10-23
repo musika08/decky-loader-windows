@@ -170,3 +170,12 @@ test('controllerModeDescription gives the spec 3.3 texts', async () => {
   assert.equal(controllerModeDescription('desktop'), 'Sticks and triggers work as a mouse; Steam menus cannot be steered.');
   assert.equal(controllerModeDescription('auto'), 'Gamepad in Steam and games, mouse on the desktop.');
 });
+
+test('touchscreenCheck waits for the device to match the target, then times out', async () => {
+  const { touchscreenCheck } = await import('../../src/curve.ts');
+  assert.equal(touchscreenCheck(true, true, 0), 'done');
+  assert.equal(touchscreenCheck(true, false, 1500), 'wait');
+  assert.equal(touchscreenCheck(undefined, false, 14999), 'wait');
+  assert.equal(touchscreenCheck(true, false, 15000), 'timeout');
+  assert.equal(touchscreenCheck(false, false, 20000), 'done');
+});

@@ -208,3 +208,15 @@ export function powerLine(spl: number | null | undefined, sppt: number | null | 
   if (ok(spl) && ok(sppt) && ok(fppt)) return 'Power limits: ' + FIRMWARE_DEFAULT_TEXT + ' (' + spl + ' / ' + sppt + ' / ' + fppt + ' W)';
   return 'Power limits: ' + FIRMWARE_DEFAULT_TEXT;
 }
+
+export const AUTO_SR_UNSET = 'Set in Windows';
+
+// Touchscreen change: the helper replies at once, so the panel polls the device status until it matches the target.
+export const TOUCH_POLL_MS = 1500;
+export const TOUCH_TIMEOUT_MS = 15000;
+export const TOUCH_TIMEOUT_TEXT = 'Touchscreen did not respond';
+
+export function touchscreenCheck(enabled: boolean | undefined, target: boolean, elapsedMs: number): 'done' | 'wait' | 'timeout' {
+  if (enabled === target) return 'done';
+  return elapsedMs >= TOUCH_TIMEOUT_MS ? 'timeout' : 'wait';
+}

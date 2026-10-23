@@ -18,6 +18,11 @@ import { FaBolt, FaCheck } from 'react-icons/fa';
 import {
   CURVE_POINTS,
   AUTO_SR_DESCRIPTION,
+  AUTO_SR_UNSET,
+  TOUCH_POLL_MS,
+  TOUCH_TIMEOUT_MS,
+  TOUCH_TIMEOUT_TEXT,
+  touchscreenCheck,
   AUTO_TDP_UNSUPPORTED,
   CONTROLLER_NOT_FOUND,
   CPU_BOOST_DESCRIPTION,
@@ -149,7 +154,7 @@ const setControllerMode = callable<[ControllerMode], Result>('set_controller_mod
 const setGripVibration = callable<[boolean], Result>('set_grip_vibration');
 const setTouchscreen = callable<[boolean], Result>('set_touchscreen');
 const setAutoSr = callable<[boolean], Result>('set_auto_sr');
-const setArmouryReplaced =callable<[boolean], Result>('set_armoury_replaced');
+const setArmouryReplaced = callable<[boolean], Result>('set_armoury_replaced');
 
 const NOT_ALLY = 'Overdrive supports the ROG Ally family only';
 const ARMOURY_BUSY = 'Switching Armoury Crate services, this can take a few minutes';
@@ -918,6 +923,39 @@ function Content() {
     if (mounted.current) setToggleTarget((t) => ({ ...t, [key]: undefined }));
   };
 
+  // The helper answers at once; the device changes a little later. Keep the toggle on its target and re-read the state
+  // every 1.5 s (up to 15 s) until the device agrees. Stops when the panel unmounts.
+  const toggleTouchscreen = async () => {
+    const on = !state.touchscreen?.enabled;
+    setToggleTarget((t) => ({ ...t, touch: on }));
+    setWorking(true);
+    const r = await safeCall(() => setTouchscreen(on));
+    if (r.ok) {
+      const start = Date.now();
+      let verdict: 'done' | 'wait' | 'timeout' = 'wait';
+      while (mounted.current && verdict === 'wait') {
+        await new Promise((res) => setTimeout(res, TOUCH_POLL_MS));
+        if (!mounted.current) return;
+        try {
+          const st = await getState();
+          if (!mounted.current) return;
+          setState(st);
+          verdict = touchscreenCheck(st.touchscreen?.enabled, on, Date.now() - start);
+        } catch {
+          verdict = touchscreenCheck(undefined, on, Date.now() - start);
+        }
+      }
+      if (!mounted.current) return;
+      setStatus('touch', verdict === 'done' ? r : { ok: false, message: TOUCH_TIMEOUT_TEXT });
+    } else {
+      await refresh();
+      if (!mounted.current) return;
+      setStatus('touch', r);
+    }
+    setToggleTarget((t) => ({ ...t, touch: undefined }));
+    setWorking(false);
+  };
+
   const toggleArmoury = () => {
     if (armouryPending) return;
     // The target is always the opposite of the stored value, whatever the toggle reported.
@@ -1112,7 +1150,7 @@ function Content() {
                 description={TOUCHSCREEN_DESCRIPTION}
                 checked={toggleTarget.touch ?? touch.enabled}
                 disabled={disabled}
-                onChange={() => toggleSetting('touch', touch.enabled, setTouchscreen)}
+                onChange={toggleTouchscreen}
               />
             </PanelSectionRow>
             <StatusRow status={statuses.touch} />
@@ -1129,7 +1167,7 @@ function Content() {
                 onChange={() => toggleSetting('autosr', autoSr.on === true, setAutoSr)}
               />
             </PanelSectionRow>
-            {autoSr.on === null && <Note text={powerModeLabel('other')} />}
+            {autoSr.on === null && <Note text={AUTO_SR_UNSET} />}
             <StatusRow status={statuses.autosr} />
           </>
         )}
