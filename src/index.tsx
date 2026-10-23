@@ -918,7 +918,6 @@ function Content() {
         {sensors.map((line, i) => (
           <Note key={'live' + i} text={line} />
         ))}
-        {state.auto_tdp?.on && autoLine && <Note text={autoLine} />}
       </PanelSection>
 
       <PanelSection title="Performance">
@@ -996,6 +995,7 @@ function Content() {
           />
         </PanelSectionRow>
         {!state.auto_tdp?.supported && <Note text={AUTO_TDP_UNSUPPORTED} />}
+        {state.auto_tdp?.on && autoLine && <Note text={autoLine} />}
         <StatusRow status={statuses.autotdp} />
       </PanelSection>
 
