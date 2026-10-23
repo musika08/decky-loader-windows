@@ -16,6 +16,8 @@ Owner decisions (2026-10-24):
 - **Most watts:** the current mode's watts: Silent 13, Balanced 17, Turbo 35 W (`MODE_POWER`), or in Manual the
   Sustained slider (5 to 50 W).
 - **Fewest watts:** 6 W (G-Helper `tdpMin`).
+- **Climb +2 W per step** (G-Helper climbs +1). Owner choice, so a heavy scene recovers from 9 to 17 W in about
+  1.2 s instead of 2.4 s. It still steps down 1 W at a time.
 - While Auto TDP runs it sets all three limits (Sustained, Slow boost, Fast boost) to the same value, as G-Helper
   `SetTDP` writes `PPT_APUA0`, `PPT_APUA3` and `PPT_APUC1` together.
 
@@ -63,12 +65,12 @@ asus-helper.exe ── ADL frame metrics (new, own non-prelinked class) + ADL gf
 Ceiling `C` = the mode's watts (Manual: the Sustained slider). Floor = 6 W. Start value = `C`. Every value written is
 clamped to 6..C.
 
-### 4.1 Hold (FPS limit L set), as G-Helper
+### 4.1 Hold (FPS limit L set), as G-Helper except the +2 W climb
 
 On each sample:
 - `fps <= min(L * 0.9, L - 4)`: up-count +1; otherwise up-count = 0.
 - `fps >= min(L * 0.95, L - 2)`: down-count +1; otherwise down-count = 0.
-- up-count >= 1: both counts = 0, watts +1.
+- up-count >= 1: both counts = 0, watts +2 (owner choice; G-Helper +1).
 - down-count >= 8 and gpu power < current watts: up-count = 0, down-count -1, watts -1. After the first 8 samples
   (2.4 s) on target it can step down every sample while the condition holds, as G-Helper's `_downCount--` does.
 - No GPU power reading (null): the step-down condition is treated as false (never lower without it).
@@ -88,8 +90,9 @@ The hold rules from 4.1, with a target `R` measured at the ceiling instead of a 
   the mode's watts. The controller resets: start at the new `C`, counts 0, Most frames measures again.
 - **Auto TDP turned off:** the loop stops and the mode is written again (`mode_write`), putting its normal watts back.
 - **Armoury Crate switch in progress (`busy`):** samples are skipped; nothing is written.
-- **Helper restart or timeout:** that sample is skipped; three failures in a row pause the loop until the next reapply
-  succeeds. The panel shows "Auto TDP paused: <reason>".
+- **Helper restart or timeout:** that sample is skipped. Three failures in a row pause Auto TDP: the mode is written
+  again (`mode_write`), so the Ally runs at the mode's normal watts as if Auto TDP were off, never stuck low. It resumes
+  after the next successful reapply. The panel shows "Auto TDP paused: <reason>".
 
 ## 5. Saving
 
@@ -117,7 +120,7 @@ Under FPS limit, in the Performance section:
 ## 8. Testing
 
 - **Python unit tests, `AutoTdp` with sample sequences:**
-  - hold: step up at once below the threshold, step down only after 8 on-target samples, then each sample;
+  - hold: step up +2 W at once below the threshold, step down 1 W only after 8 on-target samples, then each sample;
   - no step down without GPU power headroom or with null power;
   - clamping to 6..C;
   - Most frames: measure, trim, climb back, recheck at 60 s, no game.
@@ -126,7 +129,7 @@ Under FPS limit, in the Performance section:
   - stops and restores the mode when turned off;
   - resets on mode, slider and FPS changes;
   - skips while busy;
-  - pauses after three failures;
+  - pauses after three failures and writes the mode again (normal watts);
   - setting saved and reapplied.
 - **Helper tests (fake ADL):** `frame_sample` shape; null plus error when the call fails; no writes.
 - **Panel node tests:** live-line text, description per FPS limit, toggle disabled with FPS unsupported.
@@ -139,7 +142,7 @@ Under FPS limit, in the Performance section:
 
 ## 9. Review focus
 
-1. A scene change that drops fps while watts are low: it must climb by 1 W per 300 ms at once, not wait.
+1. A scene change that drops fps while watts are low: it must climb by 2 W per 300 ms at once, not wait.
 2. Alt-tab or the Steam overlay: fps reads 0, so the watts climb to `C`. There must be no stall at low watts with the
    game hidden.
 3. A user mode change racing a loop write: the user's mode and its watts must land last.
