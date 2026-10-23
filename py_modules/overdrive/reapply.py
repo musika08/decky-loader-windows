@@ -146,6 +146,8 @@ class Reapplier:
         self._deferring = False
         self._retries = 0          # consecutive reapplies retried after a transport failure
         self.on_applied: Optional[Callable[[], None]] = None   # main.py: Auto TDP restarts from the new ceiling
+        self.applies = 0           # bumped when a reapply starts: Auto TDP drops a write sampled before it
+        self.applying = 0          # reapplies in progress: Auto TDP writes nothing meanwhile
 
     # ---------- user changes ----------
 
@@ -206,7 +208,18 @@ class Reapplier:
                 self.log.warning(f"Could not save the default fan curves: {e}")
 
     async def apply_all(self) -> bool:
-        """Applies the stored settings. False when dropped because of a newer user change."""
+        """Applies the stored settings. False when dropped because of a newer user change.
+
+        While it runs, `applying` is set, and `applies` was bumped at its start, so an Auto TDP write can never land
+        between its steps (the lock is released between steps)."""
+        self.applies += 1
+        self.applying += 1
+        try:
+            return await self._apply_all()
+        finally:
+            self.applying -= 1
+
+    async def _apply_all(self) -> bool:
         gen = self.generation
         if self._busy():
             # An armoury_* call holds the single-threaded helper for minutes: queueing behind it would only time

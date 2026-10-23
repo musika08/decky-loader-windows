@@ -52,6 +52,7 @@ class AutoTdpLoop:
         self._fps: Optional[float] = None
         self._paused = ""
         self._supported = True
+        self._written = 0        # the watts last put on the device (the ceiling right after a mode write)
 
     # ---------- control ----------
 
@@ -65,6 +66,7 @@ class AutoTdpLoop:
         self._fps = None
         self._paused = ""
         self.ctl = AutoTdp(ceiling(self.settings), self.settings.fps, self.clock.monotonic())
+        self._written = self.ctl.watts
         self.log.info(f"Auto TDP started (up to {self.ctl.ceiling} W)")
         if self._task is None:
             self._task = asyncio.ensure_future(self._run())
@@ -94,6 +96,7 @@ class AutoTdpLoop:
         self._fails = 0
         self._paused = ""
         self.ctl.reset(ceiling(self.settings), self.settings.fps, self.clock.monotonic())
+        self._written = self.ctl.watts
         if was_paused:
             self.log.info(f"Auto TDP resumed (up to {self.ctl.ceiling} W)")
 
@@ -123,7 +126,7 @@ class AutoTdpLoop:
             return
         if self.reapplier._busy():
             return
-        epoch, gen = self._epoch, self.reapplier.generation
+        epoch, gen = self._epoch, (self.reapplier.generation, self.reapplier.applies)
         r = await self.client.call("frame_sample", {}, SAMPLE_TIMEOUT)
         if epoch != self._epoch or not self._on:
             return
@@ -147,14 +150,26 @@ class AutoTdpLoop:
         if watts is not None:
             await self._write(watts, epoch, gen)
 
-    async def _write(self, watts: int, epoch: int, gen: int) -> None:
-        async with self.reapplier.lock:
-            if (gen != self.reapplier.generation or epoch != self._epoch or not self._on
-                    or self.reapplier._busy()):
-                return   # a user change (which resets the controller) or a stop came first
+    def _rollback(self, epoch: int) -> None:
+        """A write that did not land: the controller goes back to the watts the device really has, so its next
+        decision is written again (it only writes when its own value changes)."""
+        if epoch == self._epoch and self.ctl is not None:
+            self.ctl.watts = self._written
+
+    async def _write(self, watts: int, epoch: int, gen: tuple) -> None:
+        rp = self.reapplier
+        async with rp.lock:
+            if (gen != (rp.generation, rp.applies) or rp.applying or epoch != self._epoch or not self._on
+                    or rp._busy()):
+                # A user change or reapply (both end in a reset to the ceiling), a stop, or an Armoury switch.
+                self._rollback(epoch)
+                return
             r = await self.client.call("set_power", {"spl": watts, "sppt": watts, "fppt": watts})
         if r.get("ok"):
+            if epoch == self._epoch:
+                self._written = watts
             return
+        self._rollback(epoch)
         if transport_failure(r):
             await self._failed(r.get("message") or NO_READING)
             return
@@ -171,6 +186,7 @@ class AutoTdpLoop:
         self._paused = f"Auto TDP paused: {reason}"
         self.log.info(self._paused)
         self.ctl.reset(ceiling(self.settings), self.settings.fps, self.clock.monotonic())
+        self._written = self.ctl.watts
         await self._restore_mode()
 
     # ---------- helpers ----------
@@ -189,4 +205,6 @@ class AutoTdpLoop:
         async with self.reapplier.lock:
             r = await self.client.call("set_mode", mode_write(s.mode, (s.spl, s.sppt, s.fppt)))
         if not r.get("ok"):
+            # The watts may still be trimmed: the next reapply poll writes the mode again (and resumes a pause).
+            self.reapplier.rerun = True
             self.log.warning(f"Auto TDP could not put the mode's power back: {r.get('message')}")

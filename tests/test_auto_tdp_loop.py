@@ -329,3 +329,137 @@ def test_background_task_samples_every_period(tmp_path):
         assert len([1 for cmd, _ in c.calls if cmd == "frame_sample"]) == 3
         await loop.stop(restore=False)
     run(go())
+
+
+def test_loop_write_never_lands_inside_a_reapply(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        r.on_applied = loop.reset
+        loop.start()
+        loop.ctl.watts = 13
+        c.handlers["frame_sample"] = frames(40.0)
+        spawned = []
+
+        async def set_mode(args):
+            # While the mode write holds the lock, a loop sample is taken and its write queues for the lock; the
+            # lock is free again between the reapply's steps.
+            spawned.append(asyncio.ensure_future(loop.run_once()))
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert r.applying == 1
+            return ok(dict(args))
+        c.handlers["set_mode"] = set_mode
+        assert await r.apply_all() is True
+        await spawned[0]
+        assert [cmd for cmd, _ in c.writes()] == ["set_mode", "set_fps_limit"]
+        assert r.applying == 0 and r.applies == 1
+        assert loop.status()["watts"] == 17   # the reapply reset it to the ceiling the mode write set
+        await loop.stop(restore=False)
+    run(go())
+
+
+def test_write_sampled_before_a_reapply_is_dropped(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        loop.ctl.watts = 13
+
+        async def sample_then_reapply(_args):
+            r.applies += 1   # a reapply started and finished after this sample
+            return ok({"supported": True, "fps": 40.0, "gpuPowerW": 5, "errors": []})
+        c.handlers["frame_sample"] = sample_then_reapply
+        await loop.run_once()
+        assert power_writes(c) == []
+        await loop.stop(restore=False)
+    run(go())
+
+
+def test_write_dropped_while_busy_rolls_back(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        loop.ctl.watts = 13
+        loop._written = 13   # the device is at 13 W
+
+        async def sample_then_busy(_args):
+            c.armoury_inflight = 1
+            return ok({"supported": True, "fps": 40.0, "gpuPowerW": 5, "errors": []})
+        c.handlers["frame_sample"] = sample_then_busy
+        await loop.run_once()
+        assert power_writes(c) == []
+        assert loop.status()["watts"] == 13   # rolled back to what the device has
+        c.armoury_inflight = 0
+        c.handlers["frame_sample"] = frames(40.0)
+        await loop.run_once()
+        assert power_writes(c) == [{"spl": 15, "sppt": 15, "fppt": 15}]   # the climb is written again
+        await loop.stop(restore=False)
+    run(go())
+
+
+def test_write_dropped_after_reset_keeps_new_ceiling(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="manual", spl=20, sppt=20, fppt=20, fps=60)
+        loop.start()
+        loop.ctl.watts = loop._written = 13
+        c.handlers["frame_sample"] = frames(40.0)
+        await r.lock.acquire()
+        task = asyncio.ensure_future(loop.run_once())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        s.spl = s.sppt = s.fppt = 18
+        loop.reset()   # epoch changes while the write waits for the lock
+        r.lock.release()
+        await task
+        assert power_writes(c) == []
+        assert loop.status()["watts"] == 18
+        await loop.stop(restore=False)
+    run(go())
+
+
+def test_power_transport_failure_rolls_back_and_counts(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        loop.ctl.watts = loop._written = 13
+        c.handlers["frame_sample"] = frames(40.0)
+
+        async def timeout(_args):
+            return fail("Overdrive helper did not answer in time.")
+        c.handlers["set_power"] = timeout
+        await loop.run_once()
+        st = loop.status()
+        assert st["on"] is True and st["paused"] == "" and st["watts"] == 13
+        del c.handlers["set_power"]
+        c.calls.clear()
+        await loop.run_once()
+        assert power_writes(c) == [{"spl": 15, "sppt": 15, "fppt": 15}]
+        await loop.stop(restore=False)
+    run(go())
+
+
+def test_failed_restore_asks_for_a_reapply(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        c.handlers["frame_sample"] = frames(None)
+
+        async def refuse(_args):
+            return fail("Overdrive helper did not answer in time.")
+        c.handlers["set_mode"] = refuse
+        for _ in range(3):
+            await loop.run_once()
+        assert loop.status()["paused"].startswith("Auto TDP paused:")
+        assert r.rerun is True
+        r.rerun = False
+        await loop.stop()
+        assert r.rerun is True
+    run(go())
+
+
+def test_successful_restore_leaves_rerun_alone(tmp_path):
+    async def go():
+        c, s, r, loop, clock = setup(tmp_path, mode="balanced", fps=60)
+        loop.start()
+        await loop.stop()
+        assert r.rerun is False
+    run(go())
