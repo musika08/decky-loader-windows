@@ -7,5 +7,7 @@ declare global {
     interface IntrinsicElements extends ReactJSX.IntrinsicElements {}
     // Lets `key` be passed to function components in lists.
     interface IntrinsicAttributes extends ReactJSX.IntrinsicAttributes {}
+    // Makes JSX children count as the `children` prop (required by Focusable's props type).
+    interface ElementChildrenAttribute extends ReactJSX.ElementChildrenAttribute {}
   }
 }
