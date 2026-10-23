@@ -84,7 +84,7 @@ class Plugin:
         if not device.is_ally():
             decky.logger.info(f"Overdrive: not an Ally ({device.product_name()!r}); helper not started")
             return
-        settings = Settings.load(settings_path())
+        settings = Settings.load(settings_path(), logger=decky.logger)   # an unreadable file is kept, never lost
         runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", "") or None
         client = HelperClient(plugin_dir=PLUGIN_DIR, runtime_dir=runtime_dir, logger=decky.logger)
         self._attach(client, settings, Reapplier(client, settings, logger=decky.logger))
@@ -158,7 +158,7 @@ class Plugin:
                 state["device"] = _device_readback(r.get("data"))
         state["armoury"]["installed"] = bool(self._armoury_installed)
         state["unavailable"] = self.client.unavailable_reason or ""
-        state["warning"] = " ".join(w for w in (self.reapplier.warning, self._armoury_warning) if w)
+        state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, self._armoury_warning) if w)
         state["fan_note"] = fan_plan(s)[1]
         return state
 

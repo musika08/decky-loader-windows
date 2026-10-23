@@ -665,3 +665,38 @@ def test_stored_mode_other_is_not_loaded(tmp_path):
     path = tmp_path / "overdrive.json"
     path.write_text(json.dumps({"mode": "other"}), encoding="utf-8")
     assert Settings.load(str(path)).mode == "balanced"
+
+
+# ---------- live finding: an unreadable settings file must not lose the Armoury record ----------
+
+def test_unreadable_settings_recover_record_from_bak_and_restore_on_load(monkeypatch, tmp_path):
+    path = tmp_path / "overdrive.json"
+    recorded = {"ArmouryCrateSEService": "AutomaticDelayedStart", "LightingService": "Automatic"}
+    s = Settings.load(str(path))
+    s.armoury_recorded, s.armoury_running = dict(recorded), ["ArmouryCrateSEService"]   # a switch cut short
+    s.save()
+    path.write_bytes(b"\xef\xbb\xbf{ broken")
+    c = FakeClient()
+    monkeypatch.setattr(main.device, "is_ally", lambda read_product=None: True)
+    monkeypatch.setattr(main.device, "product_name", lambda read_product=None: "ROG Ally RC71L")
+    monkeypatch.setattr(main, "HelperClient", lambda *a, **k: c)
+    monkeypatch.setattr(main, "settings_path", lambda: str(path))
+
+    async def go():
+        p = main.Plugin()
+        await p._main()
+        await p._startup
+        st = await p.get_state()
+        await p._unload()
+        return st
+    st = run(go())
+    copies = [x.name for x in tmp_path.iterdir() if x.name.startswith("overdrive.json.unreadable-")]
+    assert len(copies) == 1 and (tmp_path / copies[0]).read_bytes() == b"\xef\xbb\xbf{ broken"
+    # the load-time restore (I1) ran with the recovered record, then the cleared record was saved
+    restores = [args for cmd, args in c.calls if cmd == "armoury_restore"]
+    assert restores == [{"recorded": recorded, "running": ["ArmouryCrateSEService"]}]
+    assert Settings.load(str(path)).armoury_recorded == {}
+    assert (f"Overdrive settings could not be read and were reset; a copy was kept as {copies[0]}."
+            in st["warning"])
+    assert "recovered from overdrive.json.bak" in st["warning"]
+    assert "did not finish, so Armoury Crate was put back" in st["warning"]

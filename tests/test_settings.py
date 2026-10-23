@@ -1,4 +1,8 @@
+import datetime
 import json
+import os
+
+import pytest
 
 from overdrive import settings as st
 from overdrive.settings import Settings
@@ -161,3 +165,137 @@ def test_preset_unusable_default_curve():
     bad = {"temps": [40, 30, 50, 60, 70, 80, 90, 100], "speeds": [0] * 8}   # temps falling
     assert st.preset_curve("quiet", bad) == (None, False)
     assert st.preset_curve("default", None) == (None, False)
+
+
+# ---------- live finding: a BOM-prefixed file was reset to defaults and the Armoury record lost ----------
+
+RECORD = {"ArmouryCrateSEService": "AutomaticDelayedStart", "LightingService": "Automatic"}
+NOW = datetime.datetime(2026, 10, 23, 8, 30, 5, tzinfo=datetime.timezone.utc)
+
+
+def _full_settings():
+    return {"mode": "manual", "spl": 12, "sppt": 20, "fppt": 35, "fps": 45, "fan_preset": "quiet",
+            "fan_curve": None, "default_curve": None, "armoury_replaced": True,
+            "armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"], "user_set": True}
+
+
+def test_bom_prefixed_file_loads_every_field(tmp_path):
+    p = tmp_path / "overdrive.json"
+    # what Windows PowerShell 5.1 `Set-Content -Encoding UTF8` writes
+    p.write_bytes(b"\xef\xbb\xbf" + json.dumps(_full_settings(), indent=2).encode("utf-8"))
+    s = Settings.load(str(p))
+    assert s.to_dict() == _full_settings()
+    assert s.armoury_recorded == RECORD and s.armoury_running == ["ArmouryCrateSEService"]
+    assert s.warning == ""
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["overdrive.json"]   # readable: no copy kept
+    s.save()
+    assert not p.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert not (tmp_path / "overdrive.json.bak").read_bytes().startswith(b"\xef\xbb\xbf")
+
+
+def test_save_is_atomic_and_writes_bak(tmp_path, monkeypatch):
+    p = tmp_path / "overdrive.json"
+    s = Settings.load(str(p))
+    s.mode, s.armoury_recorded = "turbo", dict(RECORD)
+    replaced = []
+    real_replace = os.replace
+    monkeypatch.setattr(st.os, "replace", lambda a, b: (replaced.append((a, b)), real_replace(a, b)))
+    s.save()
+    assert replaced == [(str(p) + ".new", str(p)), (str(p) + ".bak.new", str(p) + ".bak")]
+    assert json.loads(p.read_text(encoding="utf-8")) == json.loads((tmp_path / "overdrive.json.bak").read_text())
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["overdrive.json", "overdrive.json.bak"]
+
+
+def test_bak_failure_does_not_fail_the_save(tmp_path, monkeypatch):
+    p = tmp_path / "overdrive.json"
+    s = Settings.load(str(p))
+    real = st._write_atomic
+
+    def no_bak(path, text):
+        if path.endswith(".bak"):
+            raise OSError("disk full")
+        real(path, text)
+    monkeypatch.setattr(st, "_write_atomic", no_bak)
+    s.mode = "silent"
+    s.save()
+    assert Settings.load(str(p)).mode == "silent"
+
+
+def test_unreadable_file_is_copied_before_it_is_overwritten(tmp_path):
+    p = tmp_path / "overdrive.json"
+    garbage = b'{"mode": "turbo", "armoury_recorded": {'          # truncated
+    p.write_bytes(garbage)
+    s = Settings.load(str(p), now=NOW)
+    copy = tmp_path / "overdrive.json.unreadable-20261023T083005Z"
+    assert copy.read_bytes() == garbage
+    assert p.read_bytes() == garbage                               # load itself never rewrites the file
+    assert s.to_dict() == Settings(str(p)).to_dict()
+    assert s.warning == ("Overdrive settings could not be read and were reset; a copy was kept as "
+                         "overdrive.json.unreadable-20261023T083005Z.")
+    s.save()
+    assert copy.read_bytes() == garbage
+    assert json.loads(p.read_text(encoding="utf-8"))["mode"] == "balanced"
+    # a second unreadable load in the same second never overwrites the first copy
+    p.write_bytes(b"\x00\x01")
+    Settings.load(str(p), now=NOW)
+    assert copy.read_bytes() == garbage
+    assert (tmp_path / "overdrive.json.unreadable-20261023T083005Z-1").read_bytes() == b"\x00\x01"
+
+
+def test_unreadable_file_is_not_overwritten_when_no_copy_can_be_kept(tmp_path, monkeypatch):
+    p = tmp_path / "overdrive.json"
+    p.write_bytes(b"{nope")
+
+    def fail(self, now=None):
+        if self._unreadable_pending:
+            raise OSError("access denied")
+    monkeypatch.setattr(Settings, "_keep_unreadable", fail)
+    s = Settings.load(str(p))
+    assert "a copy could not be kept yet" in s.warning
+    with pytest.raises(OSError):
+        s.save()
+    assert p.read_bytes() == b"{nope"
+
+
+def test_unreadable_link_is_not_copied(tmp_path, monkeypatch):
+    p = tmp_path / "overdrive.json"
+    p.write_bytes(b"{nope")
+    monkeypatch.setattr(st, "_is_link", lambda path: True)
+    s = Settings.load(str(p), now=NOW)
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["overdrive.json"]
+    assert s.warning == ("Overdrive settings could not be read and were reset; overdrive.json is a link, so no copy "
+                         "was kept.")
+
+
+def test_armoury_record_recovered_from_bak(tmp_path):
+    p = tmp_path / "overdrive.json"
+    s = Settings.load(str(p))
+    s.mode, s.fps = "turbo", 60
+    s.armoury_recorded, s.armoury_running = dict(RECORD), ["ArmouryCrateSEService"]   # switch off: provisional
+    s.save()
+    p.write_bytes(b"\xff\xfe garbage")
+    again = Settings.load(str(p), now=NOW)
+    assert again.armoury_recorded == RECORD
+    assert again.armoury_running == ["ArmouryCrateSEService"]
+    assert again.armoury_replaced is False
+    assert (again.mode, again.fps) == ("balanced", 0)                   # other fields stay at their defaults
+    assert again.warning.endswith("The Armoury Crate record was recovered from overdrive.json.bak.")
+    again.save()
+    assert Settings.load(str(p)).armoury_recorded == RECORD                # the next save keeps the record
+
+
+def test_armoury_record_recovered_from_newest_readable_copy(tmp_path):
+    p = tmp_path / "overdrive.json"
+    old = tmp_path / "overdrive.json.bak"
+    old.write_text(json.dumps({"armoury_replaced": False, "armoury_recorded": {}}), encoding="utf-8")
+    os.utime(old, (1_000_000, 1_000_000))
+    # an older build's copy of a BOM file: readable now, and newer than the .bak
+    bom = tmp_path / "overdrive.json.unreadable-20261001T000000Z"
+    bom.write_bytes(b"\xef\xbb\xbf" + json.dumps(_full_settings()).encode("utf-8"))
+    os.utime(bom, (2_000_000, 2_000_000))
+    p.write_bytes(b"")
+    s = Settings.load(str(p), now=NOW)
+    assert (s.armoury_replaced, s.armoury_recorded, s.armoury_running) == \
+        (True, RECORD, ["ArmouryCrateSEService"])
+    assert s.mode == "balanced"
+    assert "recovered from overdrive.json.unreadable-20261001T000000Z" in s.warning

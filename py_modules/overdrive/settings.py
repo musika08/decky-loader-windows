@@ -2,11 +2,19 @@
 
 Every field is checked on load on its own: a missing, wrong-typed or unknown value falls back to its default
 (numbers out of range are clamped), the other fields are kept. Nothing invalid is ever sent to the helper.
+
+The file is read as UTF-8 with or without a BOM (Windows PowerShell 5.1 `Set-Content -Encoding UTF8` adds one) and
+always written without one. A file that exists but cannot be read or parsed is never overwritten silently: a copy is
+kept as overdrive.json.unreadable-<UTC time> first, and the Armoury Crate record (which services to put back) is
+recovered from the newest readable overdrive.json.bak or earlier unreadable copy, so a fallback to defaults can
+never leave stopped services with no record to restore them from. Every successful save also writes the .bak.
 The curve rules mirror helper\\src\\Validation.cs (CheckCurve, MinSpeedAt) exactly, messages included.
 """
+import datetime
 import json
 import math
 import os
+import stat
 from typing import Optional
 
 MODES = ("silent", "balanced", "turbo", "manual")
@@ -26,6 +34,33 @@ ARMOURY_SERVICES = (
     "ArmouryCrateSEService", "ArmouryCrateService", "LightingService",
 )
 START_TYPES = ("Automatic", "AutomaticDelayedStart", "Manual", "Disabled")
+# The record a fallback must never lose. With the switch off, a non-empty record is the provisional one.
+ARMOURY_FIELDS = ("armoury_replaced", "armoury_recorded", "armoury_running")
+UNREADABLE_TAG = ".unreadable-"
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_link(path: str) -> bool:
+    """True for a symlink, junction or any other reparse point (never followed when copying or recovering)."""
+    st = os.lstat(path)
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _read_json(path: str):
+    """The parsed file (BOM accepted). FileNotFoundError when absent; OSError/ValueError when unreadable."""
+    with open(path, "rb") as f:
+        data = f.read()
+    return json.loads(data.decode("utf-8-sig"))
+
+
+def _write_atomic(path: str, text: str) -> None:
+    """Written next to the target (UTF-8, no BOM), flushed to disk, then renamed over it."""
+    tmp = path + ".new"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def _is_int(v) -> bool:
@@ -134,21 +169,123 @@ class Settings:
         self.armoury_running: list = []
         # False until the owner changes something: an untouched install only reads, it never writes the device.
         self.user_set = False
+        self.logger = None
+        self._reset_note = ""               # why the file was reset (shown in get_state)
+        self._recovered_note = ""           # where the Armoury record came back from
+        self._unreadable_pending = False    # the unreadable file is still on disk with no copy kept yet
 
     FIELDS = ("mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "default_curve",
               "armoury_replaced", "armoury_recorded", "armoury_running", "user_set")
 
     @classmethod
-    def load(cls, path: str) -> "Settings":
+    def load(cls, path: str, logger=None, now=None) -> "Settings":
         s = cls(path)
+        s.logger = logger
         try:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-        except (OSError, ValueError):
-            raw = None
+            raw = _read_json(path)
+        except FileNotFoundError:
+            return s
+        except (OSError, ValueError) as e:
+            raw, why = None, str(e)
+        else:
+            why = "not a JSON object"
         if isinstance(raw, dict):
             s._take(raw)
+            return s
+        # It exists but is unusable: keep a copy before anything can overwrite it, and get the Armoury record back.
+        s._log(f"Overdrive settings file {path} could not be read ({why}); using defaults")
+        s._unreadable_pending = True
+        try:
+            s._keep_unreadable(now)
+        except OSError as e:
+            s._log(f"Could not keep a copy of the unreadable settings file yet: {e}")
+            s._reset_note = ("Overdrive settings could not be read and were reset; a copy could not be kept yet, "
+                             "so they will not be saved until it can.")
+        s._recover_armoury()
         return s
+
+    @property
+    def warning(self) -> str:
+        """For get_state: the file was unreadable and reset (and where the Armoury record came from), else ""."""
+        return " ".join(w for w in (self._reset_note, self._recovered_note) if w)
+
+    def _log(self, msg: str) -> None:
+        if self.logger is not None:
+            self.logger.warning(msg)
+
+    def _keep_unreadable(self, now=None) -> None:
+        """Copy the unreadable file to <name>.unreadable-<UTC time> (never through a link). Raises OSError."""
+        if not self._unreadable_pending:
+            return
+        name = os.path.basename(self.path)
+        try:
+            link = _is_link(self.path)
+        except FileNotFoundError:
+            self._unreadable_pending = False
+            return
+        if link:
+            self._unreadable_pending = False
+            self._reset_note = (f"Overdrive settings could not be read and were reset; {name} is a link, so no "
+                                "copy was kept.")
+            self._log(self._reset_note)
+            return
+        with open(self.path, "rb") as f:
+            data = f.read()
+        when = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y%m%dT%H%M%SZ")
+        base = self.path + UNREADABLE_TAG + when
+        for n in range(100):
+            dst = base if n == 0 else f"{base}-{n}"
+            try:   # O_EXCL: never overwrites an existing file and never writes through a planted link
+                fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+            except FileExistsError:
+                continue
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            break
+        else:
+            raise OSError(f"no free name for a copy of {name}")
+        self._unreadable_pending = False
+        self._reset_note = (f"Overdrive settings could not be read and were reset; a copy was kept as "
+                            f"{os.path.basename(dst)}.")
+        self._log(self._reset_note)
+
+    def _recover_armoury(self) -> None:
+        """Take the Armoury record from the newest readable .bak or earlier unreadable copy; the other fields keep
+        their defaults."""
+        folder = os.path.dirname(self.path) or "."
+        name = os.path.basename(self.path)
+        try:
+            entries = os.listdir(folder)
+        except OSError:
+            return
+        found = []
+        for entry in entries:
+            if entry != name + ".bak" and not entry.startswith(name + UNREADABLE_TAG):
+                continue
+            full = os.path.join(folder, entry)
+            try:
+                if _is_link(full):
+                    continue
+                found.append((os.stat(full).st_mtime, entry, full))
+            except OSError:
+                continue
+        for _, entry, full in sorted(found, reverse=True):
+            try:
+                raw = _read_json(full)
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict):
+                continue
+            other = Settings(self.path)
+            other._take(raw)
+            for k in ARMOURY_FIELDS:
+                setattr(self, k, getattr(other, k))
+            if self.armoury_recorded or self.armoury_replaced:
+                self._recovered_note = f"The Armoury Crate record was recovered from {entry}."
+                self._log(self._recovered_note)
+            return
 
     def _take(self, raw: dict) -> None:
         if raw.get("mode") in MODES:
@@ -194,13 +331,18 @@ class Settings:
         return {k: getattr(self, k) for k in self.FIELDS}
 
     def save(self) -> None:
-        """Atomic: written next to the target, then renamed over it."""
+        """Atomic: written next to the target, then renamed over it; then the same for <name>.bak.
+
+        An unreadable file still on disk is copied first; when that copy cannot be made the save fails (OSError)
+        instead of overwriting it."""
         folder = os.path.dirname(self.path)
         if folder:
             os.makedirs(folder, exist_ok=True)
-        tmp = self.path + ".new"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self.path)
+        if self._unreadable_pending:
+            self._keep_unreadable()
+        text = json.dumps(self.to_dict(), indent=2)
+        _write_atomic(self.path, text)
+        try:
+            _write_atomic(self.path + ".bak", text)
+        except OSError as e:
+            self._log(f"Could not write the settings backup {self.path}.bak: {e}")
