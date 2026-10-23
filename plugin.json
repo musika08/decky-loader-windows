@@ -2,7 +2,7 @@
   "api_version": 1,
   "name": "Overdrive",
   "author": "Musika",
-  "flags": [],
+  "flags": ["root"],
   "publish": {
     "tags": ["asus", "performance", "tdp", "fans"],
     "description": "Performance mode, power limits, FPS limit and fan curves for the ROG Ally family (unofficial; based on G-Helper).",

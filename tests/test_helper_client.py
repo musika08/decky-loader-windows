@@ -1,0 +1,202 @@
+import asyncio
+import os
+import sys
+
+from overdrive.helper_client import RESTARTED, HelperClient
+
+FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_helper.py")
+
+
+def spawner(*extra, counter=None):
+    async def start():
+        if counter is not None:
+            counter.append(1)
+        return await asyncio.create_subprocess_exec(
+            sys.executable, FAKE, *extra,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    return start
+
+
+class Sleeps:
+    def __init__(self):
+        self.delays = []
+
+    async def __call__(self, delay):
+        self.delays.append(delay)
+
+
+async def until(cond, limit=15.0):
+    loop = asyncio.get_running_loop()
+    end = loop.time() + limit
+    while not cond():
+        assert loop.time() < end, "condition not reached"
+        await asyncio.sleep(0.02)
+
+
+def test_call_roundtrip_and_ids():
+    async def run():
+        c = HelperClient(start_process=spawner())
+        try:
+            r1 = await c.call("hello")
+            r2 = await c.call("set_mode", {"mode": "silent"})
+            assert r1["ok"] is True and r1["data"]["version"] == "0.1.0"
+            assert r2["ok"] is True and r2["data"] == {"mode": "silent"}
+            assert r2["id"] == r1["id"] + 1
+            # concurrent calls each get their own reply
+            rs = await asyncio.gather(*(c.call("set_fps_limit", {"fps": f}) for f in (30, 60, 90)))
+            assert [r["data"]["fps"] for r in rs] == [30, 60, 90]
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_pending_request_fails_on_helper_exit():
+    async def run():
+        sleeps = Sleeps()
+        starts = []
+        c = HelperClient(start_process=spawner("--exit-on", "armoury_stop", counter=starts), sleep=sleeps)
+        try:
+            assert (await c.call("hello"))["ok"] is True
+            r = await asyncio.wait_for(c.call("armoury_stop", timeout=300), 10)
+            assert r["ok"] is False
+            assert r["message"] == RESTARTED == "Overdrive helper restarted, try again"
+            # restarted with the first backoff step and usable again
+            await until(lambda: len(starts) == 2)
+            assert (await c.call("hello"))["ok"] is True
+            assert sleeps.delays == [1]
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_other_pending_calls_fail_too_on_exit():
+    async def run():
+        c = HelperClient(start_process=spawner("--hang-on", "sensors", "--exit-on", "armoury_stop"), sleep=Sleeps())
+        try:
+            await c.call("hello")
+            hanging = asyncio.ensure_future(c.call("sensors"))
+            await asyncio.sleep(0.2)
+            r = await c.call("armoury_stop")
+            assert r["message"] == RESTARTED
+            assert (await asyncio.wait_for(hanging, 5))["message"] == RESTARTED
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_restarts_with_backoff_then_unavailable():
+    async def run():
+        sleeps = Sleeps()
+        starts = []
+        c = HelperClient(start_process=spawner("--exit-at-start", "7", counter=starts), sleep=sleeps)
+        try:
+            c.start()
+            await until(lambda: c.unavailable_reason != "")
+            assert len(starts) == 5
+            assert sleeps.delays == [1, 2, 4, 4]
+            assert "5 times in 10 minutes" in c.unavailable_reason
+            assert "code 7" in c.unavailable_reason
+            r = await c.call("hello")
+            assert r["ok"] is False and r["message"] == c.unavailable_reason
+            assert len(starts) == 5   # no more starts once unavailable
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_old_starts_leave_the_window():
+    async def run():
+        now = [1000.0]
+        sleeps = Sleeps()
+
+        async def fake_sleep(d):
+            await sleeps(d)
+            now[0] += 200          # each wait also lets 200 s pass, so starts age out of the 10 min window
+
+        starts = []
+        c = HelperClient(start_process=spawner("--exit-at-start", "7", counter=starts),
+                         sleep=fake_sleep, clock=lambda: now[0])
+        try:
+            c.start()
+            await until(lambda: len(starts) >= 8)
+            assert c.unavailable_reason == ""
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_spawn_failure_counts_as_a_start():
+    async def run():
+        sleeps = Sleeps()
+
+        async def broken():
+            raise FileNotFoundError("asus-helper.exe not found")
+
+        c = HelperClient(start_process=broken, sleep=sleeps)
+        try:
+            r = await c.call("hello", timeout=5)
+            assert r["ok"] is False
+            assert "asus-helper.exe not found" in c.unavailable_reason
+            assert sleeps.delays == [1, 2, 4, 4]
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_timeout_reply_and_helper_still_usable():
+    async def run():
+        c = HelperClient(start_process=spawner("--hang-on", "sensors"))
+        try:
+            r = await c.call("sensors", timeout=0.5)
+            assert r["ok"] is False and "did not answer" in r["message"]
+            assert (await c.call("hello"))["ok"] is True
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_late_reply_is_dropped():
+    async def run():
+        c = HelperClient(start_process=spawner("--slow-on", "sensors"))
+        try:
+            r = await c.call("sensors", timeout=0.3)
+            assert r["ok"] is False and "did not answer" in r["message"]
+            # the late sensors reply arrives first and must not be taken as hello's answer
+            h = await c.call("hello", timeout=5)
+            assert h["ok"] is True and h["data"]["version"] == "0.1.0"
+            assert c._pending == {}
+        finally:
+            await c.stop()
+    asyncio.run(run())
+
+
+def test_stop_ends_process_and_refuses_calls():
+    async def run():
+        c = HelperClient(start_process=spawner())
+        await c.call("hello")
+        proc = c._proc
+        await c.stop()
+        assert proc.returncode is not None
+        r = await c.call("hello")
+        assert r["ok"] is False
+    asyncio.run(run())
+
+
+def test_default_start_uses_bin_exe_without_window(monkeypatch, tmp_path):
+    seen = {}
+
+    async def fake_exec(*argv, **kw):
+        seen["argv"], seen["kw"] = argv, kw
+        raise FileNotFoundError("nope")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        c = HelperClient(plugin_dir=str(tmp_path), runtime_dir=str(tmp_path / "rt"), sleep=Sleeps())
+        await c.call("hello", timeout=5)
+        await c.stop()
+    asyncio.run(run())
+    assert seen["argv"] == (os.path.join(str(tmp_path), "bin", "asus-helper.exe"),)
+    if os.name == "nt":
+        assert seen["kw"]["creationflags"] & 0x08000000
+    assert seen["kw"]["cwd"] == str(tmp_path / "rt")
