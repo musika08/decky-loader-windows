@@ -6,7 +6,7 @@ $lines = New-Object System.Collections.Generic.List[string]
 try {
     $src = Split-Path -Parent $PSScriptRoot
     $dst = Join-Path $env:ProgramData 'decky\plugins\overdrive'
-    # Stop Decky first: the running helper locks binsus-helper.exe.
+    # Stop Decky first: the running helper locks its own exe in the bin folder.
     Stop-ScheduledTask -TaskName 'Decky Loader'; Start-Sleep -Seconds 4
     Get-Process asus-helper -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$dst*" } | Stop-Process -Force
     Start-Sleep -Seconds 1
