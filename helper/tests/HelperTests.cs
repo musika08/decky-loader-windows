@@ -482,7 +482,7 @@ namespace Overdrive.Helper.Tests
             var r = rig.Send("{\"id\":1,\"cmd\":\"status\"}");
             True(Ok(r), "status ok");
             var d = (Dictionary<string, object>)r["data"];
-            SeqEqual(new[] { "modeRaw", "mode", "spl", "sppt", "fppt", "lastMode", "fpsLimit", "cpuTempC", "fanRpm", "gpuFanRpm", "errors" },
+            SeqEqual(new[] { "modeRaw", "mode", "spl", "sppt", "fppt", "lastMode", "fpsLimit", "cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC", "gpuUse", "cpuPowerW", "gpuPowerW", "errors" },
                 new List<string>(d.Keys), "status keys");
             Equal(0, d["modeRaw"], "modeRaw");
             Equal("balanced", d["mode"], "mode name");
@@ -528,6 +528,7 @@ namespace Overdrive.Helper.Tests
             acpi.Values[DeviceIds.TempCpu] = 60;
             acpi.Values[DeviceIds.CpuFan] = 42;
             acpi.Values[DeviceIds.GpuFan] = 40;
+            acpi.Values[DeviceIds.TempGpu] = 55;
             foreach (int m in new[] { 0, 1, 2 })
             {
                 acpi.Curves[m] = new byte[] { 48, 54, 59, 62, 62, 62, 62, 62, 1, 9, 18, 22, 22, 22, 22, 22 };
@@ -549,7 +550,8 @@ namespace Overdrive.Helper.Tests
             True(Ok(r), "status still answers");
             var d = (Dictionary<string, object>)r["data"];
             True(d["spl"] == null && d["cpuTempC"] == null && d["fpsLimit"] == null, "nulls");
-            Equal(8, ((object[])d["errors"]).Length, "mode, spl, sppt, fppt, fps, cpuTemp, cpuFan, gpuFan");
+            Equal(9, ((object[])d["errors"]).Length, "mode, spl, sppt, fppt, fps, cpuTemp, cpuFan, gpuFan, gpuTemp");
+            Equal("gpuTemp: not reported (AMD driver: fake ADL missing; ACPI: read failed).", ((object[])d["errors"])[8], "gpu temp error");
         }
 
         public static void Sensors_Shape()
@@ -558,7 +560,7 @@ namespace Overdrive.Helper.Tests
             rig.Acpi.Values[DeviceIds.TempCpu] = 50;
             rig.Acpi.Values[DeviceIds.CpuFan] = 30;
             var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"sensors\"}")["data"];
-            SeqEqual(new[] { "cpuTempC", "fanRpm", "gpuFanRpm", "errors" }, new List<string>(d.Keys), "sensors keys");
+            SeqEqual(new[] { "cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC", "gpuUse", "cpuPowerW", "gpuPowerW", "errors" }, new List<string>(d.Keys), "sensors keys");
         }
 
         public static void NotAlly_RefusesEveryWrite()
@@ -635,6 +637,7 @@ namespace Overdrive.Helper.Tests
             acpi.Values[DeviceIds.Sppt] = 30;
             acpi.Values[DeviceIds.Fppt] = 35;
             acpi.Values[DeviceIds.TempCpu] = 58;
+            acpi.Values[DeviceIds.TempGpu] = 52;
             acpi.Values[DeviceIds.CpuFan] = 31;
             acpi.Values[DeviceIds.GpuFan] = 29;
             acpi.Curves[DeviceIds.ModeTurbo] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 10, 20, 30, 40, 50, 60, 70, 80 };
@@ -642,8 +645,8 @@ namespace Overdrive.Helper.Tests
             string json = Probe.Run(acpi, "ROG Xbox Ally X RC73XA_RC73XA");
             True(json.IndexOf('\n') < 0, "one line");
             var p = (Dictionary<string, object>)Json.DeserializeObject(json);
-            SeqEqual(new[] { "product", "mode", "modeName", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "gpuFanRpm", "fanCurve",
-                    "fanCurves", "fanCurvesGpu", "errors" },
+            SeqEqual(new[] { "product", "mode", "modeName", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC", "gpuUse",
+                    "cpuPowerW", "gpuPowerW", "fanCurve", "fanCurves", "fanCurvesGpu", "errors" },
                 new List<string>(p.Keys), "keys in brief order, fanCurves added by ruling P7, GPU fan keys after their CPU ones");
             Equal("ROG Xbox Ally X RC73XA_RC73XA", p["product"], "product");
             Equal(1, p["mode"], "mode raw");
@@ -677,6 +680,7 @@ namespace Overdrive.Helper.Tests
             acpi.ThrowOnWrite = true;
             acpi.Values[DeviceIds.PerformanceMode] = DeviceIds.ModeBalanced;
             acpi.Values[DeviceIds.TempCpu] = 50;
+            acpi.Values[DeviceIds.TempGpu] = 48;
             acpi.Values[DeviceIds.CpuFan] = 30;
             acpi.Curves[DeviceIds.ModeBalanced] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 1, 2, 3, 4, 5, 6, 7, 8 };
             acpi.Curves[DeviceIds.ModeTurbo] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 11, 12, 13, 14, 15, 16, 17, 18 };
@@ -701,6 +705,91 @@ namespace Overdrive.Helper.Tests
             True(acpi.Calls.Contains("getcurve 1 0") && acpi.Calls.Contains("getcurve 1 1") && acpi.Calls.Contains("getcurve 1 2"), "each GPU mode read");
             Equal(2500, p["gpuFanRpm"], "gpu fan converted");
             Equal(0, ((object[])p["errors"]).Length, "no errors");
+        }
+
+        // ---------- GPU temperature, usage and power (read only; G-Helper GetGPUTemp / GetiGpuSensors) ----------
+
+        public static void GpuSensors_FromAdl()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = 51;
+            rig.Acpi.Values[DeviceIds.TempGpu] = 99;   // ignored: ADL has a temperature
+            rig.Adl.Gpu = new GpuSensors { TempC = 49, Use = 62, GfxPowerW = 6, CpuPowerW = 8, AsicPowerW = 14 };
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"sensors\"}")["data"];
+            Equal(49, d["gpuTempC"], "edge temperature from ADL");
+            Equal(62, d["gpuUse"], "gpu use");
+            Equal(8, d["cpuPowerW"], "cpu power = ADL cpuPower");
+            Equal(6, d["gpuPowerW"], "gpu power = ADL gfxPower");
+            True(!rig.Acpi.Calls.Contains("get 0x00120097"), "no ACPI fallback read needed");
+            var st = (Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"status\"}")["data"];
+            Equal(49, st["gpuTempC"], "status gpuTempC");
+            foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get "), "reads only: " + c);
+            True(rig.Adl.Sets.Count == 0, "no ADL writes");
+        }
+
+        public static void GpuSensors_FallBackToAcpiTempGpu()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = 51;
+            rig.Acpi.Values[DeviceIds.TempGpu] = 47;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 30;
+            rig.Acpi.Values[DeviceIds.GpuFan] = 30;
+            rig.Adl.Missing = true;                       // no ADL: temperature from Temp_GPU, the rest null
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"sensors\"}")["data"];
+            Equal(47, d["gpuTempC"], "Temp_GPU 0x00120097");
+            True(rig.Acpi.Calls.Contains("get 0x00120097"), "read from Temp_GPU");
+            True(d["gpuUse"] == null && d["cpuPowerW"] == null && d["gpuPowerW"] == null, "nulls without ADL");
+            Equal(0, ((object[])d["errors"]).Length, "missing usage/power is not an error");
+
+            rig.Adl.Missing = false;
+            rig.Adl.Gpu = new GpuSensors { TempC = 130, Use = 20 };   // out of G-Helper's 0..124 range
+            d = (Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"sensors\"}")["data"];
+            Equal(47, d["gpuTempC"], "out-of-range ADL temperature falls back");
+            Equal(20, d["gpuUse"], "use still from ADL");
+
+            rig.Adl.Gpu = new GpuSensors { Use = 20 };
+            d = (Dictionary<string, object>)rig.Send("{\"id\":3,\"cmd\":\"sensors\"}")["data"];
+            Equal(47, d["gpuTempC"], "no ADL temperature falls back");
+        }
+
+        public static void GpuSensors_NeitherSource_NullWithOneError()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.TempCpu] = 51;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 30;
+            rig.Acpi.Values[DeviceIds.GpuFan] = 30;
+            rig.Acpi.Values[DeviceIds.TempGpu] = -65536;
+            rig.Adl.Missing = true;
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"sensors\"}")["data"];
+            True(d["gpuTempC"] == null, "null");
+            var errors = (object[])d["errors"];
+            Equal(1, errors.Length, "one error");
+            Equal("gpuTemp: not reported (AMD driver: fake ADL missing; ACPI: raw -65536).", errors[0], "error text");
+
+            // --probe without ADL: Temp_GPU only, read through ReadOnlyAcpi
+            var acpi = new FakeAcpi();
+            acpi.ThrowOnWrite = true;
+            acpi.Values[DeviceIds.TempGpu] = 44;
+            var p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "X"));
+            Equal(44, p["gpuTempC"], "probe gpuTempC from ACPI");
+            var adl = new FakeAdl();
+            p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "X", adl));
+            Equal(45, p["gpuTempC"], "probe gpuTempC from ADL");
+            Equal(30, p["gpuUse"], "probe gpuUse");
+        }
+
+        public static void GpuSensors_ThroughAdlHardware()
+        {
+            var fake = new FakeFpsControl();
+            fake.Gpu = new GpuSensors { TempC = 50, Use = 10 };
+            var hw = new AdlHardware(() => fake);
+            Equal(50, hw.GetGpuSensors().TempC, "passes the control's readings");
+            fake.Gpu = null;
+            True(hw.GetGpuSensors() == null, "no sensor log -> null");
+            True(hw.Unavailable == null, "frame rate control still available");
+            var broken = new AdlHardware(() => { var f = new FakeFpsControl(); f.ProblemText = "no iGPU"; return f; });
+            True(broken.GetGpuSensors() == null, "ADL not set up -> null");
+            Equal("no iGPU", broken.Unavailable, "reason kept");
         }
 
         // ---------- ruling P7 hardening (Task 4) ----------

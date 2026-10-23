@@ -14,6 +14,7 @@ if _PY_MODULES not in sys.path:
 from overdrive import device  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
 from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args  # noqa: E402
+from overdrive.cpu_usage import CpuUsage  # noqa: E402
 from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRESETS, START_TYPES,  # noqa: E402
                                 Settings, check_curve, clamp_power, curve_mode, preset_curve)
 
@@ -58,6 +59,7 @@ class Plugin:
         self._armoury_lock = asyncio.Lock()
         self._armoury_installed = None
         self._armoury_warning = ""
+        self.cpu_usage = CpuUsage()      # CPU % between two sensor polls (None on the first)
         self._armoury_busy = False       # an Armoury switch or the load-time re-stop is running
         self._armoury_until = 0.0        # loop time by which that operation's helper call gives up
 
@@ -170,11 +172,19 @@ class Plugin:
     async def get_sensors(self) -> dict:
         if self.client is None:
             return {"ok": False, "message": NOT_ALLY, "cpuTempC": None, "fanRpm": None, "gpuFanRpm": None,
+                    "gpuTempC": None, "cpuUse": None, "gpuUse": None, "cpuPowerW": None, "gpuPowerW": None,
                     "errors": []}
         r = await self.client.call("sensors", None, 5.0)
         d = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
-        return {"ok": bool(r.get("ok")), "message": r.get("message") or "", "cpuTempC": d.get("cpuTempC"),
-                "fanRpm": d.get("fanRpm"), "gpuFanRpm": d.get("gpuFanRpm"), "errors": list(d.get("errors") or [])}
+        out = {"ok": bool(r.get("ok")), "message": r.get("message") or ""}
+        # The helper's readings (read only); cpuUse is measured here (GetSystemTimes between two polls).
+        for k in ("cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC"):
+            out[k] = d.get(k)
+        out["cpuUse"] = self.cpu_usage.sample()
+        for k in ("gpuUse", "cpuPowerW", "gpuPowerW"):
+            out[k] = d.get(k)
+        out["errors"] = list(d.get("errors") or [])
+        return out
 
     # ---------- user changes ----------
 

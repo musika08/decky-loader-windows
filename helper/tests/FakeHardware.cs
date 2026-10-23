@@ -65,6 +65,10 @@ namespace Overdrive.Helper.Tests
         }
 
         public string Unavailable { get { return Missing ? Problem : null; } }
+
+        // The iGPU readings the fake driver reports; null = the driver reports no sensors.
+        public GpuSensors Gpu = new GpuSensors { TempC = 45, Use = 30, GfxPowerW = 5, CpuPowerW = 8, AsicPowerW = 14 };
+        public GpuSensors GetGpuSensors() { return Missing ? null : Gpu; }
     }
 
     // Stands in for the ported AmdGpuControl behind AdlHardware: same get/set contract as G-Helper
@@ -86,6 +90,9 @@ namespace Overdrive.Helper.Tests
             Dc = limit;
             return 1;
         }
+
+        public GpuSensors Gpu;
+        public GpuSensors GetiGpuSensors() { return Gpu; }
 
         public void Dispose() { Disposed = true; }
     }

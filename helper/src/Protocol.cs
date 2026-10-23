@@ -184,7 +184,7 @@ namespace Overdrive.Helper
             }
             catch (Exception ex) { errors.Add("fps: " + ex.Message); }
             d["fpsLimit"] = fps;
-            ReadSensors(acpi, d, errors);
+            ReadSensors(acpi, adl, d, errors);
             d["errors"] = errors;
             return Reply(id, true, "", d);
         }
@@ -193,15 +193,15 @@ namespace Overdrive.Helper
         {
             var d = new Dictionary<string, object>();
             var errors = new List<string>();
-            ReadSensors(acpi, d, errors);
+            ReadSensors(acpi, adl, d, errors);
             d["errors"] = errors;
             return Reply(id, true, "", d);
         }
 
         // cpuTempC, fanRpm (CPU fan) and gpuFanRpm (GPU fan), converted as G-Helper does (GHelperSensors; the GPU fan
         // is G-Helper's GetFan(AsusFan.GPU), endpoint GPU_Fan); null plus an error when not reported.
-        // Shared by status, sensors and --probe.
-        public static void ReadSensors(IAcpi acpi, Dictionary<string, object> d, List<string> errors)
+        // Then the GPU readings (ReadGpuSensors). Shared by status, sensors and --probe.
+        public static void ReadSensors(IAcpi acpi, IAdl adl, Dictionary<string, object> d, List<string> errors)
         {
             int? temp = ReadRaw(acpi, DeviceIds.TempCpu, "cpuTemp", errors);
             int? tempC = null;
@@ -229,6 +229,50 @@ namespace Overdrive.Helper
                 if (!gpuRpm.HasValue) errors.Add("gpuFan: not reported by the device (raw " + gpuFan.Value + ").");
             }
             d["gpuFanRpm"] = gpuRpm;
+
+            ReadGpuSensors(acpi, adl, d, errors);
+        }
+
+        // gpuTempC, gpuUse (%), cpuPowerW, gpuPowerW: read only, after G-Helper HardwareControl.GetGPUTemp and its
+        // AmdApu().GetiGpuSensors() uses. The temperature prefers ADL (edge, else GFX, else SOC) and, as GetGPUTemp
+        // does, takes it only when 0 <= t < 125, else falls back to ACPI Temp_GPU (0x00120097) when 0 < t < 125;
+        // neither gives null plus one error. gpuUse is ADL's graphics activity, cpuPowerW its CPU power and gpuPowerW
+        // its graphics power (the same call); each is null without an error when ADL does not report it.
+        public static void ReadGpuSensors(IAcpi acpi, IAdl adl, Dictionary<string, object> d, List<string> errors)
+        {
+            GpuSensors g = null;
+            string adlProblem = "not available";
+            if (adl != null)
+            {
+                try
+                {
+                    g = adl.GetGpuSensors();
+                    if (g == null) adlProblem = adl.Unavailable ?? "the graphics driver did not report its sensors";
+                }
+                catch (Exception ex) { adlProblem = ex.Message; }
+            }
+
+            int? temp = null;
+            if (g != null && g.TempC.HasValue && g.TempC.Value >= 0 && g.TempC.Value < 125) temp = g.TempC;
+            else if (g != null) adlProblem = g.TempC.HasValue ? "temperature " + g.TempC.Value + " out of range" : "no temperature reported";
+            if (!temp.HasValue)
+            {
+                int? raw = null;
+                string acpiProblem;
+                try { raw = acpi.DeviceGet(DeviceIds.TempGpu); acpiProblem = "raw " + raw.Value; }
+                catch (Exception ex) { acpiProblem = ex.Message; }
+                if (raw.HasValue && raw.Value > 0 && raw.Value < 125) temp = raw;
+                else errors.Add("gpuTemp: not reported (AMD driver: " + adlProblem + "; ACPI: " + acpiProblem + ").");
+            }
+            d["gpuTempC"] = temp;
+            d["gpuUse"] = g != null ? InRange(g.Use, 0, 100) : null;
+            d["cpuPowerW"] = g != null ? InRange(g.CpuPowerW, 0, 1000) : null;
+            d["gpuPowerW"] = g != null ? InRange(g.GfxPowerW, 0, 1000) : null;
+        }
+
+        private static int? InRange(int? v, int lo, int hi)
+        {
+            return v.HasValue && v.Value >= lo && v.Value <= hi ? v : null;
         }
 
         // A setting read (mode, spl, sppt, fppt): like ReadRaw, but the IOCTL-failure value -65536 is not a reading

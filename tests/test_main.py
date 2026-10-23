@@ -527,11 +527,33 @@ def test_load_restops_armoury_without_overwriting_record(tmp_path):
 
 
 def test_get_sensors(tmp_path):
+    times = iter([(100, 300, 100), (150, 400, 200)])   # idle, kernel (with idle), user
+
     async def go():
         p, c, s = plugin_with(tmp_path)
+        p.cpu_usage = main.CpuUsage(lambda: next(times))
+        return await p.get_sensors(), await p.get_sensors()
+    first, second = run(go())
+    assert first == {"ok": True, "message": "", "cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "gpuTempC": 49,
+                     "cpuUse": None, "gpuUse": 62, "cpuPowerW": 8, "gpuPowerW": 6, "errors": []}
+    assert list(first) == ["ok", "message", "cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC", "cpuUse", "gpuUse",
+                           "cpuPowerW", "gpuPowerW", "errors"]
+    assert second["cpuUse"] == 75          # 200 of 200 total busy minus 50 idle -> 150/200
+
+
+def test_get_sensors_passes_missing_gpu_readings_as_none(tmp_path):
+    class Client(FakeClient):
+        async def call(self, cmd, args=None, timeout=10.0):
+            if cmd == "sensors":
+                return ok({"cpuTempC": 50, "fanRpm": 3000, "gpuFanRpm": 2800, "gpuTempC": None, "errors": ["x"]})
+            return await super().call(cmd, args, timeout)
+
+    async def go():
+        p, c, s = plugin_with(tmp_path, client=Client())
         return await p.get_sensors()
     r = run(go())
-    assert r == {"ok": True, "message": "", "cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []}
+    assert (r["gpuTempC"], r["gpuUse"], r["cpuPowerW"], r["gpuPowerW"]) == (None, None, None, None)
+    assert r["errors"] == ["x"]
 
 
 def test_plugin_json_runs_as_root():

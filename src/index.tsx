@@ -3,7 +3,6 @@ import {
   ButtonItem,
   DialogButton,
   DialogButtonPrimary,
-  DropdownItem,
   Field,
   Focusable,
   PanelSection,
@@ -15,7 +14,7 @@ import {
 } from '@decky/ui';
 import { useEffect, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
-import { FaBolt } from 'react-icons/fa';
+import { FaBolt, FaCheck } from 'react-icons/fa';
 import {
   CURVE_POINTS,
   CURVE_SPEED_MAX,
@@ -23,9 +22,11 @@ import {
   CURVE_TEMP_MIN,
   Curve,
   DeviceMode,
+  FAN_PRESETS,
   MODE_OTHER_TEXT,
+  Preset,
   defaultDraft,
-  liveLine,
+  liveLines,
   minSpeedAt,
   powerLine,
   shownMode,
@@ -55,6 +56,7 @@ import {
   invalidPoint,
   linePath,
   markerLabel,
+  markerFor,
   markerX,
   movePoint,
   pressA,
@@ -68,11 +70,11 @@ import {
   xOf,
   yOf,
 } from './fanChart';
+import { PickerOption, choose, focusIndex, pressCancel, pressRow, rowValue } from './picker';
 
 // ---------- backend (main.py) ----------
 
 type Mode = 'silent' | 'balanced' | 'turbo' | 'manual';
-type Preset = 'default' | 'recommended' | 'quiet' | 'cool' | 'custom';
 type Support = { supported: boolean; product: string };
 type Result = { ok: boolean; message: string };
 type State = {
@@ -101,6 +103,11 @@ type Sensors = {
   cpuTempC: number | null;
   fanRpm: number | null;
   gpuFanRpm?: number | null;
+  gpuTempC?: number | null;
+  cpuUse?: number | null;
+  gpuUse?: number | null;
+  cpuPowerW?: number | null;
+  gpuPowerW?: number | null;
   errors: string[];
 };
 
@@ -124,13 +131,7 @@ const MODES: { mode: Mode; label: string }[] = [
   { mode: 'manual', label: 'Manual' },
 ];
 const FPS_STEPS = [0, 30, 40, 45, 50, 60, 75, 90, 120];
-const PRESETS: { data: Preset; label: string }[] = [
-  { data: 'default', label: 'Armoury default' },
-  { data: 'recommended', label: 'Recommended' },
-  { data: 'quiet', label: 'Quiet' },
-  { data: 'cool', label: 'Cool' },
-  { data: 'custom', label: 'Custom' },
-];
+const PRESETS = FAN_PRESETS;
 const POWER_MIN = 5;
 const POWER_MAX = 50;
 const POWER_DEBOUNCE_MS = 700;
@@ -179,6 +180,103 @@ function Note({ text, color }: { text: string; color?: string }) {
     <PanelSectionRow>
       <div style={{ fontSize: '12px', color: color || '#dcdedf', whiteSpace: 'normal' }}>{text}</div>
     </PanelSectionRow>
+  );
+}
+
+// Full-width inline picker: the row "Label  Value ▾" expands its options as rows underneath, inside the panel
+// (Decky's DropdownItem opens Steam's separate popup window). Choosing an option applies it and collapses; B or
+// the row again collapses without a change. Controller focus moves to the current option on open, back on close.
+function InlinePicker<T>(props: {
+  label: string;
+  options: PickerOption<T>[];
+  value: T;
+  disabled?: boolean;
+  onChange: (v: T) => void;
+}) {
+  const { label, options, value, disabled, onChange } = props;
+  const [open, setOpen] = useState(false);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const optionRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const wasOpen = useRef(false);
+  const target = focusIndex(options, value, open);
+
+  useEffect(() => {
+    if (disabled && open) setOpen(false);
+  }, [disabled, open]);
+
+  useEffect(() => {
+    if (open) optionRefs.current[target]?.focus();
+    else if (wasOpen.current) rowRef.current?.focus();
+    wasOpen.current = open;
+  }, [open]);
+
+  const toggle = () => setOpen((o) => pressRow(o, !!disabled));
+  const cancel = (evt: CustomEvent) => {
+    const r = pressCancel(open);
+    if (!r.handled) return;
+    // Collapse only; the menu must not close.
+    evt.preventDefault();
+    evt.stopPropagation();
+    setOpen(r.open);
+  };
+  const pick = (v: T) => {
+    const r = choose(value, v);
+    setOpen(r.open);
+    if (r.apply) onChange(v);
+  };
+
+  const rowStyle = {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    width: '100%',
+    boxSizing: 'border-box' as const,
+    padding: '8px 10px',
+    borderRadius: '2px',
+    background: 'rgba(255, 255, 255, 0.06)',
+    color: disabled ? '#8b929a' : '#dcdedf',
+    fontSize: '14px',
+  };
+  return (
+    <Focusable style={{ width: '100%' }} flow-children="column">
+      <Focusable
+        ref={rowRef}
+        style={rowStyle}
+        onActivate={toggle}
+        onClick={toggle}
+        onCancelButton={cancel}
+        onOKActionDescription={open ? 'Close' : 'Choose'}
+      >
+        <span>{label}</span>
+        <span style={{ color: disabled ? '#8b929a' : '#ffffff' }}>{rowValue(options, value, open)}</span>
+      </Focusable>
+      {open &&
+        options.map((o, i) => {
+          const current = o.data === value;
+          return (
+            <Focusable
+              key={String(o.data)}
+              ref={(el: HTMLDivElement | null) => {
+                optionRefs.current[i] = el;
+              }}
+              preferredFocus={i === target}
+              style={{
+                ...rowStyle,
+                marginTop: '2px',
+                paddingLeft: '18px',
+                background: current ? 'rgba(26, 159, 255, 0.25)' : 'rgba(255, 255, 255, 0.03)',
+              }}
+              onActivate={() => pick(o.data)}
+              onClick={() => pick(o.data)}
+              onCancelButton={cancel}
+              onCancelActionDescription="Close"
+            >
+              <span>{o.label}</span>
+              <span style={{ width: '16px', textAlign: 'right' }}>{current ? <FaCheck size={12} /> : null}</span>
+            </Focusable>
+          );
+        })}
+    </Focusable>
   );
 }
 
@@ -243,13 +341,16 @@ function ChartSvg(props: {
   selected: number;
   invalid: number;
   cpuTemp: number | null;
+  gpuTemp: number | null;
   editable: boolean;
   onPointerDown?: (e: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerMove?: (e: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerEnd?: (e: ReactPointerEvent<SVGSVGElement>) => void;
 }) {
-  const { curve, fan, selected, invalid, cpuTemp, editable } = props;
-  const mx = markerX(cpuTemp);
+  const { curve, fan, selected, invalid, editable } = props;
+  // The GPU chart shows the GPU temperature when the device reports it, else the CPU temperature.
+  const marker = markerFor(fan, props.cpuTemp, props.gpuTemp);
+  const mx = markerX(marker.temp);
   const labelAnchor = mx !== null && mx > PLOT.x1 - 24 ? 'end' : mx !== null && mx < PLOT.x0 + 24 ? 'start' : 'middle';
   return (
     <svg
@@ -280,11 +381,11 @@ function ChartSvg(props: {
         </text>
       ))}
       <path d={FLOOR_PATH} fill="none" stroke={C_FLOOR} strokeWidth={1} strokeDasharray="3 3" />
-      {mx !== null && cpuTemp !== null && (
+      {mx !== null && marker.temp !== null && (
         <>
           <line x1={mx} x2={mx} y1={PLOT.y0 + 10} y2={PLOT.y1} stroke={C_MARKER} strokeWidth={1} />
           <text x={mx} y={PLOT.y0 + 7} fill={C_MARKER} fontSize={9} textAnchor={labelAnchor}>
-            {markerLabel(cpuTemp, fan === 'gpu' ? 'CPU ' : '')}
+            {markerLabel(marker.temp, marker.prefix)}
           </text>
         </>
       )}
@@ -353,6 +454,7 @@ function FanChartEditor(props: {
   selected: number;
   invalid: number;
   cpuTemp: number | null;
+  gpuTemp: number | null;
   disabled: boolean;
   onSelect: (i: number) => void;
   onEdit: (fn: (c: Curve) => Curve) => void;
@@ -450,6 +552,7 @@ function FanChartEditor(props: {
         selected={selected}
         invalid={props.invalid}
         cpuTemp={props.cpuTemp}
+        gpuTemp={props.gpuTemp}
         editable={true}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -480,8 +583,9 @@ function Content() {
   const [support, setSupport] = useState<Support | null>(null);
   const [startError, setStartError] = useState('');
   const [state, setState] = useState<State | null>(null);
-  const [sensors, setSensors] = useState('');
+  const [sensors, setSensors] = useState<string[]>([]);
   const [cpuTemp, setCpuTemp] = useState<number | null>(null);
+  const [gpuTemp, setGpuTemp] = useState<number | null>(null);
   const [selected, setSelected] = useState(0);
   const [fan, setFan] = useState<Fan>('cpu');
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
@@ -574,12 +678,14 @@ function Content() {
       try {
         const s = await getSensors();
         if (!mounted.current) return;
-        setSensors(s.ok ? liveLine(s.cpuTempC, s.fanRpm, s.gpuFanRpm) : s.message || 'Sensors not available');
+        setSensors(s.ok ? liveLines(s) : [s.message || 'Sensors not available']);
         setCpuTemp(s.ok && typeof s.cpuTempC === 'number' && isFinite(s.cpuTempC) ? s.cpuTempC : null);
+        setGpuTemp(s.ok && typeof s.gpuTempC === 'number' && isFinite(s.gpuTempC) ? s.gpuTempC : null);
       } catch (e) {
         if (!mounted.current) return;
-        setSensors('Sensors not available: ' + errorText(e));
+        setSensors(['Sensors not available: ' + errorText(e)]);
         setCpuTemp(null);
+        setGpuTemp(null);
       } finally {
         inFlight = false;
       }
@@ -790,7 +896,9 @@ function Content() {
           </PanelSectionRow>
         )}
         {state.warning && <Note text={state.warning} color="#ffb74d" />}
-        <Note text={sensors} />
+        {sensors.map((line, i) => (
+          <Note key={'live' + i} text={line} />
+        ))}
       </PanelSection>
 
       <PanelSection title="Performance">
@@ -848,12 +956,12 @@ function Content() {
           </>
         )}
         <PanelSectionRow>
-          <DropdownItem
+          <InlinePicker
             label="FPS limit"
-            rgOptions={fpsOptions}
-            selectedOption={state.fps}
+            options={fpsOptions}
+            value={state.fps}
             disabled={disabled}
-            onChange={(o) => run('fps', () => setFps(o.data as number))}
+            onChange={(v) => run('fps', () => setFps(v))}
           />
         </PanelSectionRow>
         <StatusRow status={statuses.fps} />
@@ -861,12 +969,12 @@ function Content() {
 
       <PanelSection title="Fans">
         <PanelSectionRow>
-          <DropdownItem
+          <InlinePicker
             label="Fan preset"
-            rgOptions={PRESETS}
-            selectedOption={state.fan_preset}
+            options={PRESETS}
+            value={state.fan_preset}
             disabled={disabled}
-            onChange={(o) => choosePreset(o.data as Preset)}
+            onChange={choosePreset}
           />
         </PanelSectionRow>
         {state.fan_note && <Note text={state.fan_note} color="#ffb74d" />}
@@ -890,7 +998,7 @@ function Content() {
         {!editing && (
           <>
             <PanelSectionRow>
-              <ChartSvg curve={shownCurve} fan={fan} selected={-1} invalid={-1} cpuTemp={cpuTemp} editable={false} />
+              <ChartSvg curve={shownCurve} fan={fan} selected={-1} invalid={-1} cpuTemp={cpuTemp} gpuTemp={gpuTemp} editable={false} />
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem layout="below" disabled={disabled} onClick={openEditor}>
@@ -908,6 +1016,7 @@ function Content() {
                 selected={sel}
                 invalid={invalidPoint(draftReason)}
                 cpuTemp={cpuTemp}
+                gpuTemp={gpuTemp}
                 disabled={disabled}
                 onSelect={setSelected}
                 onEdit={setDraft}

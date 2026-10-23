@@ -8,6 +8,7 @@
 // C# 5 syntax; no logging or AppConfig (fan_scale fixed at its default 100); only the CPU and GPU fans (no Mid/XGM);
 // the mode swap of GetFanCurve moved into FanCurveMode so it can be tested without a device;
 // FanFromRaw is GetFan's conversion as a pure function; the Win32 error of a failed open is kept.
+// Temp_GPU (0x00120097) is ported as a read-only DSTS id for the GPU temperature fallback.
 // Nothing touching the battery charge limit (0x00120057) is ported.
 
 using System;
@@ -40,6 +41,7 @@ namespace Overdrive.Helper.GHelper
         public const uint DevsGPUFanCurve = 0x00110025;
 
         public const int Temp_CPU = 0x00120094;
+        public const int Temp_GPU = 0x00120097;
 
         public const int PPT_APUA0 = 0x001200A0;  // sPPT (slow boost limit) / PL2
         public const int PPT_APUA3 = 0x001200A3;  // SPL (sustained limit) / PL1

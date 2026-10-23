@@ -27,6 +27,18 @@ namespace Overdrive.Helper
         int SetFpsLimit(int fps);
         // Why the last call found frame rate control unavailable, or null.
         string Unavailable { get; }
+        // Integrated GPU sensors (read only), or null when ADL or its sensor log is unavailable (reason in Unavailable).
+        GpuSensors GetGpuSensors();
+    }
+
+    // G-Helper AmdGpuControl.GetiGpuSensors (temp, use, gfxPower, cpuPower, asicPower); null = not reported.
+    public class GpuSensors
+    {
+        public int? TempC;       // edge, else GFX, else SOC temperature (degrees C)
+        public int? Use;         // graphics activity (%)
+        public int? GfxPowerW;   // graphics power (W)
+        public int? CpuPowerW;   // CPU cores power (W)
+        public int? AsicPowerW;  // whole APU power (W)
     }
 
     // Windows service control for the Armoury Crate services (names from ArmouryServices only).
@@ -53,6 +65,7 @@ namespace Overdrive.Helper
         public const uint Sppt = 0x001200A0;  // PPT_APUA0, slow boost
         public const uint Fppt = 0x001200C1;  // PPT_APUC1, fast boost
         public const uint TempCpu = 0x00120094;
+        public const uint TempGpu = 0x00120097;       // Temp_GPU, read only (fallback when ADL has no temperature)
         public const uint CpuFan = 0x00110013;
         public const uint GpuFan = 0x00110014;        // GPU_Fan, read only (RPM)
         public const uint CpuFanCurve = 0x00110024;   // DevsCPUFanCurve, written by SetFanCurve

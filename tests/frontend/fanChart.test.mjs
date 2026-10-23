@@ -37,6 +37,7 @@ import {
   hasStacks,
   spreadPoints,
   selectNext as stepSelect,
+  markerFor,
 } from '../../src/fanChart.ts';
 import { validateCurve, minSpeedAt, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX, RECOMMENDED_CURVE } from '../../src/curve.ts';
 
@@ -354,4 +355,14 @@ test('Recommended preset curve is valid and meets the G-Helper minimum', () => {
   });
   assert.equal(validateCurve(RECOMMENDED_CURVE.temps, RECOMMENDED_CURVE.speeds), null);
   assert.deepEqual([75, 80, 90].map(minSpeedAt), [6, 12, 24]);
+});
+
+test('chart marker: GPU chart uses the GPU temperature when reported, else the CPU one', () => {
+  assert.deepEqual(markerFor('gpu', 51, 49), { temp: 49, prefix: 'GPU ' });
+  assert.equal(markerLabel(49, markerFor('gpu', 51, 49).prefix), 'GPU 49 °C');
+  assert.deepEqual(markerFor('gpu', 51, null), { temp: 51, prefix: 'CPU ' });
+  assert.deepEqual(markerFor('gpu', 51, undefined), { temp: 51, prefix: 'CPU ' });
+  assert.deepEqual(markerFor('cpu', 51, 49), { temp: 51, prefix: '' });
+  assert.deepEqual(markerFor('cpu', null, 49), { temp: null, prefix: '' });
+  assert.deepEqual(markerFor('gpu', null, NaN), { temp: null, prefix: 'CPU ' });
 });

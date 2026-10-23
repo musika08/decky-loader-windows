@@ -49,6 +49,16 @@ export function validateCurve(temps: number[], speeds: number[]): string | null 
   return null;
 }
 
+// Fan presets in the panel's order (settings.py PRESETS holds the same names).
+export type Preset = 'default' | 'recommended' | 'quiet' | 'cool' | 'custom';
+export const FAN_PRESETS: { data: Preset; label: string }[] = [
+  { data: 'default', label: 'Armoury default' },
+  { data: 'recommended', label: 'Recommended' },
+  { data: 'quiet', label: 'Quiet' },
+  { data: 'cool', label: 'Cool' },
+  { data: 'custom', label: 'Custom' },
+];
+
 // The Recommended preset: one fixed curve for both fans, owner-approved 2026-10-23. Mirrors RECOMMENDED_CURVE in
 // py_modules/overdrive/settings.py (the backend sends it; the panel only shows what get_state returns).
 export const RECOMMENDED_CURVE: Curve = {
@@ -69,16 +79,46 @@ function show(v: number | null | undefined): string {
   return typeof v === 'number' && isFinite(v) ? String(Math.round(v)) : '--';
 }
 
-// The GPU fan is added when the device reports it (gpuFanRpm a number); otherwise the line keeps its one-fan form.
-export function liveLine(
-  cpuTempC: number | null | undefined,
-  fanRpm: number | null | undefined,
-  gpuFanRpm?: number | null,
-): string {
-  if (typeof gpuFanRpm === 'number' && isFinite(gpuFanRpm)) {
-    return 'CPU ' + show(cpuTempC) + ' °C · CPU fan ' + show(fanRpm) + ' RPM · GPU fan ' + show(gpuFanRpm) + ' RPM';
-  }
-  return 'CPU ' + show(cpuTempC) + ' °C · Fan ' + show(fanRpm) + ' RPM';
+export type LiveSensors = {
+  cpuTempC?: number | null;
+  fanRpm?: number | null;
+  cpuUse?: number | null;
+  cpuPowerW?: number | null;
+  gpuTempC?: number | null;
+  gpuFanRpm?: number | null;
+  gpuUse?: number | null;
+  gpuPowerW?: number | null;
+};
+
+function known(v: number | null | undefined): v is number {
+  return typeof v === 'number' && isFinite(v);
+}
+
+// One live line: "CPU 51 °C · 3300 RPM · 23 % · 8 W". A value that is not reported is left out (the rest keep their
+// order); null when the line has no values at all.
+function liveLineOf(
+  name: string,
+  tempC: number | null | undefined,
+  rpm: number | null | undefined,
+  use: number | null | undefined,
+  powerW: number | null | undefined,
+): string | null {
+  const parts: string[] = [];
+  if (known(tempC)) parts.push(show(tempC) + ' °C');
+  if (known(rpm)) parts.push(show(rpm) + ' RPM');
+  if (known(use)) parts.push(show(use) + ' %');
+  if (known(powerW)) parts.push(show(powerW) + ' W');
+  return parts.length ? name + ' ' + parts.join(' · ') : null;
+}
+
+// The live readout: the CPU line, then the GPU line below it, each "temperature · fan RPM · usage % · power W".
+// A line with no values is not shown.
+export function liveLines(s: LiveSensors): string[] {
+  const lines = [
+    liveLineOf('CPU', s.cpuTempC, s.fanRpm, s.cpuUse, s.cpuPowerW),
+    liveLineOf('GPU', s.gpuTempC, s.gpuFanRpm, s.gpuUse, s.gpuPowerW),
+  ];
+  return lines.filter((l): l is string => l !== null);
 }
 
 // ---------- mode and power display (probe follow-ups) ----------

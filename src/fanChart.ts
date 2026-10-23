@@ -186,6 +186,18 @@ export function markerX(temp: number | null | undefined): number | null {
   return xOf(Math.min(TEMP_MAX, Math.max(TEMP_MIN, temp)));
 }
 
+// Which temperature the marker shows: the CPU chart the CPU temperature; the GPU chart the GPU temperature when the
+// device reports it ("GPU 49 °C"), else the CPU temperature as before ("CPU 57 °C").
+export function markerFor(
+  fan: Fan,
+  cpuTemp: number | null | undefined,
+  gpuTemp: number | null | undefined,
+): { temp: number | null; prefix: string } {
+  const ok = (v: number | null | undefined): v is number => typeof v === 'number' && isFinite(v);
+  if (fan === 'gpu' && ok(gpuTemp)) return { temp: gpuTemp, prefix: 'GPU ' };
+  return { temp: ok(cpuTemp) ? cpuTemp : null, prefix: fan === 'gpu' ? 'CPU ' : '' };
+}
+
 // prefix names the sensor when it is not obvious (the GPU fan chart shows the CPU temperature: "CPU 57 °C").
 export function markerLabel(temp: number, prefix = ''): string {
   return prefix + Math.round(temp) + ' °C';

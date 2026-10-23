@@ -12,6 +12,8 @@ namespace Overdrive.Helper
         int GetFPSLimit();
         // 1 = OK, 0 = refused by the driver, -1 = unavailable.
         int SetFPSLimit(int limit);
+        // Integrated GPU sensors (read only), or null when the driver has no sensor log.
+        GpuSensors GetiGpuSensors();
     }
 
     // The real IAdl. ADL is set up on first use (not at helper start) and kept for the life of the process; a
@@ -59,6 +61,13 @@ namespace Overdrive.Helper
             int r = control.SetFPSLimit(ToDriver(fps));
             unavailable = r == -1 ? "the graphics driver's frame rate target control is not available" : null;
             return r;
+        }
+
+        public GpuSensors GetGpuSensors()
+        {
+            if (!Ready()) return null;
+            // Unavailable is left alone here: it describes the frame rate control.
+            return control.GetiGpuSensors();
         }
 
         public void Dispose()

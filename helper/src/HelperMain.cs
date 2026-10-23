@@ -15,10 +15,11 @@ namespace Overdrive.Helper
 
             if (args.Length == 1 && args[0] == "--probe")
             {
-                // Read-only: Probe wraps the device in ReadOnlyAcpi and only reads.
+                // Read-only: Probe wraps the device in ReadOnlyAcpi and only reads; ADL only reads its sensor log.
                 using (var acpi = new AcpiHardware())
+                using (var adl = new AdlHardware())
                 {
-                    output.Write(Probe.Run(acpi, ReadProductName()));
+                    output.Write(Probe.Run(acpi, ReadProductName(), adl));
                     output.Write('\n');
                     output.Flush();
                 }

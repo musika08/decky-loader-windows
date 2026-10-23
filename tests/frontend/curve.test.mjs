@@ -2,7 +2,7 @@
 // Node 22.18+ / 23.6+ strip TypeScript types natively, so the pure module is imported straight from src.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCurve, minSpeedAt, stepValue, liveLine, defaultDraft, shownMode, powerLine } from '../../src/curve.ts';
+import { validateCurve, minSpeedAt, stepValue, liveLines, defaultDraft, shownMode, powerLine } from '../../src/curve.ts';
 
 const TEMPS = [30, 40, 50, 60, 70, 80, 90, 100];
 const SPEEDS = [0, 10, 20, 30, 40, 50, 60, 70];
@@ -79,10 +79,10 @@ test('stepValue clamps to the range', () => {
   assert.equal(stepValue(50, 1, 0, 100), 51);
 });
 
-test('liveLine formats sensors', () => {
-  assert.equal(liveLine(62, 3100), 'CPU 62 °C · Fan 3100 RPM');
-  assert.equal(liveLine(null, null), 'CPU -- °C · Fan -- RPM');
-  assert.equal(liveLine(61.6, 0), 'CPU 62 °C · Fan 0 RPM');
+test('live readout: CPU line, then GPU line, each temperature · RPM · usage · power', () => {
+  const all = { cpuTempC: 51, fanRpm: 3300, cpuUse: 23, cpuPowerW: 8, gpuTempC: 49, gpuFanRpm: 3700, gpuUse: 62, gpuPowerW: 6 };
+  assert.deepEqual(liveLines(all), ['CPU 51 °C · 3300 RPM · 23 % · 8 W', 'GPU 49 °C · 3700 RPM · 62 % · 6 W']);
+  assert.deepEqual(liveLines({ cpuTempC: 61.6, fanRpm: 0 }), ['CPU 62 °C · 0 RPM'], 'rounded; 0 RPM is a value');
 });
 
 test('mode read back as other shows Set by Armoury Crate, never a stored mode', () => {
@@ -101,10 +101,14 @@ test('power limits outside Manual are the firmware default; 0 or null means not 
   assert.equal(powerLine(15, 20, 25), 'Power limits: Firmware default (15 / 20 / 25 W)');
 });
 
-test('liveLine shows both fans when the GPU fan is reported', () => {
-  assert.equal(liveLine(62, 3100, 2900), 'CPU 62 °C · CPU fan 3100 RPM · GPU fan 2900 RPM');
-  assert.equal(liveLine(62, null, 2900), 'CPU 62 °C · CPU fan -- RPM · GPU fan 2900 RPM');
-  assert.equal(liveLine(62, 3100, null), 'CPU 62 °C · Fan 3100 RPM');
-  assert.equal(liveLine(62, 3100, undefined), 'CPU 62 °C · Fan 3100 RPM');
-  assert.equal(liveLine(62, 3100, NaN), 'CPU 62 °C · Fan 3100 RPM');
+test('live readout leaves out what is not reported and hides an empty line', () => {
+  // first poll: no CPU % yet; ADL missing: GPU temperature from ACPI only
+  assert.deepEqual(liveLines({ cpuTempC: 51, fanRpm: 3300, cpuUse: null, cpuPowerW: null, gpuTempC: 47, gpuFanRpm: 3700 }), [
+    'CPU 51 °C · 3300 RPM',
+    'GPU 47 °C · 3700 RPM',
+  ]);
+  assert.deepEqual(liveLines({ cpuTempC: null, fanRpm: 3300, cpuUse: 23, cpuPowerW: 8 }), ['CPU 3300 RPM · 23 % · 8 W']);
+  assert.deepEqual(liveLines({ cpuTempC: 51, gpuUse: 62 }), ['CPU 51 °C', 'GPU 62 %'], 'order kept');
+  assert.deepEqual(liveLines({ cpuTempC: 51, gpuTempC: NaN, gpuFanRpm: undefined }), ['CPU 51 °C'], 'GPU line hidden');
+  assert.deepEqual(liveLines({}), []);
 });

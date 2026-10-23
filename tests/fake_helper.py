@@ -68,7 +68,8 @@ def main(argv):
             data = {"mode": args.get("mode", "balanced"), "fan": args.get("fan", "cpu"),
                     **(GPU_CURVE if args.get("fan") == "gpu" else CURVE)}
         elif cmd == "sensors":
-            data = {"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []}
+            data = {"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "gpuTempC": 49, "gpuUse": 62, "cpuPowerW": 8,
+                    "gpuPowerW": 6, "errors": []}
         elif cmd in ("set_fans", "set_fps_limit"):
             data = dict(args)
         else:
@@ -135,7 +136,8 @@ class FakeClient:
         if cmd == "armoury_restore":
             return ok({"skipped": []})
         if cmd == "sensors":
-            return ok({"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []})
+            return ok({"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "gpuTempC": 49, "gpuUse": 62, "cpuPowerW": 8,
+                    "gpuPowerW": 6, "errors": []})
         return ok(dict(args))
 
 

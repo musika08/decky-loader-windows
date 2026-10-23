@@ -12,7 +12,12 @@
 // Load prelinks NativeMethods (upstream prelinks Adl2, which holds no imports, so a missing DLL only showed up at
 // the first call) and LoadError keeps the reason; the unused private Size field of ADLAdapterInfo has its
 // "never used" warnings silenced (the build treats warnings as errors).
-// Nothing else (sensors, PMLog, overdrive clocks, VariBright, display, switchable graphics) is ported.
+// For the integrated GPU's sensors (read only): ADLSingleSensorData and ADLPMLogDataOutput (lines 35-49), the
+// ADLSensorType values GetiGpuSensors reads (from lines 76-140: EDGE, ACTIVITY_GFX, ASIC_POWER, TEMPERATURE_GFX,
+// TEMPERATURE_SOC, GFX_POWER, CPU_POWER), ADL_PMLOG_MAX_SENSORS (405) and ADL2_New_QueryPMLogData_Get (545). The
+// PMLog import sits in its own class (PMLogMethods) that Load does not prelink, so a driver without it can never
+// stop the FPS limit from loading; the private Size field's "never used" warning is silenced.
+// Nothing else (overdrive clocks, VariBright, display, switchable graphics) is ported.
 
 using System;
 using System.Runtime.InteropServices;
@@ -31,6 +36,36 @@ namespace Overdrive.Helper.GHelper
         Fusion = 1 << 5,
         Firestream = 1 << 6,
         Embedded = 1 << 7,
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ADLSingleSensorData
+    {
+        public int Supported;
+        public int Value;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ADLPMLogDataOutput
+    {
+#pragma warning disable 169
+        int Size;
+#pragma warning restore 169
+
+        [MarshalAs(UnmanagedType.ByValArray, SizeConst = Adl2.ADL_PMLOG_MAX_SENSORS)]
+        public ADLSingleSensorData[] Sensors;
+    }
+
+    // Subset of upstream ADLSensorType: the sensors GetiGpuSensors reads (same values).
+    public enum ADLSensorType
+    {
+        PMLOG_TEMPERATURE_EDGE = 8, // Current edge of the die temperature value in C
+        PMLOG_INFO_ACTIVITY_GFX = 19, // Current graphic activity level in percentage
+        PMLOG_ASIC_POWER = 23, // Current ASIC power draw in Watt
+        PMLOG_TEMPERATURE_GFX = 28,
+        PMLOG_TEMPERATURE_SOC = 29,
+        PMLOG_GFX_POWER = 30,
+        PMLOG_CPU_POWER = 33,
     }
 
     /// <summary> ADLAdapterInfo Structure</summary>
@@ -116,6 +151,9 @@ namespace Overdrive.Helper.GHelper
         /// <summary> Define the failure</summary>
         public const int ADL_FAIL = -1;
 
+        /// <summary> Performance Metrics Log max sensors number </summary>
+        public const int ADL_PMLOG_MAX_SENSORS = 256;
+
         // ///// <summary> ADL Create Function to create ADL Data</summary>
         /// <param name="enumConnectedAdapters">If it is 1, then ADL will only return the physical exist adapters </param>
         ///// <returns> retrun ADL Error Code</returns>
@@ -163,6 +201,13 @@ namespace Overdrive.Helper.GHelper
         private static IntPtr Memory_Alloc_Impl(int size)
         {
             return Marshal.AllocCoTaskMem(size);
+        }
+
+        // Not prelinked by Load (see the header): a missing entry point throws EntryPointNotFoundException at the call.
+        public static class PMLogMethods
+        {
+            [DllImport(Atiadlxx_FileName)]
+            public static extern int ADL2_New_QueryPMLogData_Get(IntPtr adlContextHandle, int adapterIndex, out ADLPMLogDataOutput adlpmLogDataOutput);
         }
 
         public static class NativeMethods

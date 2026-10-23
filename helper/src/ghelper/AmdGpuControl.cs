@@ -10,7 +10,10 @@
 // the FPS limit always needs ADL); the discrete-GPU lookup and _isReady are dropped (the Ally has only the
 // integrated GPU, which is the one the FPS limit uses); each early return of the constructor records why in
 // Problem (Overdrive's IFpsControl); SetFPSLimit sizes ulReserved to its declared 6 zeros instead of leaving it
-// null for the marshaller. Sensors, clocks, FPS counter, OLED/VariBright and app killing are not ported.
+// null for the marshaller. Read-only iGPU sensors: Sensor (196-200) and GetiGpuSensors (202-212), returning a
+// GpuSensors object (C# 5 has no tuples) or null; upstream's 500 ms PMLog cache (GetPMLogiGpu, 179-194) is dropped
+// (the panel polls every 2 s) and a driver without the PMLog entry point gives null.
+// Discrete-GPU sensors, clocks, FPS counter, OLED/VariBright and app killing are not ported.
 
 using System;
 using System.Linq;
@@ -132,6 +135,34 @@ namespace Overdrive.Helper.GHelper
             if (Adl2.NativeMethods.ADL2_FPS_Settings_Set(_adlContextHandle, ((ADLAdapterInfo)_iGPU).AdapterIndex, settings) != Adl2.ADL_SUCCESS) return 0;
 
             return 1;
+        }
+
+        private static int? Sensor(ADLPMLogDataOutput log, ADLSensorType type)
+        {
+            if (log.Sensors == null || (int)type >= log.Sensors.Length) return null;
+            ADLSingleSensorData sensor = log.Sensors[(int)type];
+            return sensor.Supported != 0 ? sensor.Value : (int?)null;
+        }
+
+        public GpuSensors GetiGpuSensors()
+        {
+            if (_adlContextHandle == IntPtr.Zero || _iGPU == null) return null;
+            ADLPMLogDataOutput log;
+            try
+            {
+                if (Adl2.PMLogMethods.ADL2_New_QueryPMLogData_Get(_adlContextHandle, ((ADLAdapterInfo)_iGPU).AdapterIndex, out log) != Adl2.ADL_SUCCESS) return null;
+            }
+            catch (EntryPointNotFoundException) { return null; }
+
+            var s = new GpuSensors();
+            s.TempC = Sensor(log, ADLSensorType.PMLOG_TEMPERATURE_EDGE)
+                ?? Sensor(log, ADLSensorType.PMLOG_TEMPERATURE_GFX)
+                ?? Sensor(log, ADLSensorType.PMLOG_TEMPERATURE_SOC);
+            s.Use = Sensor(log, ADLSensorType.PMLOG_INFO_ACTIVITY_GFX);
+            s.GfxPowerW = Sensor(log, ADLSensorType.PMLOG_GFX_POWER);
+            s.CpuPowerW = Sensor(log, ADLSensorType.PMLOG_CPU_POWER);
+            s.AsicPowerW = Sensor(log, ADLSensorType.PMLOG_ASIC_POWER);
+            return s;
         }
 
         private void ReleaseUnmanagedResources()
