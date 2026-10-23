@@ -11,9 +11,9 @@ import {
   ReorderableList,
   showContextMenu,
 } from '@decky/ui';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { FaDownload, FaEllipsisH, FaRecycle } from 'react-icons/fa';
+import { FaArrowsAltV, FaDownload, FaEllipsisH, FaRecycle } from 'react-icons/fa';
 
 import { InstallType, enablePlugin } from '../../../../plugin';
 import {
@@ -25,6 +25,8 @@ import {
 import { useSetting } from '../../../../utils/hooks/useSetting';
 import { getPluginDisplayName } from '../../../../utils/pluginHelpers';
 import { useDeckyState } from '../../../DeckyState';
+import { moveEntry } from './moveEntry';
+import MoveModeList from './MoveModeList';
 import PluginListLabel from './PluginListLabel';
 
 async function reinstallPlugin(pluginName: string, currentVersion?: string) {
@@ -46,20 +48,54 @@ type PluginTableData = PluginData & {
   onHide(): void;
   onShow(): void;
   isDeveloper: boolean;
+  // "Tap to move": start move mode for this plugin (disabled while sorting alphabetically).
+  onStartMove(): void;
+  moveDisabled: boolean;
+  // Set once to put focus back on this row's Move button after leaving move mode.
+  focusMoveButton: boolean;
+  onMoveButtonFocused(): void;
 };
 
 const reloadPluginBackend = DeckyBackend.callable<[pluginName: string], void>('loader/reload_plugin');
 
 function PluginInteractables(props: { entry: ReorderableEntry<PluginTableData> }) {
   const { t } = useTranslation();
+  const moveButtonRef = useRef<HTMLDivElement>(null);
+  const focusMoveButton = props.entry.data?.focusMoveButton ?? false;
+
+  useEffect(() => {
+    if (focusMoveButton) {
+      moveButtonRef.current?.focus();
+      props.entry.data?.onMoveButtonFocused();
+    }
+  }, [focusMoveButton]);
 
   // nothing to display without this data...
   if (!props.entry.data) {
     return null;
   }
 
-  const { name, update, version, onHide, onShow, hidden, onFreeze, onUnfreeze, frozen, isDeveloper, disabled } =
-    props.entry.data;
+  const {
+    name,
+    update,
+    version,
+    onHide,
+    onShow,
+    hidden,
+    onFreeze,
+    onUnfreeze,
+    frozen,
+    isDeveloper,
+    disabled,
+    onStartMove,
+    moveDisabled,
+  } = props.entry.data;
+
+  const startMove = (e?: Event) => {
+    // Keep a mouse click from also toggling the list's own X/D-pad reorder mode.
+    e?.stopPropagation();
+    if (!moveDisabled) onStartMove();
+  };
 
   const showCtxMenu = (e: MouseEvent | GamepadEvent) => {
     showContextMenu(
@@ -146,6 +182,31 @@ function PluginInteractables(props: { entry: ReorderableEntry<PluginTableData> }
           </div>
         </DialogButton>
       )}
+      {/* Wrapper carries the hover text: DialogButton has no title prop, and disabled buttons get no hover events. */}
+      <div
+        title={moveDisabled ? t('PluginListIndex.move_disabled_sorted') : t('PluginListIndex.move')}
+        style={{ display: 'flex' }}
+      >
+        <DialogButton
+          ref={moveButtonRef}
+          disabled={moveDisabled}
+          style={{
+            height: '40px',
+            width: '40px',
+            padding: '10px 12px',
+            minWidth: '40px',
+            marginRight: '10px',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+          }}
+          onClick={startMove}
+          onOKButton={startMove}
+          onOKActionDescription={t('PluginListIndex.move')}
+        >
+          <FaArrowsAltV />
+        </DialogButton>
+      </div>
       <DialogButton
         style={{
           height: '40px',
@@ -192,6 +253,9 @@ export default function PluginList({ isDeveloper }: { isDeveloper: boolean }) {
   }, [installedPlugins, frozenPlugins]);
 
   const [pluginEntries, setPluginEntries] = useState<ReorderableEntry<PluginTableData>[]>([]);
+  // "Tap to move": the plugin being moved, and the plugin whose Move button gets focus back afterwards.
+  const [movingName, setMovingName] = useState<string | null>(null);
+  const [focusMoveName, setFocusMoveName] = useState<string | null>(null);
   const hiddenPluginsService = DeckyPluginLoader.hiddenPluginsService;
   const frozenPluginsService = DeckyPluginLoader.frozenPluginsService;
 
@@ -230,11 +294,33 @@ export default function PluginList({ isDeveloper }: { isDeveloper: boolean }) {
             onUnfreeze: () => frozenPluginsService.update(frozenPlugins.filter((pluginName) => name !== pluginName)),
             onHide: () => hiddenPluginsService.update([...hiddenPlugins, name]),
             onShow: () => hiddenPluginsService.update(hiddenPlugins.filter((pluginName) => name !== pluginName)),
+            onStartMove: () => setMovingName(name),
+            moveDisabled: sortPlugins,
+            focusMoveButton: focusMoveName === name,
+            onMoveButtonFocused: () => setFocusMoveName(null),
           },
         };
       }),
     );
-  }, [installedPlugins, updates, hiddenPlugins, disabledPlugins, sortPlugins, sortedPlugins]);
+  }, [
+    installedPlugins,
+    updates,
+    hiddenPlugins,
+    disabledPlugins,
+    sortPlugins,
+    sortedPlugins,
+    pluginOrder,
+    focusMoveName,
+  ]);
+
+  // Leave move mode if alphabetical sorting gets turned on meanwhile.
+  useEffect(() => {
+    if (sortPlugins) setMovingName(null);
+  }, [sortPlugins]);
+
+  // Same order the list shows (ReorderableList sorts its entries by position the same way).
+  const orderedEntries = useMemo(() => [...pluginEntries].sort((a, b) => a.position - b.position), [pluginEntries]);
+  const movingIndex = movingName ? orderedEntries.findIndex((entry) => entry.data?.name === movingName) : -1;
 
   if (installedPlugins.length === 0) {
     return (
@@ -244,14 +330,30 @@ export default function PluginList({ isDeveloper }: { isDeveloper: boolean }) {
     );
   }
 
+  function saveOrder(newOrder: string[]) {
+    console.log(newOrder);
+    setPluginOrder(newOrder);
+    setPluginOrderSetting(newOrder);
+  }
+
   function onSave(entries: ReorderableEntry<PluginTableData>[]) {
     if (sortPlugins) {
       return;
     }
-    const newOrder = entries.map((entry) => entry.data!.name);
-    console.log(newOrder);
-    setPluginOrder(newOrder);
-    setPluginOrderSetting(newOrder);
+    saveOrder(entries.map((entry) => entry.data!.name));
+  }
+
+  function endMove() {
+    setFocusMoveName(movingName);
+    setMovingName(null);
+  }
+
+  function onMoveHere(toIndex: number) {
+    if (!sortPlugins && movingName) {
+      const currentOrder = orderedEntries.map((entry) => entry.data!.name);
+      saveOrder(moveEntry(currentOrder, movingName, toIndex));
+    }
+    endMove();
   }
 
   return (
@@ -281,12 +383,27 @@ export default function PluginList({ isDeveloper }: { isDeveloper: boolean }) {
         </DialogButton>
       )}
       <DialogControlsSection style={{ marginTop: 0 }}>
-        <ReorderableList<PluginTableData>
-          entries={pluginEntries}
-          onSave={onSave}
-          interactables={PluginInteractables}
-          disableReordering={sortPlugins}
-        />
+        {sortPlugins && (
+          <div style={{ fontSize: '0.85em', color: '#8b929a', padding: '0 0 8px' }}>
+            {t('PluginListIndex.move_disabled_sorted')}
+          </div>
+        )}
+        {movingIndex >= 0 ? (
+          <MoveModeList<PluginTableData>
+            entries={orderedEntries}
+            movingIndex={movingIndex}
+            movingLabel={orderedEntries[movingIndex].label}
+            onMove={onMoveHere}
+            onCancel={endMove}
+          />
+        ) : (
+          <ReorderableList<PluginTableData>
+            entries={pluginEntries}
+            onSave={onSave}
+            interactables={PluginInteractables}
+            disableReordering={sortPlugins}
+          />
+        )}
       </DialogControlsSection>
     </DialogBody>
   );
