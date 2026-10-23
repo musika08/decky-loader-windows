@@ -12,6 +12,7 @@ DOWN_SAMPLES = 8
 MEASURE_SAMPLES = 10
 RECHECK_S = 60.0
 MIN_GAME_FPS = 10.0
+GAME_SEEN_SAMPLES = 3   # with no game measured, this many game-like samples in a row (about 1 s) measure again
 PERIOD = 0.3
 
 
@@ -26,6 +27,7 @@ class AutoTdp:
         self.up_count = 0
         self.down_count = 0
         self._samples: List[float] = []
+        self._game_seen = 0
         self._measured_at = now
         if self.fps_limit > 0:
             self.phase = "hold"
@@ -60,6 +62,7 @@ class AutoTdp:
         self.phase = "measure"
         self.target = None
         self._samples = []
+        self._game_seen = 0
         self.up_count = 0
         self.down_count = 0
 
@@ -85,5 +88,10 @@ class AutoTdp:
             elif self.target is not None:
                 self._hold(fps, gpu_power, self.target)
                 if self.watts > before and self.watts >= self.ceiling:
+                    self._start_measure()
+            else:
+                # No game at the last measure: a game showing up measures at once instead of waiting out RECHECK_S.
+                self._game_seen = self._game_seen + 1 if fps >= MIN_GAME_FPS else 0
+                if self._game_seen >= GAME_SEEN_SAMPLES:
                     self._start_measure()
         return self.watts if self.watts != before else None

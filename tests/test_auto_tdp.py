@@ -130,6 +130,24 @@ def test_most_frames_no_game_stays_at_ceiling():
     assert ctl.phase == "measure"
 
 
+def test_most_frames_game_appearing_measures_at_once():
+    # Seen live: the FPS limit went Off while the game showed ~0 FPS, then ran at 120+; it must not wait 60 s.
+    ctl, f = make(limit=0)
+    for _ in range(10):
+        f.feed(0, 5)
+    assert ctl.phase == "trim" and ctl.target is None
+    f.feed(120, 25)
+    f.feed(0, 5)                          # one flicker does not count
+    f.feed(120, 25)
+    f.feed(121, 25)
+    assert ctl.phase == "trim"
+    f.feed(122, 25)                       # third in a row (about 1 s)
+    assert ctl.phase == "measure" and ctl.watts == 17
+    for _ in range(10):
+        f.feed(120, 25)
+    assert ctl.phase == "trim" and ctl.target == 120
+
+
 def test_reset_starts_at_new_ceiling():
     ctl, f = make()
     for _ in range(5):

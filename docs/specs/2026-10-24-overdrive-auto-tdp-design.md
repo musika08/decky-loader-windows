@@ -82,7 +82,8 @@ The hold rules from 4.1, with a target `R` measured at the ceiling instead of a 
 - **Trim:** apply 4.1 with `L = R`, so it lowers watts while fps stays within about 5 % (or 2 FPS) of `R`, and climbs
   back as soon as fps falls 10 % (or 4 FPS) below it.
 - **Recheck:** every 60 s, and whenever trimming has climbed back to `C`, measure `R` again (back to `C` for 3 s).
-- **No game (R < 10 FPS):** stay at `C`, measure again after 60 s.
+- **No game (R < 10 FPS):** stay at `C`; measure again after 60 s, or at once when 3 samples in a row (about 1 s)
+  read 10 FPS or more (a game showed up; seen live 2026-10-24, when the 60 s wait cost a minute of savings).
 
 ### 4.3 Events
 
