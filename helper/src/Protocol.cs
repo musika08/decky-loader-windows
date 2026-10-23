@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Web.Script.Serialization;
+using Overdrive.Helper.GHelper;
 
 namespace Overdrive.Helper
 {
@@ -34,11 +35,17 @@ namespace Overdrive.Helper
 
         private static readonly string[] TopLevel = { "id", "cmd", "args" };
 
-        // Commands that change hardware or services; refused outright on a device that is not an Ally.
-        private static readonly string[] Writes =
+        // The only commands allowed on a device that is not an Ally (ruling P7: an allow-list of reads, so a command
+        // added later is refused there unless it is listed here on purpose).
+        public static readonly string[] ReadCommands =
         {
-            "set_mode", "set_power", "set_fans", "reset_fans", "set_fps_limit", "armoury_stop", "armoury_restore"
+            "hello", "status", "sensors", "get_fans", "get_fps_limit", "armoury_state"
         };
+
+        public static IEnumerable<string> CommandNames { get { return Commands.Keys; } }
+
+        // DeviceGet's value when the DSTS call returned nothing (G-Helper AsusACPI.DeviceGet: raw - 65536).
+        public const int NotReported = -65536;
 
         public const string NotAllyMessage = "Overdrive supports the ROG Ally family only";
 
@@ -114,7 +121,7 @@ namespace Overdrive.Helper
 
         private string Dispatch(object id, string cmd, Dictionary<string, object> args)
         {
-            if (!ally && Array.IndexOf(Writes, cmd) >= 0) return Reply(id, false, NotAllyMessage, null);
+            if (!ally && Array.IndexOf(ReadCommands, cmd) < 0) return Reply(id, false, NotAllyMessage, null);
             switch (cmd)
             {
                 case "hello": return Hello(id);
@@ -127,9 +134,8 @@ namespace Overdrive.Helper
                 case "reset_fans": return ResetFans(id, args);
                 case "get_fps_limit": return GetFps(id);
                 case "set_fps_limit": return SetFps(id, args);
-                case "armoury_state":
-                case "armoury_stop":
-                    return Reply(id, false, "Armoury Crate control is not available in this build.", null);
+                case "armoury_state": return ArmouryState(id);
+                case "armoury_stop": return ArmouryStop(id);
                 case "armoury_restore": return ArmouryRestore(id, args);
             }
             return Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
@@ -149,16 +155,16 @@ namespace Overdrive.Helper
         {
             var d = new Dictionary<string, object>();
             var errors = new List<string>();
-            d["modeRaw"] = Read(DeviceIds.PerformanceMode, "mode", errors);
-            d["spl"] = Read(DeviceIds.Spl, "spl", errors);
-            d["sppt"] = Read(DeviceIds.Sppt, "sppt", errors);
-            d["fppt"] = Read(DeviceIds.Fppt, "fppt", errors);
+            d["modeRaw"] = ReadSetting(acpi, DeviceIds.PerformanceMode, "mode", errors);
+            d["spl"] = ReadSetting(acpi, DeviceIds.Spl, "spl", errors);
+            d["sppt"] = ReadSetting(acpi, DeviceIds.Sppt, "sppt", errors);
+            d["fppt"] = ReadSetting(acpi, DeviceIds.Fppt, "fppt", errors);
             d["lastMode"] = lastMode;
             object fps = null;
             try
             {
                 int f = adl.GetFpsLimit();
-                if (f < 0) errors.Add("fps: AMD frame rate control is unavailable."); else fps = f;
+                if (f < 0) errors.Add("fps: " + FpsUnavailable()); else fps = f;
             }
             catch (Exception ex) { errors.Add("fps: " + ex.Message); }
             d["fpsLimit"] = fps;
@@ -197,6 +203,33 @@ namespace Overdrive.Helper
                 if (!rpm.HasValue) errors.Add("cpuFan: not reported by the device (raw " + fan.Value + ").");
             }
             d["fanRpm"] = rpm;
+        }
+
+        // A setting read (mode, spl, sppt, fppt): like ReadRaw, but the IOCTL-failure value -65536 is not a reading
+        // and becomes null plus "name: not reported by the device (raw -65536)." (ruling P7).
+        public static int? ReadSetting(IAcpi acpi, uint devId, string name, List<string> errors)
+        {
+            int? v = ReadRaw(acpi, devId, name, errors);
+            if (v.HasValue && v.Value == NotReported)
+            {
+                errors.Add(name + ": not reported by the device (raw " + NotReported + ").");
+                return null;
+            }
+            return v;
+        }
+
+        // 16-byte curve -> {temps, speeds}, or null when G-Helper's AsusACPI.IsInvalidCurve rejects it
+        // (wrong length or all zero).
+        public static Dictionary<string, object> SplitCurve(byte[] curve)
+        {
+            if (curve == null || AsusACPI.IsInvalidCurve(curve)) return null;
+            var temps = new int[8];
+            var speeds = new int[8];
+            for (int i = 0; i < 8; i++) { temps[i] = curve[i]; speeds[i] = curve[i + 8]; }
+            var d = new Dictionary<string, object>();
+            d["temps"] = temps;
+            d["speeds"] = speeds;
+            return d;
         }
 
         // One DeviceGet; a failure becomes "name: message" in errors and null.
@@ -250,18 +283,13 @@ namespace Overdrive.Helper
             if (!GetMode(args, false, out mode, out err)) return Reply(id, false, err, null);
             if (mode == null) mode = lastMode ?? "balanced";
 
-            byte[] curve = acpi.GetFanCurve(DeviceIds.FanCpu, ModeValue(mode));
-            // G-Helper AsusACPI.IsInvalidCurve: wrong length or all zero.
-            if (curve == null || curve.Length != 16 || Array.TrueForAll(curve, b => b == 0))
-                return Reply(id, false, "The device did not return a fan curve.", null);
+            Dictionary<string, object> curve = SplitCurve(acpi.GetFanCurve(DeviceIds.FanCpu, ModeValue(mode)));
+            if (curve == null) return Reply(id, false, "The device did not return a fan curve.", null);
 
-            var temps = new int[8];
-            var speeds = new int[8];
-            for (int i = 0; i < 8; i++) { temps[i] = curve[i]; speeds[i] = curve[i + 8]; }
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
-            d["temps"] = temps;
-            d["speeds"] = speeds;
+            d["temps"] = curve["temps"];
+            d["speeds"] = curve["speeds"];
             return Reply(id, true, "", d);
         }
 
@@ -314,7 +342,7 @@ namespace Overdrive.Helper
         private string GetFps(object id)
         {
             int f = adl.GetFpsLimit();
-            if (f < 0) return Reply(id, false, "AMD frame rate control is unavailable.", null);
+            if (f < 0) return Reply(id, false, FpsUnavailable(), null);
             var d = new Dictionary<string, object>();
             d["fps"] = f;
             return Reply(id, true, "", d);
@@ -328,25 +356,177 @@ namespace Overdrive.Helper
             if (!Validation.IsAllowedFps(fps))
                 return Reply(id, false, "Refused: FPS limit must be 0 (off) or one of 30, 40, 45, 50, 60, 75, 90, 120.", null);
             int result = adl.SetFpsLimit(fps);
-            if (result == -1) return Reply(id, false, "AMD frame rate control is unavailable.", null);
+            if (result == -1) return Reply(id, false, FpsUnavailable(), null);
             if (result != 1) return Reply(id, false, "The graphics driver refused the FPS limit.", null);
             var d = new Dictionary<string, object>();
             d["fps"] = fps;
             return Reply(id, true, "", d);
         }
 
+        private string FpsUnavailable()
+        {
+            string why = adl.Unavailable;
+            return "AMD frame rate control is unavailable" + (string.IsNullOrEmpty(why) ? "" : ": " + why) + ".";
+        }
+
+        // ---------- Armoury Crate services ----------
+        // Only names in ArmouryServices (G-Helper AsusService.cs services + servicesAC) are ever touched.
+
+        private string ArmouryState(object id)
+        {
+            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
+            List<string> running = services.Running(ArmouryServices.All);
+            bool installed = false;
+            foreach (string m in ArmouryServices.InstalledMarkers) if (types.ContainsKey(m)) installed = true;
+            var d = new Dictionary<string, object>();
+            d["installed"] = installed;
+            d["startTypes"] = Ordered(types);
+            d["running"] = running;
+            return Reply(id, true, "", d);
+        }
+
+        // G-Helper AsusService.StopAsusServices: each running listed service is stopped and set to Manual (servicesAC)
+        // or Disabled (services); services that are not running are left alone. The start types and running set are
+        // read before the first change and returned, so the caller can store them for armoury_restore.
+        // A failure rolls every service touched so far back to the recorded state.
+        private string ArmouryStop(object id)
+        {
+            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
+            List<string> running = services.Running(ArmouryServices.All);
+
+            var steps = new List<ServiceStep>();
+            foreach (string name in ArmouryServices.All)
+                if (running.Contains(name)) steps.Add(new ServiceStep(name, ServiceAction.Stop, ArmouryServices.StopStartType(name)));
+
+            var data = new Dictionary<string, object>();
+            data["startTypes"] = Ordered(types);
+            data["running"] = running;
+            string err;
+            if (!ApplyServiceSteps(steps, types, running, "stop", data, out err)) return Reply(id, false, err, data);
+            return Reply(id, true, "", data);
+        }
+
+        // Puts back exactly the given start types and starts the given running services, in list order. Services that
+        // are no longer installed are skipped (reported in data.skipped). Nothing else is stopped or changed.
+        // A failure rolls every service touched so far back to how it was before this call.
         private string ArmouryRestore(object id, Dictionary<string, object> args)
         {
             object raw;
             if (!args.TryGetValue("recorded", out raw) || !(raw is Dictionary<string, object>))
                 return Reply(id, false, "Refused: 'recorded' must be an object of service name to start type.", null);
+            var recorded = new Dictionary<string, string>();
             foreach (KeyValuePair<string, object> kv in (Dictionary<string, object>)raw)
+            {
                 if (!(kv.Value is string)) return Reply(id, false, "Refused: start type for '" + kv.Key + "' must be a string.", null);
+                if (!ArmouryServices.IsListed(kv.Key))
+                    return Reply(id, false, "Refused: '" + kv.Key + "' is not one of the Armoury Crate services Overdrive manages.", null);
+                if (!ArmouryServices.IsStartType((string)kv.Value))
+                    return Reply(id, false, "Refused: start type for '" + kv.Key + "' must be one of "
+                        + string.Join(", ", ArmouryServices.StartTypeNames) + ".", null);
+                recorded[kv.Key] = (string)kv.Value;
+            }
             if (!args.TryGetValue("running", out raw) || !(raw is object[]))
                 return Reply(id, false, "Refused: 'running' must be a list of service names.", null);
+            var toStart = new List<string>();
             foreach (object o in (object[])raw)
-                if (!(o is string)) return Reply(id, false, "Refused: 'running' must contain only service names.", null);
-            return Reply(id, false, "Armoury Crate control is not available in this build.", null);
+            {
+                string name = o as string;
+                if (name == null) return Reply(id, false, "Refused: 'running' must contain only service names.", null);
+                if (!ArmouryServices.IsListed(name))
+                    return Reply(id, false, "Refused: '" + name + "' is not one of the Armoury Crate services Overdrive manages.", null);
+                if (!recorded.ContainsKey(name))
+                    return Reply(id, false, "Refused: running service '" + name + "' has no recorded start type.", null);
+                toStart.Add(name);
+            }
+
+            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
+            List<string> running = services.Running(ArmouryServices.All);
+
+            var steps = new List<ServiceStep>();
+            var skipped = new List<string>();
+            foreach (string name in ArmouryServices.All)
+            {
+                string type;
+                if (!recorded.TryGetValue(name, out type)) continue;
+                if (!types.ContainsKey(name)) { skipped.Add(name); continue; }
+                steps.Add(new ServiceStep(name, toStart.Contains(name) ? ServiceAction.Start : ServiceAction.SetType, type));
+            }
+
+            var data = new Dictionary<string, object>();
+            data["skipped"] = skipped;
+            string err;
+            if (!ApplyServiceSteps(steps, types, running, "restore", data, out err)) return Reply(id, false, err, data);
+            return Reply(id, true, "", data);
+        }
+
+        private enum ServiceAction { Stop, Start, SetType }
+
+        private class ServiceStep
+        {
+            public readonly string Name;
+            public readonly ServiceAction Action;
+            public readonly string StartType;
+            public ServiceStep(string name, ServiceAction action, string startType) { Name = name; Action = action; StartType = startType; }
+        }
+
+        // Runs the steps in order. On the first failure, every step done so far (the failed one included, as it may
+        // have half-happened) is undone in reverse: back to its start type in `before`, and running only if it was.
+        // data gets "failed" and "rolledBack"; err names the service and lists any rollback that also failed.
+        private bool ApplyServiceSteps(List<ServiceStep> steps, Dictionary<string, string> before, List<string> wasRunning,
+            string what, Dictionary<string, object> data, out string err)
+        {
+            err = null;
+            for (int i = 0; i < steps.Count; i++)
+            {
+                ServiceStep st = steps[i];
+                try
+                {
+                    switch (st.Action)
+                    {
+                        case ServiceAction.Stop: services.Stop(st.Name, st.StartType); break;
+                        case ServiceAction.Start: services.Start(st.Name, st.StartType); break;
+                        default: services.SetStartType(st.Name, st.StartType); break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    string verb = st.Action == ServiceAction.Stop ? "stop" : (st.Action == ServiceAction.Start ? "start" : "set the start type of");
+                    var rollbackFailures = new List<string>();
+                    for (int j = i; j >= 0; j--)
+                    {
+                        ServiceStep u = steps[j];
+                        string type;
+                        if (!before.TryGetValue(u.Name, out type)) continue;
+                        try
+                        {
+                            if (wasRunning.Contains(u.Name)) services.Start(u.Name, type);
+                            else if (u.Action == ServiceAction.Start) services.Stop(u.Name, type);
+                            else services.SetStartType(u.Name, type);
+                        }
+                        catch (Exception rex) { rollbackFailures.Add(u.Name + " (" + rex.Message + ")"); }
+                    }
+                    data["failed"] = st.Name;
+                    data["rolledBack"] = rollbackFailures.Count == 0;
+                    err = "Could not " + verb + " " + st.Name + " (" + what + "): " + ex.Message.TrimEnd('.') + "."
+                        + (rollbackFailures.Count == 0
+                            ? " Every service changed so far was put back."
+                            : " Rollback also failed for " + string.Join(", ", rollbackFailures) + ".");
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        // Start types in ArmouryServices order, for stable replies.
+        private static Dictionary<string, object> Ordered(Dictionary<string, string> types)
+        {
+            var d = new Dictionary<string, object>();
+            foreach (string name in ArmouryServices.All)
+            {
+                string t;
+                if (types.TryGetValue(name, out t)) d[name] = t;
+            }
+            return d;
         }
 
         // ---------- hardware helpers ----------
@@ -367,13 +547,6 @@ namespace Overdrive.Helper
             if (result != 1) { err = "The device refused " + what + " (result " + result + ")."; return false; }
             err = null;
             return true;
-        }
-
-        private object Read(uint devId, string name, List<string> errors)
-        {
-            int? v = ReadRaw(acpi, devId, name, errors);
-            if (v.HasValue) return v.Value;
-            return null;
         }
 
         private static int ModeValue(string mode)

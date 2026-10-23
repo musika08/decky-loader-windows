@@ -49,6 +49,7 @@ namespace Overdrive.Helper.Tests
     {
         public int Limit;
         public bool Missing;
+        public string Problem = "fake ADL missing";
         public readonly List<int> Sets = new List<int>();
 
         public int GetFpsLimit() { return Missing ? -1 : Limit; }
@@ -60,16 +61,46 @@ namespace Overdrive.Helper.Tests
             Limit = fps;
             return 1;
         }
+
+        public string Unavailable { get { return Missing ? Problem : null; } }
     }
 
+    // Stands in for the ported AmdGpuControl behind AdlHardware: same get/set contract as G-Helper
+    // (SetFPSLimit writes the AC and DC value, GetFPSLimit returns the AC value; 1 OK, 0 refused, -1 unavailable).
+    public class FakeFpsControl : IFpsControl
+    {
+        public string ProblemText;
+        public int Ac, Dc;
+        public bool Refuse;
+        public bool Disposed;
+
+        public string Problem { get { return ProblemText; } }
+        public int GetFPSLimit() { return Ac; }
+
+        public int SetFPSLimit(int limit)
+        {
+            if (Refuse) return 0;
+            Ac = limit;
+            Dc = limit;
+            return 1;
+        }
+
+        public void Dispose() { Disposed = true; }
+    }
+
+    // Service manager stand-in with state: start types, which services run, and injectable failures.
+    // A service that is not in Types does not exist.
     public class FakeServices : IServices
     {
         public readonly Dictionary<string, string> Types = new Dictionary<string, string>();
         public readonly List<string> RunningNames = new List<string>();
-        public readonly List<string> Calls = new List<string>();
+        public readonly List<string> Calls = new List<string>();      // every call, reads included, in order
+        public readonly List<string> FailStop = new List<string>();   // stops the service, then throws before setting the type
+        public readonly List<string> FailStart = new List<string>();  // throws before changing anything
 
         public Dictionary<string, string> StartTypes(IEnumerable<string> names)
         {
+            Calls.Add("query types");
             var d = new Dictionary<string, string>();
             foreach (string n in names) { string t; if (Types.TryGetValue(n, out t)) d[n] = t; }
             return d;
@@ -77,12 +108,48 @@ namespace Overdrive.Helper.Tests
 
         public List<string> Running(IEnumerable<string> names)
         {
+            Calls.Add("query running");
             var l = new List<string>();
             foreach (string n in names) if (RunningNames.Contains(n)) l.Add(n);
             return l;
         }
 
-        public void Stop(string name, string startType) { Calls.Add("stop " + name + " " + startType); }
-        public void Start(string name, string startType) { Calls.Add("start " + name + " " + startType); }
+        public void Stop(string name, string startType)
+        {
+            Calls.Add("stop " + name + " " + startType);
+            Exists(name);
+            RunningNames.Remove(name);
+            if (FailStop.Contains(name)) throw new InvalidOperationException("access denied");
+            Types[name] = startType;
+        }
+
+        public void Start(string name, string startType)
+        {
+            Calls.Add("start " + name + " " + startType);
+            Exists(name);
+            if (FailStart.Contains(name)) throw new InvalidOperationException("the service did not start");
+            Types[name] = startType;
+            if (!RunningNames.Contains(name)) RunningNames.Add(name);
+        }
+
+        public void SetStartType(string name, string startType)
+        {
+            Calls.Add("type " + name + " " + startType);
+            Exists(name);
+            Types[name] = startType;
+        }
+
+        private void Exists(string name)
+        {
+            if (!Types.ContainsKey(name)) throw new InvalidOperationException("service " + name + " was not found");
+        }
+
+        // Mutating calls only (stop/start/type), for asserting what changed.
+        public List<string> Changes()
+        {
+            var l = new List<string>();
+            foreach (string c in Calls) if (!c.StartsWith("query ")) l.Add(c);
+            return l;
+        }
     }
 }

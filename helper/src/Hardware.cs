@@ -25,15 +25,24 @@ namespace Overdrive.Helper
         int GetFpsLimit();
         // 1 = OK, 0 = ADL refused, -1 = ADL or the adapter is unavailable.
         int SetFpsLimit(int fps);
+        // Why the last call found frame rate control unavailable, or null.
+        string Unavailable { get; }
     }
 
-    // Windows service control for the Armoury Crate services (Task 4).
+    // Windows service control for the Armoury Crate services (names from ArmouryServices only).
+    // Start types: "Automatic", "AutomaticDelayedStart", "Manual", "Disabled".
     public interface IServices
     {
+        // Start type of each named service that exists (missing services are left out).
         Dictionary<string, string> StartTypes(IEnumerable<string> names);
+        // The named services whose state is anything but Stopped.
         List<string> Running(IEnumerable<string> names);
+        // Stop the service (no-op when stopped), then set its start type.
         void Stop(string name, string startType);
+        // Set the start type, then start the service (no-op when running).
         void Start(string name, string startType);
+        // Set the start type only.
+        void SetStartType(string name, string startType);
     }
 
     // Device ids (spec section 3; same values as G-Helper app/AsusACPI.cs).
@@ -45,6 +54,7 @@ namespace Overdrive.Helper
         public const uint Fppt = 0x001200C1;  // PPT_APUC1, fast boost
         public const uint TempCpu = 0x00120094;
         public const uint CpuFan = 0x00110013;
+        public const uint CpuFanCurve = 0x00110024;   // DevsCPUFanCurve, written by SetFanCurve
 
         public const int ModeBalanced = 0;
         public const int ModeTurbo = 1;

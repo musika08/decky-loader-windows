@@ -31,10 +31,10 @@ namespace Overdrive.Helper
             }
 
             var input = new StreamReader(Console.OpenStandardInput(), utf8);
-            var hw = new UnavailableHardware();   // ADL and services until Task 4
             using (var acpi = new AcpiHardware())
+            using (var adl = new AdlHardware())
             {
-                Run(input, output, new HelperCore(acpi, hw, hw, IsAlly()));
+                Run(input, output, new HelperCore(acpi, adl, new ServiceHardware(), IsAlly()));
             }
             return 0;
         }
@@ -88,26 +88,5 @@ namespace Overdrive.Helper
             }
             catch (Exception) { return null; }
         }
-    }
-
-    // Placeholder until the ported G-Helper layers land (Task 4 ADL and services; ACPI is AcpiHardware):
-    // every hardware call fails with a clear message and nothing is touched.
-    public class UnavailableHardware : IAcpi, IAdl, IServices
-    {
-        private static Exception NotBuilt()
-        {
-            return new NotSupportedException("The hardware layer is not built into this helper yet.");
-        }
-
-        public int DeviceGet(uint id) { throw NotBuilt(); }
-        public int DeviceSet(uint id, int value) { throw NotBuilt(); }
-        public byte[] GetFanCurve(int fan, int mode) { throw NotBuilt(); }
-        public int SetFanCurve(int fan, byte[] curve) { throw NotBuilt(); }
-        public int GetFpsLimit() { return -1; }
-        public int SetFpsLimit(int fps) { return -1; }
-        public Dictionary<string, string> StartTypes(IEnumerable<string> names) { throw NotBuilt(); }
-        public List<string> Running(IEnumerable<string> names) { throw NotBuilt(); }
-        public void Stop(string name, string startType) { throw NotBuilt(); }
-        public void Start(string name, string startType) { throw NotBuilt(); }
     }
 }

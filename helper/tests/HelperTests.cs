@@ -542,8 +542,8 @@ namespace Overdrive.Helper.Tests
             string json = Probe.Run(acpi, "ROG Xbox Ally X RC73XA_RC73XA");
             True(json.IndexOf('\n') < 0, "one line");
             var p = (Dictionary<string, object>)Json.DeserializeObject(json);
-            SeqEqual(new[] { "product", "mode", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "fanCurve", "errors" },
-                new List<string>(p.Keys), "keys in brief order");
+            SeqEqual(new[] { "product", "mode", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "fanCurve", "fanCurves", "errors" },
+                new List<string>(p.Keys), "keys in brief order, fanCurves added by ruling P7");
             Equal("ROG Xbox Ally X RC73XA_RC73XA", p["product"], "product");
             Equal(1, p["mode"], "mode raw");
             Equal(25, p["spl"], "spl");
@@ -554,10 +554,365 @@ namespace Overdrive.Helper.Tests
             var curve = (Dictionary<string, object>)p["fanCurve"];
             Equal("30,40,50,60,70,80,90,100", string.Join(",", (object[])curve["temps"]), "curve temps");
             Equal("10,20,30,40,50,60,70,80", string.Join(",", (object[])curve["speeds"]), "curve speeds");
-            Equal(0, ((object[])p["errors"]).Length, "no errors");
+            // fanCurves: balanced and silent are not in the fake, so they are null with an error each
+            var curves = (Dictionary<string, object>)p["fanCurves"];
+            SeqEqual(new[] { "balanced", "turbo", "silent" }, new List<string>(curves.Keys), "fanCurves keys");
+            True(curves["balanced"] == null && curves["silent"] == null, "missing curves are null");
+            Equal("10,20,30,40,50,60,70,80", string.Join(",", (object[])((Dictionary<string, object>)curves["turbo"])["speeds"]), "turbo speeds");
+            Equal(2, ((object[])p["errors"]).Length, "one error per missing curve: " + json);
             foreach (string c in acpi.Calls)
                 True(c.StartsWith("get ") || c.StartsWith("getcurve "), "only reads: " + c);
             True(acpi.Calls.Contains("getcurve 0 1"), "curve of the current mode, CPU fan");
+        }
+
+        // Ruling P6/P7: one probe run records the default curve of every mode (reads only).
+        public static void Probe_ReadsCurvesForAllModes()
+        {
+            var acpi = new FakeAcpi();
+            acpi.ThrowOnWrite = true;
+            acpi.Values[DeviceIds.PerformanceMode] = DeviceIds.ModeBalanced;
+            acpi.Values[DeviceIds.TempCpu] = 50;
+            acpi.Values[DeviceIds.CpuFan] = 30;
+            acpi.Curves[DeviceIds.ModeBalanced] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 1, 2, 3, 4, 5, 6, 7, 8 };
+            acpi.Curves[DeviceIds.ModeTurbo] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 11, 12, 13, 14, 15, 16, 17, 18 };
+            acpi.Curves[DeviceIds.ModeSilent] = new byte[] { 30, 40, 50, 60, 70, 80, 90, 100, 21, 22, 23, 24, 25, 26, 27, 28 };
+            var p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "RC73XA"));
+            var curves = (Dictionary<string, object>)p["fanCurves"];
+            Equal("1,2,3,4,5,6,7,8", string.Join(",", (object[])((Dictionary<string, object>)curves["balanced"])["speeds"]), "balanced");
+            Equal("11,12,13,14,15,16,17,18", string.Join(",", (object[])((Dictionary<string, object>)curves["turbo"])["speeds"]), "turbo");
+            Equal("21,22,23,24,25,26,27,28", string.Join(",", (object[])((Dictionary<string, object>)curves["silent"])["speeds"]), "silent");
+            Equal("30,40,50,60,70,80,90,100", string.Join(",", (object[])((Dictionary<string, object>)curves["silent"])["temps"]), "silent temps");
+            True(acpi.Calls.Contains("getcurve 0 0") && acpi.Calls.Contains("getcurve 0 1") && acpi.Calls.Contains("getcurve 0 2"), "each mode read");
+            Equal(0, ((object[])p["errors"]).Length, "no errors");
+        }
+
+        // ---------- ruling P7 hardening (Task 4) ----------
+
+        // IOCTL failure value: G-Helper DeviceGet returns raw - 65536 (AsusACPI.cs 486), so an empty DSTS reply is -65536.
+        public static void Status_NotReportedSettings_NullWithError()
+        {
+            var rig = new Rig();
+            foreach (uint id in new[] { DeviceIds.PerformanceMode, DeviceIds.Spl, DeviceIds.Sppt, DeviceIds.Fppt })
+                rig.Acpi.Values[id] = -65536;
+            rig.Acpi.Values[DeviceIds.TempCpu] = 40;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 20;
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"status\"}")["data"];
+            True(d["modeRaw"] == null && d["spl"] == null && d["sppt"] == null && d["fppt"] == null, "nulls");
+            var errors = (object[])d["errors"];
+            Equal(4, errors.Length, "one error each");
+            Equal("mode: not reported by the device (raw -65536).", errors[0], "error text");
+
+            var acpi = new FakeAcpi();
+            foreach (uint id in new[] { DeviceIds.PerformanceMode, DeviceIds.Spl, DeviceIds.Sppt, DeviceIds.Fppt })
+                acpi.Values[id] = -65536;
+            var p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "X"));
+            True(p["mode"] == null && p["spl"] == null && p["sppt"] == null && p["fppt"] == null, "probe nulls");
+            var pe = new List<string>();
+            foreach (object o in (object[])p["errors"]) pe.Add((string)o);
+            True(pe.Contains("spl: not reported by the device (raw -65536)."), "probe error: " + string.Join(" | ", pe));
+            True(acpi.Calls.Contains("getcurve 0 0"), "unknown mode -> balanced curve");
+        }
+
+        public static void NotAlly_RefusesAllButReadAllowList()
+        {
+            SeqEqual(new[] { "hello", "status", "sensors", "get_fans", "get_fps_limit", "armoury_state" },
+                new List<string>(HelperCore.ReadCommands), "read allow-list");
+            var rig = new Rig(false);
+            int n = 0, refused = 0;
+            foreach (string cmd in HelperCore.CommandNames)
+            {
+                var r = rig.Send("{\"id\":" + (++n) + ",\"cmd\":\"" + cmd + "\"}");
+                bool read = Array.IndexOf(HelperCore.ReadCommands, cmd) >= 0;
+                if (read) True(Msg(r) != HelperCore.NotAllyMessage, cmd + " is a read and must not be refused as non-Ally");
+                else { True(!Ok(r) && Msg(r) == HelperCore.NotAllyMessage, cmd + " refused: " + Msg(r)); refused++; }
+            }
+            Equal(7, refused, "every non-read command refused");
+            foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get"), "only reads reached ACPI: " + c);
+            Equal(0, rig.Adl.Sets.Count, "no ADL write");
+            Equal(0, rig.Services.Changes().Count, "no service change");
+        }
+
+        // Spec: never touch the battery charge limit (0x00120057). The real ACPI layer only writes allow-listed ids.
+        public static void Acpi_DeviceSet_AllowListBlocksBatteryLimit()
+        {
+            SeqEqual(new[] { "0x00120075", "0x001200A3", "0x001200A0", "0x001200C1", "0x00110024" },
+                new List<uint>(AcpiHardware.WritableIds).ConvertAll(i => "0x" + i.ToString("X8")), "writable ids");
+            True(!AcpiHardware.IsWritable(0x00120057), "battery limit id not writable");
+
+            // No device is opened: the null device makes any call that passes the allow-list fail with "Can't open".
+            var hw = new AcpiHardware((Overdrive.Helper.GHelper.AsusACPI)null);
+            string msg = null;
+            try { hw.DeviceSet(0x00120057, 80); } catch (InvalidOperationException ex) { msg = ex.Message; }
+            True(msg != null && msg.Contains("0x00120057") && msg.StartsWith("Refused"), "battery id refused before the device: " + msg);
+            msg = null;
+            try { hw.DeviceSet(0x00110013, 1); } catch (InvalidOperationException ex) { msg = ex.Message; }
+            True(msg != null && msg.StartsWith("Refused"), "any other id refused too: " + msg);
+            msg = null;
+            try { hw.DeviceSet(DeviceIds.PerformanceMode, 0); } catch (InvalidOperationException ex) { msg = ex.Message; }
+            True(msg != null && msg.StartsWith("Can't open"), "allowed id passes the list, then needs the device: " + msg);
+            hw.Dispose();
+        }
+
+        // ---------- FPS limit (Task 4) ----------
+
+        public static void Fps_Set_Then_Get_RoundTrips()
+        {
+            var rig = new Rig();
+            True(Ok(rig.Send("{\"id\":1,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":45}}")), "set 45");
+            var r = rig.Send("{\"id\":2,\"cmd\":\"get_fps_limit\"}");
+            True(Ok(r), "get ok");
+            Equal(45, ((Dictionary<string, object>)r["data"])["fps"], "round trip through the protocol");
+
+            // Through the real IAdl wrapper with a fake control in place of the ported AmdGpuControl.
+            var control = new FakeFpsControl();
+            int created = 0;
+            var adl = new AdlHardware(() => { created++; return control; });
+            Equal(1, adl.SetFpsLimit(60), "set ok");
+            Equal(60, control.Ac, "AC value");
+            Equal(60, control.Dc, "DC value (G-Helper sets both)");
+            Equal(60, adl.GetFpsLimit(), "get returns what was set");
+            Equal(0, adl.SetFpsLimit(0) - 1, "0 (off) accepted");
+            Equal(0, adl.GetFpsLimit(), "off reads back 0");
+            True(adl.Unavailable == null, "available");
+            Equal(1, created, "ADL set up once and reused");
+            control.Refuse = true;
+            Equal(0, adl.SetFpsLimit(30), "driver refusal passed on");
+            adl.Dispose();
+            True(control.Disposed, "ADL context released on dispose");
+
+            var core = new HelperCore(new FakeAcpi(), new AdlHardware(() => new FakeFpsControl()), new FakeServices(), true);
+            True(core.HandleLine("{\"id\":3,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":90}}").Contains("\"ok\":true"), "protocol set via AdlHardware");
+            True(core.HandleLine("{\"id\":4,\"cmd\":\"get_fps_limit\"}").Contains("\"fps\":90"), "protocol get via AdlHardware");
+        }
+
+        public static void Adl_Missing_ReturnsClearError()
+        {
+            var adl = new AdlHardware(() => { throw new DllNotFoundException("Unable to load DLL 'atiadlxx.dll'"); });
+            Equal(-1, adl.GetFpsLimit(), "get unavailable");
+            Equal(-1, adl.SetFpsLimit(60), "set unavailable");
+            True(adl.Unavailable != null && adl.Unavailable.Contains("atiadlxx.dll"), "reason names the library: " + adl.Unavailable);
+
+            var rig = new Rig();
+            var core = new HelperCore(rig.Acpi, adl, rig.Services, true);
+            var r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine("{\"id\":1,\"cmd\":\"get_fps_limit\"}"));
+            True(!Ok(r), "get refused");
+            Equal("AMD frame rate control is unavailable: the AMD display library (atiadlxx.dll) is not installed.", Msg(r), "message");
+            r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine("{\"id\":2,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":60}}"));
+            True(!Ok(r) && Msg(r).Contains("atiadlxx.dll"), "set refused with the reason: " + Msg(r));
+            r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine("{\"id\":3,\"cmd\":\"status\"}"));
+            var errors = new List<string>();
+            foreach (object o in (object[])((Dictionary<string, object>)r["data"])["errors"]) errors.Add((string)o);
+            True(errors.Contains("fps: AMD frame rate control is unavailable: the AMD display library (atiadlxx.dll) is not installed."), "status error: " + string.Join(" | ", errors));
+
+            // A control that set up but found no AMD integrated GPU: disposed, reason passed on.
+            var control = new FakeFpsControl();
+            control.ProblemText = "no AMD integrated GPU was found";
+            adl = new AdlHardware(() => control);
+            Equal(-1, adl.GetFpsLimit(), "unavailable");
+            Equal("no AMD integrated GPU was found", adl.Unavailable, "reason");
+            True(control.Disposed, "half-built control released");
+
+            rig.Adl.Missing = true;
+            r = rig.Send("{\"id\":4,\"cmd\":\"get_fps_limit\"}");
+            Equal("AMD frame rate control is unavailable: fake ADL missing.", Msg(r), "fake reason passed on");
+        }
+
+        // ---------- Armoury Crate services (Task 4) ----------
+
+        // G-Helper app/Helpers/AsusService.cs lines 10-25 (services) and 29-33 (servicesAC), commit in helper\GHELPER_COMMIT;
+        // "AsusPTPService" is commented out upstream (line 27) and stays out.
+        public static void Armoury_ListsMatchGHelper()
+        {
+            SeqEqual(new[] { "ArmouryCrateControlInterface", "ArmouryCrateProArtService", "AsHidService", "ASUSOptimization",
+                "AsusAppService", "ASUSLinkNear", "ASUSLinkRemote", "ASUSSoftwareManager", "ASUSLiveUpdateAgent", "ASUSSwitch",
+                "ASUSSystemAnalysis", "ASUSSystemDiagnosis", "ASUSXGMobileService", "AsusCertService" },
+                ArmouryServices.Services, "services");
+            SeqEqual(new[] { "ArmouryCrateSEService", "ArmouryCrateService", "LightingService" }, ArmouryServices.ServicesAC, "servicesAC");
+            Equal(17, ArmouryServices.All.Count, "all");
+            True(!ArmouryServices.IsListed("AsusPTPService"), "AsusPTPService not listed");
+            True(!ArmouryServices.IsListed("armourycrateseservice"), "names are exact");
+        }
+
+        // State before Armoury is replaced: four listed services running, one stopped, one unrelated service.
+        private static Rig ArmouryRig()
+        {
+            var rig = new Rig();
+            var s = rig.Services;
+            s.Types["ArmouryCrateControlInterface"] = "Automatic"; s.RunningNames.Add("ArmouryCrateControlInterface");
+            s.Types["ASUSOptimization"] = "Automatic";              // installed but stopped
+            s.Types["AsusAppService"] = "Automatic"; s.RunningNames.Add("AsusAppService");
+            s.Types["ArmouryCrateSEService"] = "AutomaticDelayedStart"; s.RunningNames.Add("ArmouryCrateSEService");
+            s.Types["LightingService"] = "Manual"; s.RunningNames.Add("LightingService");
+            s.Types["Spooler"] = "Automatic"; s.RunningNames.Add("Spooler");
+            return rig;
+        }
+
+        private static string Snapshot(FakeServices s)
+        {
+            var names = new List<string>(s.Types.Keys);
+            names.Sort(StringComparer.Ordinal);
+            var parts = new List<string>();
+            foreach (string n in names) parts.Add(n + "=" + s.Types[n] + (s.RunningNames.Contains(n) ? "+run" : ""));
+            return string.Join(", ", parts);
+        }
+
+        public static void Armoury_State_Shape()
+        {
+            var rig = ArmouryRig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_state\"}");
+            True(Ok(r), "ok: " + Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            SeqEqual(new[] { "installed", "startTypes", "running" }, new List<string>(d.Keys), "keys");
+            Equal(true, d["installed"], "installed");
+            var types = (Dictionary<string, object>)d["startTypes"];
+            Equal(5, types.Count, "listed services only");
+            Equal("AutomaticDelayedStart", types["ArmouryCrateSEService"], "delayed start kept");
+            True(!types.ContainsKey("Spooler"), "unrelated service not reported");
+            Equal("ArmouryCrateControlInterface,AsusAppService,ArmouryCrateSEService,LightingService",
+                string.Join(",", (object[])d["running"]), "running in list order");
+            Equal(0, rig.Services.Changes().Count, "state only reads");
+
+            var bare = new Rig();
+            bare.Services.Types["LightingService"] = "Manual";
+            d = (Dictionary<string, object>)bare.Send("{\"id\":2,\"cmd\":\"armoury_state\"}")["data"];
+            Equal(false, d["installed"], "installed means ArmouryCrateSEService or ArmouryCrateService exists");
+            bare.Services.Types["ArmouryCrateService"] = "Automatic";
+            d = (Dictionary<string, object>)bare.Send("{\"id\":3,\"cmd\":\"armoury_state\"}")["data"];
+            Equal(true, d["installed"], "ArmouryCrateService counts");
+        }
+
+        public static void Armoury_Stop_RecordsBeforeChanging()
+        {
+            var rig = ArmouryRig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_stop\"}");
+            True(Ok(r), "ok: " + Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            var types = (Dictionary<string, object>)d["startTypes"];
+            Equal(5, types.Count, "every installed listed service recorded");
+            Equal("Automatic", types["ArmouryCrateControlInterface"], "type before the change");
+            Equal("AutomaticDelayedStart", types["ArmouryCrateSEService"], "type before the change");
+            Equal("Manual", types["LightingService"], "type before the change");
+            Equal("Automatic", types["ASUSOptimization"], "stopped service recorded too");
+            Equal("ArmouryCrateControlInterface,AsusAppService,ArmouryCrateSEService,LightingService",
+                string.Join(",", (object[])d["running"]), "running before the change");
+            // Both reads happen before the first change.
+            Equal("query types", rig.Services.Calls[0], "types read first");
+            Equal("query running", rig.Services.Calls[1], "running read second");
+            True(rig.Services.Calls[2].StartsWith("stop "), "then changes");
+        }
+
+        // G-Helper AsusService.StopAsusServices (lines 89-94): every running service is stopped and set to
+        // "Manual" when it is in servicesAC, else "Disabled" (ProcessHelper.StopDisableService: Stop-Service, then
+        // Set-Service -StartupType). Services that are not running are left alone.
+        public static void Armoury_Stop_SetsTypesLikeGHelper()
+        {
+            var rig = ArmouryRig();
+            True(Ok(rig.Send("{\"id\":1,\"cmd\":\"armoury_stop\"}")), "ok");
+            SeqEqual(new[] {
+                "stop ArmouryCrateControlInterface Disabled",
+                "stop AsusAppService Disabled",
+                "stop ArmouryCrateSEService Manual",
+                "stop LightingService Manual" }, rig.Services.Changes(), "changes");
+            Equal("ASUSOptimization=Automatic, ArmouryCrateControlInterface=Disabled, ArmouryCrateSEService=Manual, AsusAppService=Disabled, LightingService=Manual, Spooler=Automatic+run",
+                Snapshot(rig.Services), "end state");
+            Equal("Manual", ArmouryServices.StopStartType("ArmouryCrateService"), "AC list -> Manual");
+            Equal("Disabled", ArmouryServices.StopStartType("AsHidService"), "other list -> Disabled");
+        }
+
+        // Review focus 4: after a reboot the helper is new and the current state differs from what was recorded;
+        // restore applies the recorded start types, not the current ones, and starts the recorded running services.
+        public static void restore_uses_recorded_state_after_restart()
+        {
+            var rig = new Rig();   // fresh helper process
+            var s = rig.Services;
+            s.Types["ArmouryCrateControlInterface"] = "Disabled";
+            s.Types["ASUSOptimization"] = "Automatic";            // recorded as Manual below
+            s.Types["AsusAppService"] = "Disabled";
+            s.Types["ArmouryCrateSEService"] = "Manual";
+            s.Types["LightingService"] = "Manual"; s.RunningNames.Add("LightingService");   // something started it
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{"
+                + "\"ArmouryCrateSEService\":\"AutomaticDelayedStart\",\"ArmouryCrateControlInterface\":\"Automatic\","
+                + "\"ASUSOptimization\":\"Manual\",\"AsusAppService\":\"Automatic\",\"LightingService\":\"Manual\"},"
+                + "\"running\":[\"ArmouryCrateControlInterface\",\"AsusAppService\",\"ArmouryCrateSEService\",\"LightingService\"]}}");
+            True(Ok(r), "restore ok: " + Msg(r));
+            Equal("ASUSOptimization=Manual, ArmouryCrateControlInterface=Automatic+run, ArmouryCrateSEService=AutomaticDelayedStart+run, AsusAppService=Automatic+run, LightingService=Manual+run",
+                Snapshot(s), "recorded state applied");
+            SeqEqual(new[] {
+                "start ArmouryCrateControlInterface Automatic",
+                "type ASUSOptimization Manual",
+                "start AsusAppService Automatic",
+                "start ArmouryCrateSEService AutomaticDelayedStart",
+                "start LightingService Manual" }, s.Changes(), "in G-Helper list order");
+        }
+
+        public static void Armoury_Restore_SkipsUninstalledServices()
+        {
+            var rig = new Rig();
+            rig.Services.Types["ArmouryCrateSEService"] = "Manual";
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"ArmouryCrateSEService\":\"Automatic\",\"AsHidService\":\"Automatic\"},\"running\":[\"ArmouryCrateSEService\",\"AsHidService\"]}}");
+            True(Ok(r), "ok: " + Msg(r));
+            Equal("AsHidService", string.Join(",", (object[])((Dictionary<string, object>)r["data"])["skipped"]), "skipped");
+            SeqEqual(new[] { "start ArmouryCrateSEService Automatic" }, rig.Services.Changes(), "only the installed one");
+        }
+
+        public static void Armoury_Restore_RefusesBadInputBeforeAnyCall()
+        {
+            var rig = ArmouryRig();
+            string[] bad =
+            {
+                "{\"id\":1,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"Spooler\":\"Disabled\"},\"running\":[]}}",
+                "{\"id\":2,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"AsHidService\":\"Boot\"},\"running\":[]}}",
+                "{\"id\":3,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"AsHidService\":\"Manual\"},\"running\":[\"LightingService\"]}}",
+                "{\"id\":4,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"AsHidService\":7},\"running\":[]}}",
+                "{\"id\":5,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{},\"running\":[\"x\\\" & sc delete\"]}}",
+            };
+            foreach (string b in bad)
+            {
+                var r = rig.Send(b);
+                True(!Ok(r) && Msg(r).StartsWith("Refused"), "refused: " + b + " -> " + Msg(r));
+            }
+            Equal(0, rig.Services.Calls.Count, "no service call at all");
+        }
+
+        public static void Armoury_PartialFailure_ReportsServiceName_AndRollsBack()
+        {
+            var rig = ArmouryRig();
+            string before = Snapshot(rig.Services);
+            rig.Services.FailStop.Add("ArmouryCrateSEService");   // third stop: stops it, then fails to set the type
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_stop\"}");
+            True(!Ok(r), "failure reported");
+            True(Msg(r).Contains("ArmouryCrateSEService") && Msg(r).Contains("access denied"), "names the service and the reason: " + Msg(r));
+            Equal("ArmouryCrateSEService", ((Dictionary<string, object>)r["data"])["failed"], "data.failed");
+            Equal(true, ((Dictionary<string, object>)r["data"])["rolledBack"], "data.rolledBack");
+            Equal(before, Snapshot(rig.Services), "every service back as it was");
+            SeqEqual(new[] {
+                "stop ArmouryCrateControlInterface Disabled",
+                "stop AsusAppService Disabled",
+                "stop ArmouryCrateSEService Manual",
+                "start ArmouryCrateSEService AutomaticDelayedStart",
+                "start AsusAppService Automatic",
+                "start ArmouryCrateControlInterface Automatic" }, rig.Services.Changes(), "rolled back in reverse");
+
+            // Restore failing half-way rolls back to the state before the restore (the switch stays on).
+            rig = new Rig();
+            var s = rig.Services;
+            s.Types["ArmouryCrateControlInterface"] = "Disabled";
+            s.Types["ASUSOptimization"] = "Automatic";
+            s.Types["ArmouryCrateSEService"] = "Manual";
+            before = Snapshot(s);
+            s.FailStart.Add("ArmouryCrateSEService");
+            r = rig.Send("{\"id\":2,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"ArmouryCrateControlInterface\":\"Automatic\",\"ASUSOptimization\":\"Manual\",\"ArmouryCrateSEService\":\"Automatic\"},\"running\":[\"ArmouryCrateControlInterface\",\"ArmouryCrateSEService\"]}}");
+            True(!Ok(r) && Msg(r).Contains("ArmouryCrateSEService"), "restore failure names the service: " + Msg(r));
+            Equal(before, Snapshot(s), "restore rolled back");
+
+            // A rollback that fails too is reported with its service name.
+            rig = ArmouryRig();
+            rig.Services.FailStop.Add("ArmouryCrateSEService");
+            rig.Services.FailStart.Add("AsusAppService");
+            r = rig.Send("{\"id\":3,\"cmd\":\"armoury_stop\"}");
+            True(!Ok(r) && Msg(r).Contains("Rollback also failed for AsusAppService"), "rollback failure listed: " + Msg(r));
+            Equal(false, ((Dictionary<string, object>)r["data"])["rolledBack"], "data.rolledBack false");
+            True(rig.Services.RunningNames.Contains("ArmouryCrateControlInterface"), "rollback continues past a failure");
         }
 
         public static void Probe_ReadOnlyWrapperRefusesWrites()

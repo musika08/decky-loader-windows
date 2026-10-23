@@ -1,17 +1,34 @@
 using System;
+using System.Collections.Generic;
 using Overdrive.Helper.GHelper;
 
 namespace Overdrive.Helper
 {
     // The real IAcpi: the ATKACPI device through the ported G-Helper AsusACPI.
     // The device is opened once (as G-Helper does); if that failed, every call throws with the reason.
+    // Writes are limited to an allow-list of device ids, checked before the device is touched, so ids such as the
+    // battery charge limit (0x00120057, owned by Windows Quick Settings) can never be written by this helper.
     public class AcpiHardware : IAcpi, IDisposable
     {
+        // Performance mode, SPL, sPPT, fPPT, and the CPU fan curve (written by SetFanCurve).
+        public static readonly IList<uint> WritableIds = Array.AsReadOnly(new[]
+        {
+            DeviceIds.PerformanceMode, DeviceIds.Spl, DeviceIds.Sppt, DeviceIds.Fppt, DeviceIds.CpuFanCurve
+        });
+
         private readonly AsusACPI acpi;
 
-        public AcpiHardware()
+        public AcpiHardware() : this(new AsusACPI()) { }
+
+        // For tests: null means "no device", so any call that passes the checks fails with "Can't open ...".
+        internal AcpiHardware(AsusACPI device)
         {
-            acpi = new AsusACPI();
+            acpi = device;
+        }
+
+        public static bool IsWritable(uint id)
+        {
+            return WritableIds.Contains(id);
         }
 
         public int DeviceGet(uint id)
@@ -22,6 +39,7 @@ namespace Overdrive.Helper
 
         public int DeviceSet(uint id, int value)
         {
+            CheckWritable(id);
             EnsureConnected();
             return acpi.DeviceSet(id, value);
         }
@@ -37,6 +55,8 @@ namespace Overdrive.Helper
         {
             CheckFan(fan);
             if (curve == null) throw new ArgumentNullException("curve");
+            // AsusACPI.SetFanCurve writes DevsCPUFanCurve for the CPU fan; keep it under the same allow-list.
+            CheckWritable(AsusACPI.DevsCPUFanCurve);
             EnsureConnected();
             // AsusACPI.SetFanCurve clamps the speed bytes in place; keep the caller's array untouched.
             return acpi.SetFanCurve(AsusFan.CPU, (byte[])curve.Clone());
@@ -44,14 +64,20 @@ namespace Overdrive.Helper
 
         public void Dispose()
         {
-            acpi.Close();
+            if (acpi != null) acpi.Close();
+        }
+
+        private static void CheckWritable(uint id)
+        {
+            if (!IsWritable(id))
+                throw new InvalidOperationException("Refused: device id 0x" + id.ToString("X8") + " is not writable by Overdrive.");
         }
 
         private void EnsureConnected()
         {
-            if (!acpi.IsConnected())
+            if (acpi == null || !acpi.IsConnected())
                 throw new InvalidOperationException("Can't open the ASUS ACPI device (\\\\.\\ATKACPI): "
-                    + (acpi.ConnectError() ?? "unknown error") + ".");
+                    + (acpi == null ? "no device" : (acpi.ConnectError() ?? "unknown error")) + ".");
         }
 
         private static void CheckFan(int fan)
