@@ -214,7 +214,10 @@ class Plugin:
             r = await self.client.call("status")   # reads only; shown, never written back
             if r.get("ok"):
                 state["device"] = _device_readback(r.get("data"))
-            self._controls = await controls.read_controls(self.client)
+            if not controls.transport_failure(r):
+                self._controls = await controls.read_controls(self.client)
+            # else: the helper is gone or hung; five more calls would each wait their timeout. The last reading
+            # is shown and the controls are read again at the next poll.
         if self._controls is not None:   # while busy, the last reading: a call would queue behind the switch
             _merge_controls(state, self._controls, s)
         state["armoury"]["installed"] = bool(self._armoury_installed)
@@ -509,7 +512,7 @@ class Plugin:
         s, ca = self.settings, self.controller_auto
         # R10: stop() takes the reapplier's lock (not reentrant), so a running loop is stopped before user_change.
         # It writes Gamepad; Auto chosen again starts the loop afresh below.
-        if ca is not None and ca._on:
+        if ca is not None and ca.running:
             await ca.stop()
         result = None
         async with self.reapplier.user_change():
@@ -527,8 +530,13 @@ class Plugin:
                     s.controller_mode = mode
                     s.user_set = True   # a user choice: reapplies (resume, helper restart) write it again
                     result = {"ok": True, "message": " ".join(m for m in (note, self._save()) if m)}
-        if ca is not None and s.controller_mode == "auto":
-            ca.start()   # Auto chosen, or a failed change away from Auto: the loop goes on
+        if ca is not None:
+            if s.controller_mode == "auto":
+                ca.start()   # Auto chosen, or a failed change away from Auto: the loop goes on
+            elif ca.running:
+                # A concurrent Auto choice started the loop after this call stopped it, then this call stored
+                # Gamepad or Desktop. Stopped here, outside the lock (R10); the stored mode is written again.
+                await ca.stop(s.controller_mode)
         return result
 
     async def set_grip_vibration(self, on) -> dict:

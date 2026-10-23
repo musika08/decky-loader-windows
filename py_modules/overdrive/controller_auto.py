@@ -17,7 +17,7 @@ docs/specs/2026-10-24-overdrive-controls-design.md sections 3.3, 4 and 5.2.
 - A write refused with "Controller not found" (no controller attached) is not tried again for NOT_FOUND_RETRY seconds,
   so a missing controller is not searched for (every HID device listed) at every tick.
 - An error inside the loop is logged (once a minute at most), Gamepad is written and the loop goes on.
-- stop() writes Gamepad.
+- stop() writes Gamepad (or the given fixed mode, when the owner's stored choice is Desktop).
 """
 import asyncio
 import logging
@@ -73,9 +73,10 @@ class ControllerAuto:
         if self._task is None:
             self._task = asyncio.ensure_future(self._run())
 
-    async def stop(self) -> None:
+    async def stop(self, mode: str = GAMEPAD) -> None:
         """Ends the loop and writes Gamepad (even while an Armoury switch runs: Big Picture must never be left with a
-        mouse-only controller)."""
+        mouse-only controller). `mode` DESKTOP is only passed when the owner's stored choice is Desktop."""
+        mode = DESKTOP if mode == DESKTOP else GAMEPAD
         was_on = self._on
         self._on = False
         task, self._task = self._task, None
@@ -88,10 +89,10 @@ class ControllerAuto:
         if was_on:
             self.log.info("Controller Auto stopped")
         async with self.reapplier.lock:
-            r = await self.client.call("set_controller_mode", {"mode": GAMEPAD})
+            r = await self.client.call("set_controller_mode", {"mode": mode})
         if not r.get("ok"):
-            self.log.warning(f"Controller Auto could not put the controller back to Gamepad: {r.get('message')}")
-        self._written = GAMEPAD if r.get("ok") else None
+            self.log.warning(f"Controller Auto could not put the controller back to {mode}: {r.get('message')}")
+        self._written = mode if r.get("ok") else None
 
     # ---------- deciding ----------
 

@@ -1235,6 +1235,45 @@ def test_set_controller_mode_away_from_auto_stops_loop_outside_the_lock(tmp_path
     run(go())
 
 
+def test_concurrent_auto_and_desktop_leave_no_loop_running(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        controller_found(c)
+        ca = p.controller_auto
+        # Both calls pass the "stop a running loop" check, then wait for the lock: Auto first, Desktop second.
+        async with p.reapplier.lock:
+            a = asyncio.ensure_future(p.set_controller_mode("auto"))
+            b = asyncio.ensure_future(p.set_controller_mode("desktop"))
+            for _ in range(5):
+                await asyncio.sleep(0)
+        ra, rb = await wait(a), await wait(b)
+        assert ra["ok"] and rb["ok"], (ra, rb)
+        assert s.controller_mode == "desktop" and Settings.load(s.path).controller_mode == "desktop"
+        assert ca.running is False and ca._task is None          # the loop Auto started was stopped
+        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
+        assert modes[-1] == "desktop"                             # the stored choice is what the device has
+    run(go())
+
+
+def test_get_state_skips_controls_when_the_helper_does_not_answer(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        c.handlers["get_cpu_boost"] = reply(ok({"ac": 2, "dc": 2}))
+        st = await wait(p.get_state())
+        assert st["cpu_boost"] == {"on": True, "supported": True}
+        c.handlers["status"] = reply(fail("Overdrive helper did not answer in time."))
+        n = len(c.calls)
+        st = await wait(p.get_state())
+        assert [cmd for cmd, _ in c.calls[n:]] == ["status"]       # no control reads behind a hung helper
+        assert st["cpu_boost"] == {"on": True, "supported": True}  # the last reading is shown
+        # a status refused by the device (not a transport failure) still reads the controls
+        c.handlers["status"] = reply(fail("The device refused the read."))
+        n = len(c.calls)
+        await wait(p.get_state())
+        assert "get_cpu_boost" in [cmd for cmd, _ in c.calls[n:]]
+    run(go())
+
+
 def test_controller_choices_saved_when_controller_missing(tmp_path):
     async def go():
         p, c, s = plugin_with(tmp_path)                               # controller_info: found False
