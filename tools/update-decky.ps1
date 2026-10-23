@@ -108,6 +108,10 @@ if ($Package) {
         # app\VERSION is what the dashboard reads as the installed Decky version (strict x.y.z)
         [System.IO.File]::WriteAllText((Join-Path $work 'app\VERSION'), $Version, (New-Object System.Text.UTF8Encoding($false)))
         Copy-Item -ErrorAction Stop (Join-Path $repo 'LICENSE') (Join-Path $work 'LICENSE')
+        # Not needed at run time: source maps (only browser dev tools read them) and certifi's own test folder
+        Get-ChildItem -LiteralPath (Join-Path $work 'app\decky_loader\static') -Filter *.map -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction Stop
+        $certTests = Join-Path $work 'app\certifi\tests'
+        if (Test-Path $certTests) { Remove-Item -Recurse -Force $certTests -ErrorAction Stop }
         New-Item -ItemType Directory -Force $OutDir -ErrorAction Stop | Out-Null
         $zipPath = Join-Path $OutDir "decky-windows-$Version.zip"
         if (Test-Path $zipPath) { Remove-Item -Force $zipPath -ErrorAction Stop }
@@ -120,7 +124,11 @@ if ($Package) {
             # Forward-slash entry names (Compress-Archive in Windows PowerShell 5.1 writes backslashes, which the dashboard refuses)
             foreach ($f in (Get-ChildItem -LiteralPath $work -Recurse -File | Sort-Object FullName)) {
                 $name = $f.FullName.Substring($rootLen).Replace('\', '/')
-                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($za, $f.FullName, $name, [System.IO.Compression.CompressionLevel]::Optimal)
+                # Fixed entry time so the same input gives the same zip
+                $ze = $za.CreateEntry($name, [System.IO.Compression.CompressionLevel]::Optimal)
+                $ze.LastWriteTime = New-Object System.DateTimeOffset(2026, 1, 1, 0, 0, 0, [TimeSpan]::Zero)
+                $zo = $ze.Open()
+                try { $zi = [System.IO.File]::OpenRead($f.FullName); try { $zi.CopyTo($zo) } finally { $zi.Dispose() } } finally { $zo.Dispose() }
             }
         } finally { $za.Dispose(); $fs.Dispose() }
     } catch { Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue; Fail 3 "could not zip the installer folder: $_" }
