@@ -12,6 +12,7 @@ if _PY_MODULES not in sys.path:
     sys.path.append(_PY_MODULES)
 
 from overdrive import device  # noqa: E402
+from overdrive.auto_tdp_loop import AutoTdpLoop  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
 from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write  # noqa: E402
 from overdrive.cpu_usage import CpuUsage  # noqa: E402
@@ -20,6 +21,9 @@ from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRES
 
 NOT_ALLY = "Overdrive supports the ROG Ally family only"
 BUSY = "Overdrive is switching Armoury Crate services. Try again when it finishes."
+AUTO_TDP_UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer."
+# get_sensors().autoTdp when there is no loop (not an Ally)
+AUTO_TDP_IDLE = {"on": False, "watts": None, "fps": None, "best": None, "paused": "", "supported": False}
 ARMOURY_MIN_TIMEOUT = 300.0      # ruling P8: armoury_* calls get at least 5 minutes
 ARMOURY_PER_SERVICE = 60.0       # each service may wait 30 s, doubled when a rollback runs
 
@@ -55,6 +59,7 @@ class Plugin:
         self.client = None
         self.settings = None
         self.reapplier = None
+        self.auto_tdp_loop = None
         self._startup = None
         self._armoury_lock = asyncio.Lock()
         self._armoury_installed = None
@@ -67,6 +72,9 @@ class Plugin:
         self.client, self.settings, self.reapplier = client, settings, reapplier
         if reapplier is not None:
             reapplier.busy_check = self._busy
+            if client is not None:
+                self.auto_tdp_loop = AutoTdpLoop(client, settings, reapplier, logger=decky.logger)
+                reapplier.on_applied = self.auto_tdp_loop.reset   # a reapply wrote the mode: restart at the ceiling
 
     def _busy(self) -> bool:
         return self._armoury_busy or bool(getattr(self.client, "busy", False))
@@ -100,6 +108,8 @@ class Plugin:
         elif self.settings.armoury_recorded:
             await self._recover_on_load()
         self.reapplier.start()
+        if self.settings.auto_tdp and self.auto_tdp_loop is not None:
+            self.auto_tdp_loop.start()   # the reapply just started writes the mode; on_applied resets the loop then
 
     async def _unload(self) -> None:
         # Try not to kill the helper halfway through changing services: wait for the Armoury operation to finish,
@@ -116,6 +126,10 @@ class Plugin:
                 await self._startup
             except (asyncio.CancelledError, Exception):
                 pass
+        if self.auto_tdp_loop is not None:
+            # Never leave the Ally at trimmed watts: write the mode again (only when Auto TDP was running; a pause or
+            # a refusal already did, and with Auto TDP off nothing is written).
+            await self.auto_tdp_loop.stop(restore=self.auto_tdp_loop.status()["on"])
         if self.reapplier is not None:
             await self.reapplier.stop()
         if self.client is not None:
@@ -151,9 +165,12 @@ class Plugin:
             # The owner's own limits exist only once Manual was chosen; otherwise the firmware's limits apply.
             "power_set": bool(s.user_set and s.mode == "manual"),
             "device": _device_readback(None),
+            "auto_tdp": {"on": False, "supported": False},
         }
         if self.client is None:
             return state
+        if self.auto_tdp_loop is not None:   # the stored switch; "supported" is False once the driver had no reading
+            state["auto_tdp"] = {"on": bool(s.auto_tdp), "supported": bool(self.auto_tdp_loop.status()["supported"])}
         state["busy"] = self._busy()
         if self._armoury_installed is None and not state["busy"]:   # never queue behind a long service switch
             r = await self.client.call("armoury_state")
@@ -173,7 +190,7 @@ class Plugin:
         if self.client is None:
             return {"ok": False, "message": NOT_ALLY, "cpuTempC": None, "fanRpm": None, "gpuFanRpm": None,
                     "gpuTempC": None, "cpuUse": None, "gpuUse": None, "cpuPowerW": None, "gpuPowerW": None,
-                    "errors": []}
+                    "errors": [], "autoTdp": dict(AUTO_TDP_IDLE)}
         r = await self.client.call("sensors", None, 5.0)
         d = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
         out = {"ok": bool(r.get("ok")), "message": r.get("message") or ""}
@@ -184,6 +201,7 @@ class Plugin:
         for k in ("gpuUse", "cpuPowerW", "gpuPowerW"):
             out[k] = d.get(k)
         out["errors"] = list(d.get("errors") or [])
+        out["autoTdp"] = self.auto_tdp_loop.status() if self.auto_tdp_loop is not None else dict(AUTO_TDP_IDLE)
         return out
 
     # ---------- user changes ----------
@@ -212,6 +230,12 @@ class Plugin:
                 what = "fan curve" if fan == "cpu" else "GPU fan curve"
                 msgs.append(f"The {what} was not put back: " + str(r.get("message")))
         return " ".join(msgs)
+
+    def _auto_tdp_reset(self) -> None:
+        """After a user write that set the mode's watts or the FPS limit: Auto TDP restarts from the new ceiling and
+        limit (sync, idle when stopped; safe inside user_change)."""
+        if self.auto_tdp_loop is not None:
+            self.auto_tdp_loop.reset()
 
     async def set_mode(self, mode, spl=None, sppt=None, fppt=None) -> dict:
         refused = self._refuse_write()
@@ -244,6 +268,7 @@ class Plugin:
                                                     _int(d.get("fppt")) or args["fppt"])
             s.user_set = True
             msgs = [await self._rewrite_fans(), self._save()]
+            self._auto_tdp_reset()
         return {"ok": True, "message": " ".join(m for m in msgs if m)}
 
     async def set_fps(self, fps) -> dict:
@@ -261,6 +286,7 @@ class Plugin:
                 return _fail(str(r.get("message")))
             self.settings.fps = fps
             self.settings.user_set = True
+            self._auto_tdp_reset()
             return {"ok": True, "message": self._save()}
 
     async def set_fan_preset(self, name) -> dict:
@@ -299,6 +325,8 @@ class Plugin:
                     return _fail(str(r.get("message")))
             self.reapplier.fan_note = fan_note(s)
             s.user_set = True
+            if writes and writes[0][0] == "set_mode":   # the mode's watts were written again
+                self._auto_tdp_reset()
             return {"ok": True, "message": " ".join(m for m in warns + [self._save()] if m)}
 
     async def set_fan_curve(self, temps, speeds, fan="cpu") -> dict:
@@ -337,11 +365,18 @@ class Plugin:
         if refused:
             return refused
         s = self.settings
+        # Armoury Crate's defaults have no Auto TDP, so it goes off. Stopped here, before user_change: stop() may
+        # wait for a loop write holding the reapplier's lock, which is not reentrant. No restore: Balanced follows.
+        auto_was_on, _ = await self._auto_tdp_off(restore=False)   # a failed save shows in the final save message
         async with self.reapplier.user_change():
             if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                if auto_was_on:
+                    self.reapplier.rerun = True   # the watts may be trimmed: the next poll writes the mode again
                 return _fail(BUSY)
             r = await self.client.call("set_mode", mode_write("balanced"))
             if not r.get("ok"):
+                if auto_was_on:
+                    self.reapplier.rerun = True
                 return _fail(str(r.get("message")))
             s.mode = "balanced"
             s.spl = s.sppt = s.fppt = 30
@@ -354,7 +389,46 @@ class Plugin:
                 msgs.append("The FPS limit was not turned off: " + str(r.get("message")))
             s.user_set = True
             msgs.append(self._save())
+            self._auto_tdp_reset()
         return {"ok": True, "message": " ".join(m for m in msgs if m)}
+
+    # ---------- Auto TDP ----------
+
+    async def _auto_tdp_off(self, restore: bool) -> "tuple[bool, str]":
+        """Stores the switch off and stops the loop (writing the mode again when `restore` and it was on). Never
+        call inside user_change: stop() awaits the loop task, which may hold the reapplier's lock, and then takes
+        that lock itself. (was on, stored or running; the save message)."""
+        s, loop = self.settings, self.auto_tdp_loop
+        was_on = bool(s.auto_tdp) or bool(loop is not None and loop.status()["on"])
+        msg = ""
+        if s.auto_tdp:
+            s.auto_tdp = False
+            msg = self._save()
+        if loop is not None:
+            await loop.stop(restore=restore and was_on)
+        return was_on, msg
+
+    async def set_auto_tdp(self, on) -> dict:
+        """The Auto TDP switch: on starts the loop at the mode's watts; off stops it and writes the mode again."""
+        refused = self._refuse_write()
+        if refused:
+            return refused
+        if not isinstance(on, bool):
+            return _fail("Expected on or off.")
+        loop, s = self.auto_tdp_loop, self.settings
+        if not on:
+            _, msg = await self._auto_tdp_off(restore=True)
+            return {"ok": True, "message": msg}
+        if loop is None or not loop.status()["supported"]:
+            return _fail(AUTO_TDP_UNSUPPORTED)
+        async with self.reapplier.user_change():
+            if self._busy():   # an Armoury switch may have begun while this waited for the lock
+                return _fail(BUSY)
+            s.auto_tdp = True
+            s.user_set = True   # a user choice: reapplies run, and each one resets the loop
+            msg = self._save()
+        loop.start()
+        return {"ok": True, "message": msg}
 
     # ---------- Armoury Crate ----------
     # The record (start types + running services before Overdrive stopped anything) is what armoury_restore puts

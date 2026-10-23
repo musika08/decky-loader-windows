@@ -547,9 +547,11 @@ def test_get_sensors(tmp_path):
         return await p.get_sensors(), await p.get_sensors()
     first, second = run(go())
     assert first == {"ok": True, "message": "", "cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "gpuTempC": 49,
-                     "cpuUse": None, "gpuUse": 62, "cpuPowerW": 8, "gpuPowerW": 6, "errors": []}
+                     "cpuUse": None, "gpuUse": 62, "cpuPowerW": 8, "gpuPowerW": 6, "errors": [],
+                     "autoTdp": {"on": False, "watts": None, "fps": None, "best": None, "paused": "",
+                                 "supported": True}}
     assert list(first) == ["ok", "message", "cpuTempC", "fanRpm", "gpuFanRpm", "gpuTempC", "cpuUse", "gpuUse",
-                           "cpuPowerW", "gpuPowerW", "errors"]
+                           "cpuPowerW", "gpuPowerW", "errors", "autoTdp"]
     assert second["cpuUse"] == 75          # 200 of 200 total busy minus 50 idle -> 150/200
 
 
@@ -894,4 +896,212 @@ def test_recommended_preset_writes_one_curve_to_both_fans(tmp_path):
         assert (s.fan_preset, s.fan_curve) == ("custom", RECOMMENDED)
         assert (await p.set_fan_preset("loud"))["message"] == \
             "Fan preset must be default, recommended, quiet, cool or custom."
+    run(go())
+
+
+# ---------- Auto TDP (task 5) ----------
+
+UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer."
+STOPPED_STATUS = {"on": False, "watts": None, "fps": None, "best": None, "paused": "", "supported": False}
+
+
+def wait(coro, secs=2.0):
+    """A deadlock on the reapplier's lock fails the test instead of hanging it."""
+    return asyncio.wait_for(coro, secs)
+
+
+def loop_task_writing(loop, rp, watts):
+    """The loop's own task is in the middle of a set_power write (as when it decided on new watts)."""
+    loop._task.cancel()
+    loop._task = asyncio.ensure_future(loop._write(watts, loop._epoch, (rp.generation, rp.applies)))
+    return loop._task
+
+
+def blocked_power(c):
+    """set_power never answers: a loop write holds the reapplier's lock until it is cancelled."""
+    entered = asyncio.Event()
+
+    async def handler(_args):
+        entered.set()
+        await asyncio.Event().wait()
+    c.handlers["set_power"] = handler
+    return entered
+
+
+async def no_frame_metrics(_args):
+    return ok({"supported": False, "fps": None, "gpuPowerW": None, "errors": []})
+
+
+def test_set_auto_tdp_saves_and_starts(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="balanced", fps=60)
+        assert s.user_set is False
+        r = await wait(p.set_auto_tdp(True))
+        assert r["ok"] is True, r
+        saved = Settings.load(s.path)
+        assert (saved.auto_tdp, saved.user_set) == (True, True)       # R9: a user choice, so reapplies run
+        st = p.auto_tdp_loop.status()
+        assert st["on"] is True and st["watts"] == 17                  # starts at the mode's watts
+        assert c.writes() == []                                       # starting writes nothing
+        assert (await wait(p.set_auto_tdp("yes")))["ok"] is False
+        await wait(p.auto_tdp_loop.stop(restore=False))
+    run(go())
+
+
+def test_set_auto_tdp_refuses_like_other_writes(tmp_path):
+    async def go():
+        assert (await main.Plugin().set_auto_tdp(True)) == {"ok": False, "message": main.NOT_ALLY}
+        p, c, s = plugin_with(tmp_path)
+        p._armoury_busy = True
+        assert (await p.set_auto_tdp(True)) == {"ok": False, "message": main.BUSY}
+        p._armoury_busy = False
+        assert s.auto_tdp is False
+        c.handlers["frame_sample"] = no_frame_metrics
+        p.auto_tdp_loop.start()
+        await wait(p.auto_tdp_loop.run_once())                        # the driver has no frame metrics
+        assert p.auto_tdp_loop.status()["supported"] is False
+        r = await wait(p.set_auto_tdp(True))
+        assert r == {"ok": False, "message": UNSUPPORTED}
+        assert Settings.load(s.path).auto_tdp is False
+    run(go())
+
+
+def test_set_auto_tdp_off_restores_mode(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="turbo", auto_tdp=True, user_set=True)
+        loop = p.auto_tdp_loop
+        loop.start()
+        loop.ctl.watts = 20                                           # trimmed by Auto TDP
+        r = await wait(p.set_auto_tdp(False))
+        assert r["ok"] is True, r
+        assert c.writes() == [("set_mode", {"mode": "turbo", "spl": 35, "sppt": 35, "fppt": 35})]
+        assert loop.status()["on"] is False
+        assert Settings.load(s.path).auto_tdp is False
+    run(go())
+
+
+def test_set_auto_tdp_off_while_a_loop_write_holds_the_lock(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True)
+        loop, rp = p.auto_tdp_loop, p.reapplier
+        loop.start()
+        entered = blocked_power(c)
+        write = loop_task_writing(loop, rp, 10)
+        await wait(entered.wait())
+        assert rp.lock.locked()
+        r = await wait(p.set_auto_tdp(False))                        # cancels the write, then restores: no deadlock
+        assert r["ok"] is True, r
+        assert c.writes()[-1] == ("set_mode", {"mode": "silent", "spl": 13, "sppt": 13, "fppt": 13})
+        assert write.done()                                           # stop() cancelled it
+    run(go())
+
+
+def test_mode_change_resets_loop(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="balanced", fps=0, auto_tdp=True, user_set=True)
+        loop = p.auto_tdp_loop
+        loop.start()
+        loop.ctl.watts = 9
+        assert (await wait(p.set_mode("turbo")))["ok"] is True
+        assert (loop.ctl.ceiling, loop.ctl.watts) == (35, 35)
+        loop.ctl.watts = 9
+        assert (await wait(p.set_mode("manual", 22, 25, 30)))["ok"] is True   # the Manual sliders
+        assert (loop.ctl.ceiling, loop.ctl.watts) == (22, 22)
+        loop.ctl.watts = 9
+        assert (await wait(p.set_fps(60)))["ok"] is True
+        assert (loop.ctl.fps_limit, loop.ctl.watts) == (60, 22)
+        loop.ctl.watts = 9
+        assert (await wait(p.set_fan_preset("default")))["ok"] is True   # no device curve known: rewrites the mode
+        assert c.writes()[-1][0] == "set_mode" and loop.ctl.watts == 22
+        # the reapplier's own reapply resets it through on_applied
+        assert p.reapplier.on_applied == loop.reset
+        loop.ctl.watts = 9
+        assert await wait(p.reapplier.apply_all()) is True
+        assert loop.ctl.watts == 22
+        # a refused write leaves it alone
+        loop.ctl.watts = 9
+
+        async def refuse(_args):
+            return fail("refused")
+        c.handlers["set_mode"] = refuse
+        assert (await wait(p.set_mode("turbo")))["ok"] is False
+        assert loop.ctl.watts == 9
+        await wait(loop.stop(restore=False))
+    run(go())
+
+
+def test_reset_defaults_turns_auto_tdp_off(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="turbo", fps=60, auto_tdp=True, user_set=True)
+        loop, rp = p.auto_tdp_loop, p.reapplier
+        loop.start()
+        entered = blocked_power(c)                                    # a loop write is in flight, holding the lock
+        write = loop_task_writing(loop, rp, 20)
+        await wait(entered.wait())
+        r = await wait(p.reset_defaults())
+        assert r["ok"] is True, r
+        # no second restore: only Balanced and FPS off after the interrupted loop write
+        assert [w for w in c.writes() if w[0] != "set_power"] == [
+            ("set_mode", {"mode": "balanced", "spl": 17, "sppt": 17, "fppt": 17}), ("set_fps_limit", {"fps": 0})]
+        assert loop.status()["on"] is False
+        saved = Settings.load(s.path)
+        assert (saved.auto_tdp, saved.mode, saved.fps) == (False, "balanced", 0)
+        assert write.done()                                           # stop() cancelled it
+    run(go())
+
+
+def test_unload_restores_mode_watts(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True)
+        at_stop = []
+
+        async def stop():
+            at_stop.append(list(c.writes()))
+            c.stopped = True
+        c.stop = stop
+        p._startup = asyncio.ensure_future(p._startup_sequence())
+        await wait(p._startup)
+        loop = p.auto_tdp_loop
+        assert loop.status()["on"] is True                            # started at load
+        await wait(p.reapplier.apply_all())                          # a reapply ran
+        await c.call("set_power", {"spl": 9, "sppt": 9, "fppt": 9})   # Auto TDP trimmed the watts
+        await wait(p._unload())
+        assert c.stopped and at_stop
+        assert at_stop[0][-1] == ("set_mode", {"mode": "silent", "spl": 13, "sppt": 13, "fppt": 13})
+        assert loop.status()["on"] is False and p.reapplier._task is None
+    run(go())
+
+
+def test_unload_without_auto_tdp_writes_nothing_more(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, mode="silent")
+        p._startup = asyncio.ensure_future(p._startup_sequence())
+        await wait(p._startup)
+        assert p.auto_tdp_loop.status()["on"] is False
+        await wait(p.reapplier.apply_all())
+        before = list(c.writes())
+        await wait(p._unload())
+        assert c.writes() == before and c.stopped
+    run(go())
+
+
+def test_state_and_sensors_report_auto_tdp(tmp_path, monkeypatch):
+    monkeypatch.setattr(main.device, "product_name", lambda read_product=None: "ROG Ally RC71L")
+
+    async def go():
+        bare = main.Plugin()
+        assert (await bare.get_state())["auto_tdp"] == {"on": False, "supported": False}
+        assert (await bare.get_sensors())["autoTdp"] == STOPPED_STATUS
+
+        p, c, s = plugin_with(tmp_path, auto_tdp=True, user_set=True)
+        assert (await p.get_state())["auto_tdp"] == {"on": True, "supported": True}
+        p.auto_tdp_loop.start()
+        sensors = await p.get_sensors()
+        assert sensors["autoTdp"] == p.auto_tdp_loop.status()
+        assert sensors["autoTdp"]["on"] is True and sensors["autoTdp"]["watts"] == 17
+        c.handlers["frame_sample"] = no_frame_metrics
+        await wait(p.auto_tdp_loop.run_once())
+        # R8: the stored switch stays on; the panel shows why from the sensors
+        assert (await p.get_state())["auto_tdp"] == {"on": True, "supported": False}
+        assert (await p.get_sensors())["autoTdp"]["supported"] is False
     run(go())
