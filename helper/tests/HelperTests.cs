@@ -671,7 +671,8 @@ namespace Overdrive.Helper.Tests
             Equal(60, control.Ac, "AC value");
             Equal(60, control.Dc, "DC value (G-Helper sets both)");
             Equal(60, adl.GetFpsLimit(), "get returns what was set");
-            Equal(0, adl.SetFpsLimit(0) - 1, "0 (off) accepted");
+            Equal(1, adl.SetFpsLimit(0), "0 (off) accepted");
+            Equal(240, control.Ac, "off is written as G-Helper's 240");
             Equal(0, adl.GetFpsLimit(), "off reads back 0");
             True(adl.Unavailable == null, "available");
             Equal(1, created, "ADL set up once and reused");
@@ -683,6 +684,39 @@ namespace Overdrive.Helper.Tests
             var core = new HelperCore(new FakeAcpi(), new AdlHardware(() => new FakeFpsControl()), new FakeServices(), true);
             True(core.HandleLine("{\"id\":3,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":90}}").Contains("\"ok\":true"), "protocol set via AdlHardware");
             True(core.HandleLine("{\"id\":4,\"cmd\":\"get_fps_limit\"}").Contains("\"fps\":90"), "protocol get via AdlHardware");
+        }
+
+        // G-Helper app/Ally/AllyControl.cs ToggleFPSLimit: OFF is written as 240 (`case 120: fpsLimit = 240`) and
+        // any value outside 1..120 is shown as "OFF" (`(fpsLimit > 0 && fpsLimit <= 120) ? fpsLimit : "OFF"`).
+        public static void Fps_OffFollowsGHelper()
+        {
+            var control = new FakeFpsControl();
+            var adl = new AdlHardware(() => control);
+            Equal(1, adl.SetFpsLimit(0), "off accepted");
+            Equal(240, control.Ac, "AC off written as 240");
+            Equal(240, control.Dc, "DC off written as 240");
+            foreach (int f in new[] { 30, 40, 45, 50, 60, 75, 90, 120 })
+            {
+                adl.SetFpsLimit(f);
+                Equal(f, control.Ac, f + " written as is");
+            }
+            control.Ac = 240; Equal(0, adl.GetFpsLimit(), "read 240 -> 0 (off)");
+            control.Ac = 0; Equal(0, adl.GetFpsLimit(), "read 0 -> 0");
+            control.Ac = 60; Equal(60, adl.GetFpsLimit(), "read 60 -> 60");
+            control.Ac = 1; Equal(1, adl.GetFpsLimit(), "read 1 -> 1 (inside 1..120)");
+            control.Ac = 120; Equal(120, adl.GetFpsLimit(), "read 120 -> 120");
+            control.Ac = 121; Equal(0, adl.GetFpsLimit(), "read 121 -> 0");
+            control.Ac = 144; Equal(0, adl.GetFpsLimit(), "read 144 -> 0");
+            Equal(240, AdlHardware.ToDriver(0), "ToDriver(0)");
+            Equal(0, AdlHardware.FromDriver(-1), "FromDriver(-1) -> 0");
+
+            // Through the protocol: set 0 writes 240, get after an external 240 reports 0.
+            control = new FakeFpsControl();
+            var core = new HelperCore(new FakeAcpi(), new AdlHardware(() => control), new FakeServices(), true);
+            True(core.HandleLine("{\"id\":1,\"cmd\":\"set_fps_limit\",\"args\":{\"fps\":0}}").Contains("\"ok\":true"), "set 0 ok");
+            Equal(240, control.Ac, "protocol off -> 240");
+            True(core.HandleLine("{\"id\":2,\"cmd\":\"get_fps_limit\"}").Contains("\"fps\":0"), "get reports 0");
+            True(core.HandleLine("{\"id\":3,\"cmd\":\"status\"}").Contains("\"fpsLimit\":0"), "status reports 0");
         }
 
         public static void Adl_Missing_ReturnsClearError()

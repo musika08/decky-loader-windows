@@ -471,6 +471,10 @@ namespace Overdrive.Helper
 
         // Runs the steps in order. On the first failure, every step done so far (the failed one included, as it may
         // have half-happened) is undone in reverse: back to its start type in `before`, and running only if it was.
+        // Only the listed services this call changed are put back: a dependent service that ServiceController.Stop
+        // stopped alongside one of them is not restarted (same as G-Helper, whose Stop-Service -Force does the same).
+        // Worst case duration: up to 30 s per stop/start (ServiceHardware.Wait), times the services changed, and the
+        // same again for a rollback; dependents add their own stop time.
         // data gets "failed" and "rolledBack"; err names the service and lists any rollback that also failed.
         private bool ApplyServiceSteps(List<ServiceStep> steps, Dictionary<string, string> before, List<string> wasRunning,
             string what, Dictionary<string, object> data, out string err)

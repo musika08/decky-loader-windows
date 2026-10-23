@@ -47,6 +47,8 @@ namespace Overdrive.Helper
         }
 
         // Stop (dependent services too, like Stop-Service -Force), then set the start type: G-Helper's order.
+        // Dependents stopped alongside a listed service are not restarted by Protocol's rollback, which only puts back
+        // the listed services it changed (G-Helper never restarts them either).
         public void Stop(string name, string startType)
         {
             Check(name, startType);
@@ -129,7 +131,6 @@ namespace Overdrive.Helper
         }
 
         private const uint SC_MANAGER_CONNECT = 0x0001;
-        private const uint SERVICE_QUERY_CONFIG = 0x0001;
         private const uint SERVICE_CHANGE_CONFIG = 0x0002;
         private const uint SERVICE_NO_CHANGE = 0xFFFFFFFF;
         private const uint SERVICE_AUTO_START = 0x00000002;
@@ -178,7 +179,7 @@ namespace Overdrive.Helper
             if (scm == IntPtr.Zero) throw Win32("open the service manager");
             try
             {
-                IntPtr svc = OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG | SERVICE_QUERY_CONFIG);
+                IntPtr svc = OpenServiceW(scm, name, SERVICE_CHANGE_CONFIG);
                 if (svc == IntPtr.Zero) throw Win32("open " + name);
                 try
                 {

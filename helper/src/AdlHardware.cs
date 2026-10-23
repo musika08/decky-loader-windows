@@ -16,8 +16,21 @@ namespace Overdrive.Helper
 
     // The real IAdl. ADL is set up on first use (not at helper start) and kept for the life of the process; a
     // set-up that failed is retried on the next call, so a driver that comes up late is picked up.
+    //
+    // "Off" follows G-Helper (app/Ally/AllyControl.cs ToggleFPSLimit and its toast, commit in helper\GHELPER_COMMIT):
+    // G-Helper never writes 0; its OFF is 240 (`case 120: fpsLimit = 240`), and any value outside 1..120 shows as
+    // "OFF" (`(fpsLimit > 0 && fpsLimit <= 120) ? fpsLimit : "OFF"`). So the protocol's 0 is written as 240, and a
+    // read outside 1..120 (240, 0, anything else) is reported as 0.
     public class AdlHardware : IAdl, IDisposable
     {
+        public const int GHelperFpsOff = 240;
+
+        // Protocol value -> value written to the driver.
+        public static int ToDriver(int fps) { return fps == 0 ? GHelperFpsOff : fps; }
+
+        // Driver value -> protocol value (0 = off).
+        public static int FromDriver(int value) { return (value > 0 && value <= 120) ? value : 0; }
+
         private readonly Func<IFpsControl> factory;
         private IFpsControl control;
         private string unavailable;
@@ -37,13 +50,13 @@ namespace Overdrive.Helper
             if (!Ready()) return -1;
             int v = control.GetFPSLimit();
             unavailable = v < 0 ? "the graphics driver did not report its frame rate target" : null;
-            return v < 0 ? -1 : v;
+            return v < 0 ? -1 : FromDriver(v);
         }
 
         public int SetFpsLimit(int fps)
         {
             if (!Ready()) return -1;
-            int r = control.SetFPSLimit(fps);
+            int r = control.SetFPSLimit(ToDriver(fps));
             unavailable = r == -1 ? "the graphics driver's frame rate target control is not available" : null;
             return r;
         }
