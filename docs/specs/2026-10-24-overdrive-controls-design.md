@@ -1,4 +1,4 @@
-# Overdrive: CPU Boost, power mode, controller mode, grip vibration, touchscreen
+# Overdrive: CPU Boost, power mode, controller mode, grip vibration, touchscreen, Auto SR
 
 Date: 2026-10-24. Status: design approved in conversation; awaiting owner review of this written spec.
 Builds on `2026-10-23-overdrive-stage1-design.md` (helper, settings, reapply) and the Auto TDP work
@@ -6,7 +6,7 @@ Builds on `2026-10-23-overdrive-stage1-design.md` (helper, settings, reapply) an
 
 ## 1. Purpose
 
-Five controls the owner asked for, all in the Overdrive plugin:
+Six controls the owner asked for, all in the Overdrive plugin:
 - **Performance section:**
   - CPU Boost on/off.
   - Battery performance (Eco / Balanced / Best performance).
@@ -14,6 +14,7 @@ Five controls the owner asked for, all in the Overdrive plugin:
   - Controller mode (Gamepad / Desktop / Auto).
   - Grip vibration on/off.
   - Touchscreen on/off.
+  - Auto SR on/off (added by the owner later the same day).
 
 Owner decisions (2026-10-24):
 - Touchscreen, controller mode and grip vibration live in Overdrive, not Control Center. Overdrive's helper already
@@ -112,6 +113,26 @@ Source: G-Helper at the pinned commit `c09017453d9ed0c52261b67a48d02bd55232e6ac`
 - No device found: the toggle is hidden.
 - Description: "Turns the touch screen off, e.g. to avoid stray touches."
 
+### 3.6 Auto SR (Controller & screen section)
+
+- Toggle "Auto SR", single press, showing the live value. It is Windows' global "Automatic super resolution" switch
+  (Settings > System > Display > Graphics); the per-game "Always use with this game" stays in Game Bar.
+- **Storage (third-party guides, not Microsoft docs):** `HKCU\Software\Microsoft\DirectX\UserGpuPreferences`, REG_SZ
+  `DirectXUserGlobalSettings`, a `;`-separated list of `Name=Value;` pairs. `DXGIEffects=1028` = on,
+  `DXGIEffects=1024` = off.
+  - Owner's Ally on 2026-10-24: `VRROptimizeEnable=1;DXGIEffects=1028;SwapEffectUpgradeEnable=1;AutoHDREnable=0;`.
+  - Before building, the mapping is confirmed live: flip the switch in Windows Settings and read the value back.
+- **Write:** only the `DXGIEffects` pair is replaced (or appended when missing). Every other pair is kept as is, in
+  order. Any value other than 1024/1028 shows as "Set in Windows" and is only replaced when the owner presses the
+  toggle.
+- **User hive:** the value is written under the signed-in user's HKCU, not the helper's own account. If the helper
+  runs as another account (e.g. SYSTEM), it writes `HKEY_USERS\<signed-in user SID>`; the plan confirms which
+  account the helper runs as.
+- **Takes effect:** for games started after the change (a game already running keeps its state).
+- Not saved by Overdrive (Windows keeps it). Hidden when the Auto SR package `Microsoft.AutoSuperResolution2` is not
+  installed.
+- Description: "Windows Automatic Super Resolution for games started from now on (per-game choice stays in Game Bar)."
+
 ## 4. Why Auto differs from G-Helper
 
 G-Helper's Auto is Gamepad when a game draws frames with GPU use over 15 %, else Mouse. In Desktop (Mouse) mode the
@@ -141,6 +162,8 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
   - PowerShell `Get-PnpDevice` / `Enable-PnpDevice` / `Disable-PnpDevice`, as G-Helper. `set_touchscreen` starts
     the command without waiting; the process is killed after 15 s if still running; `get_touchscreen` waits at most
     5 s.
+- `get_auto_sr` -> `{installed: bool, value: int|null}`; `set_auto_sr {on: bool}`: reads/writes the
+  `DXGIEffects` pair as in 3.6, keeping all other pairs.
 - `foreground` -> `{exe: string}`: the process name of the foreground window (`GetForegroundWindow`,
   `GetWindowThreadProcessId`, `QueryFullProcessImageName`). Read only. Used by Auto controller mode.
 
@@ -162,7 +185,8 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
   - `power_mode {value: "eco"|"balanced"|"best"|"other", supported}`;
   - `controller {mode, found}`;
   - `grip_vibration`;
-  - `touchscreen {found, enabled}`.
+  - `touchscreen {found, enabled}`;
+  - `auto_sr {installed, on}` (`on` null when the value is neither 1024 nor 1028).
 
 ### 5.3 Panel
 
@@ -170,7 +194,8 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
 - **New section "Controller & screen":**
   - the Controller mode picker, with its per-choice description;
   - the Grip vibration toggle, hidden when no controller is found;
-  - the Touchscreen toggle, hidden when no touchscreen is found.
+  - the Touchscreen toggle, hidden when no touchscreen is found;
+  - the Auto SR toggle, hidden when the Auto SR package is not installed.
 - Toggles follow the Armoury/Auto TDP pattern (fed the stored or live state, single press, fall back on failure).
 
 ## 6. Errors
@@ -203,6 +228,8 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
   - Grip vibration off: a game's rumble stops (owner check by hand). On: it returns.
   - Touchscreen off: touches do nothing. On: they work again.
   - Decky restart while in Desktop leaves the controller in Gamepad.
+  - Auto SR off/on: Windows Settings > Graphics shows the same state, other DirectXUserGlobalSettings pairs are
+    unchanged, and a DirectX 11/12 game started afterwards follows it.
 
 ## 8. Review focus
 
