@@ -78,7 +78,8 @@ Source: G-Helper at the pinned commit `c09017453d9ed0c52261b67a48d02bd55232e6ac`
   (VID 0x0B05, PID in G-Helper's list; 0x1B4C here).
 - **Auto (Overdrive's own rule):** Gamepad when the foreground window belongs to Steam (steam.exe or
   steamwebhelper.exe) or to a process drawing frames (`frame_sample` fps > 0); Desktop when any other app is in front
-  (e.g. a browser or File Explorer).
+  (e.g. a browser or File Explorer) and the frame reading is valid and exactly 0. An unknown frame rate (a failed
+  reply, no AMD reading, a non-finite value) decides Gamepad.
   - The decision is made every 300 ms and switches after 3 equal decisions in a row (about 1 s), as G-Helper's
     `_autoCount == 3`.
   - Only a change is written.

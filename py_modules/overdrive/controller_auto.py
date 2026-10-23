@@ -2,12 +2,13 @@
 docs/specs/2026-10-24-overdrive-controls-design.md sections 3.3, 4 and 5.2.
 
 - Gamepad when the foreground exe is steam.exe or steamwebhelper.exe (Steam, its overlay and its keyboard), when no
-  window is in front (""), or when a process draws frames (fps > 0). Desktop otherwise. Steam Big Picture can only be
-  steered with a gamepad, so every doubt decides Gamepad.
+  window is in front (""), when a process draws frames (fps > 0), or when the frame rate is unknown (a failed reply,
+  no AMD reading, a non-finite value). Desktop only for another app in front with a valid reading of exactly 0 fps.
+  Steam Big Picture can only be steered with a gamepad, so every doubt decides Gamepad.
 - Decided every 300 ms; switches after 3 equal decisions in a row (G-Helper's _autoCount == 3); only a change is
   written. The written state starts unknown, so the first streak of 3 always writes.
 - One sampler, two consumers: Auto TDP's last frame sample is used when it is younger than 0.6 s, otherwise this loop
-  asks frame_sample itself. A failed or non-finite reading counts as fps 0.
+  asks frame_sample itself. A failed, unsupported or non-finite reading is unknown (None): Gamepad.
 - Nothing is asked or written while an Armoury Crate switch runs. Writes take the reapplier's lock; they are not user
   changes (no generation bump, nothing saved). Never call stop() from inside reapplier.user_change(): it takes the
   same (non-reentrant) lock.
@@ -93,18 +94,21 @@ class ControllerAuto:
         exe = (exe or "").strip().lower()
         if exe == "" or exe in STEAM_EXES:
             return GAMEPAD
-        if _finite(fps) and fps > 0:
-            return GAMEPAD
-        return DESKTOP
+        if _finite(fps) and fps == 0:
+            return DESKTOP   # another app in front and a valid reading of no frames
+        return GAMEPAD       # frames drawn, or the frame rate is unknown: every doubt decides Gamepad
 
-    async def _fps(self) -> float:
+    async def _fps(self) -> Optional[float]:
+        """The frame rate, or None when it is unknown (failed reply, unsupported, not finite)."""
         sample = getattr(self.autotdp, "last_sample", None) if self.autotdp is not None else None
         if sample is not None and self.clock.monotonic() - sample[1] < FRESH:
-            return sample[0] if _finite(sample[0]) else 0.0
+            return float(sample[0]) if _finite(sample[0]) else None
         r = await self.client.call("frame_sample", {}, SAMPLE_TIMEOUT)
-        data = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
+        data = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else None
+        if data is None or data.get("supported") is False:
+            return None
         fps = data.get("fps")
-        return float(fps) if _finite(fps) else 0.0
+        return float(fps) if _finite(fps) else None
 
     async def run_once(self) -> None:
         """One decision and, after 3 equal decisions in a row that differ from the written mode, one write."""

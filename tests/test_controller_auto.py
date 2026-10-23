@@ -66,8 +66,10 @@ def test_decide_rules(tmp_path):
     assert ca.decide("SteamWebHelper.EXE", 0.0) == "gamepad"
     assert ca.decide("game.exe", 60.0) == "gamepad"
     assert ca.decide("msedge.exe", 0.0) == "desktop"
-    assert ca.decide("msedge.exe", None) == "desktop"
-    assert ca.decide("msedge.exe", float("nan")) == "desktop"
+    assert ca.decide("msedge.exe", None) == "gamepad"          # unknown frame rate: every doubt decides Gamepad
+    assert ca.decide("msedge.exe", float("nan")) == "gamepad"
+    assert ca.decide("msedge.exe", float("inf")) == "gamepad"
+    assert ca.decide("game.exe", None) == "gamepad"
     assert ca.decide("", 0.0) == "gamepad"   # no window (lock screen): safe default
 
 
@@ -120,18 +122,49 @@ def test_auto_steam_overlay_keeps_gamepad(tmp_path):
     run(go())
 
 
-def test_failed_reading_counts_as_zero_fps(tmp_path):
-    async def go():
-        c, _, ca, _ = setup(tmp_path)
-        ca.start()
-        front(c, ["game.exe"])
+def test_unknown_frame_rate_decides_gamepad(tmp_path):
+    replies = {
+        "fps None": ok({"supported": True, "fps": None, "gpuPowerW": None, "errors": ["no reading"]}),
+        "failed reply": fail("Overdrive helper did not answer in time."),
+        "supported false": ok({"supported": False, "fps": None, "gpuPowerW": None, "errors": []}),
+        "supported false with 0": ok({"supported": False, "fps": 0.0, "gpuPowerW": None, "errors": []}),
+        "not finite": ok({"supported": True, "fps": float("inf"), "gpuPowerW": 5, "errors": []}),
+    }
+    for what, rep in replies.items():
+        async def go():
+            c, _, ca, _ = setup(tmp_path)
+            ca.start()
+            front(c, ["game.exe"])
 
-        async def bad(_args):
-            return ok({"supported": True, "fps": float("inf"), "gpuPowerW": 5, "errors": []})
-        c.handlers["frame_sample"] = bad
+            async def handler(_args):
+                return rep
+            c.handlers["frame_sample"] = handler
+            for _ in range(6):
+                await ca.run_once()
+            assert mode_writes(c) == ["gamepad"], what
+            await ca.stop()
+        run(go())
+
+
+def test_valid_zero_fps_with_another_app_decides_desktop(tmp_path):
+    async def go():
+        tdp = FakeTdp()
+        c, _, ca, clock = setup(tmp_path, autotdp=tdp)
+        ca.start()
+        front(c, ["msedge.exe"])
+        frames(c, 0.0)
         for _ in range(3):
             await ca.run_once()
         assert mode_writes(c) == ["desktop"]
+        # Auto TDP's fresh sample: a non-finite value is unknown (Gamepad), a valid 0 is Desktop.
+        tdp.last_sample = (float("nan"), clock.mono)
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["desktop", "gamepad"]
+        tdp.last_sample = (0.0, clock.mono)
+        for _ in range(3):
+            await ca.run_once()
+        assert mode_writes(c) == ["desktop", "gamepad", "desktop"]
         await ca.stop()
     run(go())
 
