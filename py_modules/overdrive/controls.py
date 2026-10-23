@@ -10,6 +10,7 @@ at once (the change lands later), so the cache is updated with the requested val
 import time
 from typing import Optional
 
+from .helper_client import RESTARTED
 from .settings import CONTROLLER_MODES, Settings
 
 TOUCH_TTL = 30.0
@@ -22,6 +23,15 @@ _touch = {"at": None, "value": None}
 def reset_cache() -> None:
     _touch["at"] = None
     _touch["value"] = None
+
+
+def transport_failure(reply: dict) -> bool:
+    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal."""
+    if reply.get("ok"):
+        return False
+    msg = str(reply.get("message") or "")
+    return (msg == RESTARTED or msg.startswith("Overdrive helper did not answer")
+            or msg.startswith("Overdrive helper is not running"))
 
 
 def _result(ok: bool, message: str = "", **extra) -> dict:
@@ -140,6 +150,8 @@ async def apply_controller(client, settings: Settings, mode: Optional[str] = Non
     r = await client.call("set_controller_mode", {"mode": "desktop" if mode == "desktop" else "gamepad"})
     if not r.get("ok"):
         problems.append(_msg(r, "The controller mode was not applied."))
+        if transport_failure(r):   # the helper is gone: the vibration write would only fail the same way
+            return _result(False, " ".join(problems), mode=mode)
     r = await client.call("set_vibration", {"strength": 100 if settings.grip_vibration else 0})
     if not r.get("ok"):
         problems.append(_msg(r, "The grip vibration was not applied."))

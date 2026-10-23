@@ -15,22 +15,12 @@ import logging
 import time
 from typing import Callable, Optional
 
-from .controls import apply_controller
-from .helper_client import RESTARTED
+from .controls import apply_controller, transport_failure
 from .settings import CURVE_MODES, FANS, MODE_POWER, Settings, curve_mode, preset_curve
 
 POLL = 5.0
 RESUME_GAP = 30.0
 TRANSPORT_RETRIES = 3   # reapplies that hit a helper restart/timeout are retried at the next poll, at most this often
-
-
-def transport_failure(reply: dict) -> bool:
-    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal."""
-    if reply.get("ok"):
-        return False
-    msg = str(reply.get("message") or "")
-    return (msg == RESTARTED or msg.startswith("Overdrive helper did not answer")
-            or msg.startswith("Overdrive helper is not running"))
 
 
 def ac_online_win32() -> Optional[bool]:
@@ -152,9 +142,12 @@ class _StepClient:
 
     def __init__(self, reapplier: "Reapplier", gen: int):
         self._r, self._gen = reapplier, gen
+        self.transport = False   # any reply failed on the way (helper restart, timeout)
 
     async def call(self, cmd: str, args: Optional[dict] = None, timeout: float = 10.0) -> dict:
-        return await self._r._step(self._gen, cmd, args or {})
+        r = await self._r._step(self._gen, cmd, args or {})
+        self.transport |= transport_failure(r)
+        return r
 
 
 class Reapplier:
@@ -295,8 +288,9 @@ class Reapplier:
             transport |= transport_failure(info)
             data = info.get("data") if info.get("ok") else None
             if isinstance(data, dict) and data.get("found"):
-                r = await apply_controller(_StepClient(self, gen), s)
-                transport |= transport_failure(r)
+                step_client = _StepClient(self, gen)
+                r = await apply_controller(step_client, s)
+                transport |= step_client.transport
                 if not r.get("ok"):
                     problems.append(r.get("message") or "The controller settings were not applied.")
         except Dropped:

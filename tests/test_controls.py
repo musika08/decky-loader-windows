@@ -66,9 +66,11 @@ def test_cpu_boost_failures_are_reported(tmp_path):
         c.handlers["set_cpu_boost"] = handler(fail("nope"))
         r = await controls.set_cpu_boost(c, settings(tmp_path), True)
         assert r == {"ok": False, "message": "nope"}
+        c.calls.clear()
         c.handlers["get_cpu_boost"] = handler(fail("no power api"))
         r = await controls.set_cpu_boost(c, settings(tmp_path), False)
         assert not r["ok"] and r["message"]
+        assert c.writes() == []
     run(go())
 
 
@@ -188,4 +190,16 @@ def test_apply_controller_reports_each_failure(tmp_path):
         r = await controls.apply_controller(c, settings(tmp_path))
         assert not r["ok"] and "mode refused" in r["message"]
         assert ("set_vibration", {"strength": 100}) in c.writes()   # still tried
+    run(go())
+
+
+def test_apply_controller_stops_after_transport_failure(tmp_path):
+    from overdrive.helper_client import RESTARTED
+
+    async def go():
+        c = FakeClient()
+        c.handlers["set_controller_mode"] = handler(fail(RESTARTED))
+        r = await controls.apply_controller(c, settings(tmp_path))
+        assert not r["ok"] and r["message"] == RESTARTED
+        assert [x[0] for x in c.calls] == ["set_controller_mode"]
     run(go())

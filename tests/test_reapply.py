@@ -534,3 +534,21 @@ def test_user_change_drops_controller_step(tmp_path):
         assert not any(cmd in ("set_controller_mode", "set_vibration") for cmd, _ in c.calls)
         assert r.rerun is True
     run(go())
+
+
+def test_controller_restart_schedules_retry(tmp_path):
+    from overdrive.helper_client import RESTARTED
+
+    async def go():
+        c = _controller_client()
+
+        async def restarted(args):
+            return {"id": 1, "ok": False, "message": RESTARTED, "data": None}
+        c.handlers["set_controller_mode"] = restarted
+        c.handlers["set_vibration"] = restarted
+        r = Reapplier(c, make(tmp_path), clock=Clock(), power_source=Power())
+        await r.apply_all()
+        assert r.rerun is True
+        assert r.warning.count(RESTARTED) == 1          # stopped after the first transport failure
+        assert not any(cmd == "set_vibration" for cmd, _ in c.calls)
+    run(go())
