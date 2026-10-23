@@ -51,6 +51,11 @@ class ControllerAuto:
 
     # ---------- control ----------
 
+    @property
+    def running(self) -> bool:
+        """True from start() until stop()."""
+        return self._on
+
     def start(self) -> None:
         if self._on:
             return

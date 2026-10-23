@@ -1281,6 +1281,36 @@ def test_startup_starts_controller_auto_when_mode_is_auto(tmp_path):
     run(go())
 
 
+def test_load_turns_stored_desktop_into_gamepad(tmp_path):
+    async def go():
+        # C7: Desktop does not survive a plugin load (Decky restart, boot).
+        p, c, s = plugin_with(tmp_path, controller_mode="desktop", user_set=True)
+        controller_found(c)
+        p._startup = asyncio.ensure_future(p._startup_sequence())
+        await wait(p._startup)
+        assert s.controller_mode == "gamepad"                 # changed before the first reapply
+        assert Settings.load(s.path).controller_mode == "gamepad"   # and saved: the panel shows Gamepad
+        await wait(p.reapplier.apply_all())
+        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
+        assert modes and set(modes) == {"gamepad"}
+        assert p.controller_auto.running is False
+        # Within the session a chosen Desktop is reapplied (resume, AC change) as before.
+        assert (await wait(p.set_controller_mode("desktop")))["ok"] is True
+        n = len(c.writes())
+        assert await wait(p.reapplier.apply_all()) is True
+        modes = [a["mode"] for cmd, a in c.writes()[n:] if cmd == "set_controller_mode"]
+        assert modes == ["desktop"]
+        await wait(p._unload())
+        # "auto" and "gamepad" are left as stored
+        for mode in ("auto", "gamepad"):
+            p2, c2, s2 = plugin_with(tmp_path, controller_mode=mode, user_set=True)
+            p2._startup = asyncio.ensure_future(p2._startup_sequence())
+            await wait(p2._startup)
+            assert s2.controller_mode == mode
+            await wait(p2._unload())
+    run(go())
+
+
 def test_unload_writes_gamepad_first(tmp_path):
     async def go():
         p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True, controller_mode="auto")

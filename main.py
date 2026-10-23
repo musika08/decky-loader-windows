@@ -114,7 +114,19 @@ class Plugin:
         self._startup = asyncio.ensure_future(self._startup_sequence())
         decky.logger.info("Overdrive started")
 
+    def _desktop_not_kept_on_load(self) -> None:
+        """C7: Desktop does not survive a plugin load. A stored Desktop becomes Gamepad (and is saved) before the
+        first reapply, so the device and the panel agree on Gamepad after a Decky restart or a boot. Within a running
+        session the reapplies (resume, AC change, helper restart) keep writing Desktop."""
+        s = self.settings
+        if s is None or s.controller_mode != "desktop":
+            return
+        s.controller_mode = "gamepad"
+        decky.logger.info("Controller mode Desktop is not kept across a plugin load: Gamepad")
+        self._save()
+
     async def _startup_sequence(self) -> None:
+        self._desktop_not_kept_on_load()
         if self.settings.armoury_replaced:
             await self._restop_on_load()
         elif self.settings.armoury_recorded:

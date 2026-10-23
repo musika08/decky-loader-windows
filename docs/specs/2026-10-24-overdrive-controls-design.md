@@ -84,6 +84,10 @@ Source: G-Helper at the pinned commit `c09017453d9ed0c52261b67a48d02bd55232e6ac`
   - Only a change is written.
 - **Saved:** `controller_mode` ("gamepad" | "desktop" | "auto", default "gamepad"). Reapplied at start and after
   resume, AC change or a helper restart (the controller forgets after sleep).
+  - Desktop does not survive a plugin load (ruling C7): at load, before the first reapply, a stored "desktop" is
+    changed to "gamepad" and saved, so after a Decky restart or a boot the panel and the controller both show
+    Gamepad. Within a running session, reapplies (resume, AC change, helper restart) keep writing Desktop. "auto" is
+    kept (it starts as Gamepad anyway).
 - **Safety:** when Overdrive stops (unload, Decky restart) the controller is set to Gamepad before the helper stops,
   so Big Picture is never left with a mouse-only controller.
   - The mode is not changed while an Armoury Crate switch is in progress.
@@ -227,7 +231,7 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
   - Auto: switching to a browser gives Desktop; back to Steam gives Gamepad within about 1 s.
   - Grip vibration off: a game's rumble stops (owner check by hand). On: it returns.
   - Touchscreen off: touches do nothing. On: they work again.
-  - Decky restart while in Desktop leaves the controller in Gamepad.
+  - Decky restart while in Desktop leaves the controller in Gamepad, and the panel shows Gamepad after the restart.
   - Auto SR off/on: Windows Settings > Graphics shows the same state, other DirectXUserGlobalSettings pairs are
     unchanged, and a DirectX 11/12 game started afterwards follows it.
 
