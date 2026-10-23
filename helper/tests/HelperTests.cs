@@ -725,6 +725,11 @@ namespace Overdrive.Helper.Tests
             Equal(49, st["gpuTempC"], "status gpuTempC");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get "), "reads only: " + c);
             True(rig.Adl.Sets.Count == 0, "no ADL writes");
+
+            rig.Adl.Gpu = new GpuSensors { TempC = 54, Use = 10, GfxPowerW = 5, CpuPowerW = 0 };   // the Ally's driver
+            var z = (Dictionary<string, object>)rig.Send("{\"id\":3,\"cmd\":\"sensors\"}")["data"];
+            True(z["cpuPowerW"] == null, "0 W cpu power is not reported");
+            Equal(5, z["gpuPowerW"], "gpu power kept");
         }
 
         public static void GpuSensors_FallBackToAcpiTempGpu()

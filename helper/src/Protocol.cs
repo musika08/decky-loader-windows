@@ -266,8 +266,9 @@ namespace Overdrive.Helper
             }
             d["gpuTempC"] = temp;
             d["gpuUse"] = g != null ? InRange(g.Use, 0, 100) : null;
-            d["cpuPowerW"] = g != null ? InRange(g.CpuPowerW, 0, 1000) : null;
-            d["gpuPowerW"] = g != null ? InRange(g.GfxPowerW, 0, 1000) : null;
+            // A running CPU or GPU never draws 0 W: the Ally's driver leaves cpuPower at 0, so 0 means not reported.
+            d["cpuPowerW"] = g != null ? InRange(g.CpuPowerW, 1, 1000) : null;
+            d["gpuPowerW"] = g != null ? InRange(g.GfxPowerW, 1, 1000) : null;
         }
 
         private static int? InRange(int? v, int lo, int hi)
