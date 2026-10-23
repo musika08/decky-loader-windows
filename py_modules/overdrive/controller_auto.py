@@ -17,12 +17,13 @@ docs/specs/2026-10-24-overdrive-controls-design.md sections 3.3, 4 and 5.2.
 - A write refused with "Controller not found" (no controller attached) is not tried again for NOT_FOUND_RETRY seconds,
   so a missing controller is not searched for (every HID device listed) at every tick.
 - An error inside the loop is logged (once a minute at most), Gamepad is written and the loop goes on.
-- stop() writes Gamepad (or the given fixed mode, when the owner's stored choice is Desktop).
+- stop() writes Gamepad, or Desktop when its optional mode callable (evaluated under the reapplier's lock, so a
+  choice made while stop() waited is honoured) returns Desktop.
 """
 import asyncio
 import logging
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from .auto_tdp import PERIOD
 from .auto_tdp_loop import ERROR_LOG_EVERY, SAMPLE_TIMEOUT, _finite
@@ -73,10 +74,10 @@ class ControllerAuto:
         if self._task is None:
             self._task = asyncio.ensure_future(self._run())
 
-    async def stop(self, mode: str = GAMEPAD) -> None:
+    async def stop(self, mode: Optional[Callable[[], str]] = None) -> None:
         """Ends the loop and writes Gamepad (even while an Armoury switch runs: Big Picture must never be left with a
-        mouse-only controller). `mode` DESKTOP is only passed when the owner's stored choice is Desktop."""
-        mode = DESKTOP if mode == DESKTOP else GAMEPAD
+        mouse-only controller). `mode`, when given, is called inside the reapplier's lock and decides the write:
+        Desktop only when it returns Desktop (the owner's stored choice at that moment), Gamepad otherwise."""
         was_on = self._on
         self._on = False
         task, self._task = self._task, None
@@ -89,7 +90,9 @@ class ControllerAuto:
         if was_on:
             self.log.info("Controller Auto stopped")
         async with self.reapplier.lock:
-            r = await self.client.call("set_controller_mode", {"mode": mode})
+            m = DESKTOP if (mode is not None and mode() == DESKTOP) else GAMEPAD
+            r = await self.client.call("set_controller_mode", {"mode": m})
+        mode = m
         if not r.get("ok"):
             self.log.warning(f"Controller Auto could not put the controller back to {mode}: {r.get('message')}")
         self._written = mode if r.get("ok") else None

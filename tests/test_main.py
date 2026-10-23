@@ -1255,6 +1255,27 @@ def test_concurrent_auto_and_desktop_leave_no_loop_running(tmp_path):
     run(go())
 
 
+def test_concurrent_auto_desktop_gamepad_ends_in_the_last_choice(tmp_path):
+    async def go():
+        # C9: the stray-loop stop decides its write under the lock, so the later Gamepad choice is what stays.
+        p, c, s = plugin_with(tmp_path)
+        controller_found(c)
+        ca = p.controller_auto
+        async with p.reapplier.lock:
+            calls = [asyncio.ensure_future(p.set_controller_mode(m)) for m in ("auto", "desktop", "gamepad")]
+            for _ in range(5):
+                await asyncio.sleep(0)
+        for t in calls:
+            r = await wait(t)
+            assert r["ok"], r
+        assert s.controller_mode == "gamepad" and Settings.load(s.path).controller_mode == "gamepad"
+        assert ca.running is False
+        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
+        assert modes[-1] == "gamepad", modes
+        assert modes.count("desktop") == 1, modes                # Desktop only from the Desktop choice itself
+    run(go())
+
+
 def test_get_state_skips_controls_when_the_helper_does_not_answer(tmp_path):
     async def go():
         p, c, s = plugin_with(tmp_path)

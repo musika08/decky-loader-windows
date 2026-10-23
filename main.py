@@ -535,8 +535,9 @@ class Plugin:
                 ca.start()   # Auto chosen, or a failed change away from Auto: the loop goes on
             elif ca.running:
                 # A concurrent Auto choice started the loop after this call stopped it, then this call stored
-                # Gamepad or Desktop. Stopped here, outside the lock (R10); the stored mode is written again.
-                await ca.stop(s.controller_mode)
+                # Gamepad or Desktop. Stopped here, outside the lock (R10). The mode written is read under the lock
+                # (C9), so a choice made while stop() waited for it is the one written.
+                await ca.stop(lambda: s.controller_mode)
         return result
 
     async def set_grip_vibration(self, on) -> dict:
