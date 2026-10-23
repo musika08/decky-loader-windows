@@ -151,7 +151,7 @@ controller. The owner-approved rule keeps Gamepad whenever Steam is in front.
   - `PowerGetEffectiveOverlayScheme` / `PowerSetActiveOverlayScheme`.
   - Any other GUID is refused.
 - `controller_info` -> `{found: bool, pid: hex, xbox: bool}`.
-- `set_controller_mode {mode: 1|3}`.
+- `set_controller_mode {mode: "gamepad"|"desktop"}` (sent as report mode byte 1 or 3).
 - `set_vibration {strength: 0..100}`.
 - Raw Win32 HID: `SetupDiGetClassDevs` (HID class), `HidD_GetAttributes`, `HidP_GetCaps` / feature report length,
   `HidD_SetFeature`.
