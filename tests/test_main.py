@@ -123,8 +123,8 @@ def test_refused_change_keeps_stored_value(tmp_path):
         assert s.mode == "balanced"
         assert (await p.set_mode("silent", 10, 10, 10))["ok"] is False      # limits only with manual
         assert (await p.set_fps(33))["ok"] is False
-        assert (await p.set_fan_curve([30] * 8, [0] * 8))["message"] == \
-            "Point 2: temperature must be higher than point 1."
+        assert (await p.set_fan_curve([30, 25, 30, 30, 30, 30, 30, 30], [0] * 8))["message"] == \
+            "Point 2: temperature can't be lower than point 1."
         assert all(cmd != "set_fans" for cmd, _ in c.calls)
     run(go())
 
@@ -544,3 +544,124 @@ def _no_real_helper(monkeypatch):
     async def refuse(*a, **k):
         raise AssertionError("tests must not start a process")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", refuse)
+
+
+
+# ---------- final review I1: a switch cut short by Decky's 5 s kill ----------
+
+def test_load_restores_interrupted_switch_and_warns(tmp_path):
+    async def go():
+        c = FakeClient()
+        seen = {}
+
+        async def restore(args):
+            seen["busy"] = (await p.get_state())["busy"]
+            seen["args"] = args
+            return ok({"skipped": []})
+        c.handlers["armoury_restore"] = restore
+        recorded = {"ArmouryCrateSEService": "AutomaticDelayedStart", "LightingService": "Automatic"}
+        p, c, s = plugin_with(tmp_path, client=c, armoury_replaced=False, armoury_recorded=dict(recorded),
+                              armoury_running=["ArmouryCrateSEService"])
+        s.save()
+        await p._startup_sequence()
+        assert [cmd for cmd, _ in c.calls][:2] == ["armoury_state", "armoury_restore"]
+        assert all(cmd != "armoury_stop" for cmd, _ in c.calls)
+        assert seen["busy"] is True
+        assert seen["args"] == {"recorded": recorded, "running": ["ArmouryCrateSEService"]}
+        saved = Settings.load(s.path)
+        assert saved.armoury_recorded == {} and saved.armoury_running == [] and saved.armoury_replaced is False
+        st = await p.get_state()
+        assert st["busy"] is False
+        assert "did not finish, so Armoury Crate was put back" in st["warning"]
+        assert p.reapplier._task is not None
+        await p.reapplier.stop()
+    run(go())
+
+
+def test_load_restore_failure_keeps_record_and_warns(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def restore_fails(args):
+            return fail("Could not start AsusAppService (restore): x. Every service changed so far was put back.")
+        c.handlers["armoury_restore"] = restore_fails
+        recorded = {"ArmouryCrateService": "Automatic"}
+        p, c, s = plugin_with(tmp_path, client=c, armoury_recorded=dict(recorded),
+                              armoury_running=["ArmouryCrateService"])
+        s.save()
+        await p._startup_sequence()
+        assert Settings.load(s.path).armoury_recorded == recorded
+        st = await p.get_state()
+        assert "putting the services back failed" in st["warning"] and "AsusAppService" in st["warning"]
+        assert "Turn the switch on and off again" in st["warning"]
+        await p.reapplier.stop()
+    run(go())
+
+
+def test_load_restore_skipped_when_state_unreadable(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def state_fails(args):
+            return fail("Overdrive helper did not answer in 10 s.")
+        c.handlers["armoury_state"] = state_fails
+        p, c, s = plugin_with(tmp_path, client=c, armoury_recorded={"ArmouryCrateService": "Automatic"})
+        await p._startup_sequence()
+        assert all(cmd != "armoury_restore" for cmd, _ in c.calls)
+        st = await p.get_state()
+        assert "did not finish" in st["warning"] and "did not answer" in st["warning"]
+        await p.reapplier.stop()
+    run(go())
+
+
+def test_load_without_record_touches_no_service(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        await p._startup_sequence()
+        assert all(not cmd.startswith("armoury_") for cmd, _ in c.calls)
+        assert (await p.get_state())["warning"] == ""
+        await p.reapplier.stop()
+    run(go())
+
+
+# ---------- probe follow-ups: read-back mode "other" and power 0 ----------
+
+def test_get_state_reports_device_readback(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def status(args):
+            return ok({"modeRaw": 7, "mode": "other", "spl": 0, "sppt": None, "fppt": 0, "errors": []})
+        c.handlers["status"] = status
+        p, c, s = plugin_with(tmp_path, client=c)
+        st = await p.get_state()
+        assert st["device"] == {"mode": "other", "spl": None, "sppt": None, "fppt": None}
+        assert st["mode"] == "balanced" and st["user_set"] is False and st["power_set"] is False
+        assert c.writes() == []                                   # reading back never writes
+
+        async def status2(args):
+            return ok({"modeRaw": 1, "mode": "turbo", "spl": 25, "sppt": 30, "fppt": 35, "errors": []})
+        c.handlers["status"] = status2
+        assert (await p.get_state())["device"] == {"mode": "turbo", "spl": 25, "sppt": 30, "fppt": 35}
+
+        assert (await p.set_mode("other"))["ok"] is False             # never written back
+        assert all(cmd != "set_mode" for cmd, _ in c.calls)
+        assert (await p.set_mode("manual", 15, 15, 15))["ok"] is True
+        assert (await p.get_state())["power_set"] is True
+    run(go())
+
+
+def test_get_state_skips_readback_while_busy(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        c.armoury_inflight = 1
+        st = await p.get_state()
+        assert st["busy"] is True and st["device"]["mode"] is None
+        assert all(cmd != "status" for cmd, _ in c.calls)
+    run(go())
+
+
+def test_stored_mode_other_is_not_loaded(tmp_path):
+    path = tmp_path / "overdrive.json"
+    path.write_text(json.dumps({"mode": "other"}), encoding="utf-8")
+    assert Settings.load(str(path)).mode == "balanced"

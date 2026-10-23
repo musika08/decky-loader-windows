@@ -9,7 +9,7 @@ exits resolve at once with RESTARTED; a reply that arrives after its call gave u
 
 Hung helper (ruling P11): two calls in a row that time out kill the helper, which then restarts within the same
 budget. Only armoury_stop and armoury_restore are long service calls ("busy"): calls that overlapped one never count,
-the helper is never killed while one is in flight, and after one times out the helper gets a grace period
+this client never kills the helper while one is in flight (Decky still can, see stop()), and after one times out the helper gets a grace period
 (ARMOURY_GRACE) because it may still be finishing the service work. armoury_state is an ordinary read.
 """
 import asyncio
@@ -132,8 +132,11 @@ class HelperClient:
             return
 
     async def stop(self) -> None:
-        # Never cut an armoury_* call short: the helper would die halfway through changing services. Wait for it,
-        # bounded by that call's own timeout. New calls are refused meanwhile.
+        # Try not to cut an armoury_* call short (the helper would die halfway through changing services): wait for
+        # it, bounded by that call's own timeout. New calls are refused meanwhile. On a Decky unload this wait is
+        # really bounded by Decky: it kills the plugin process 5 s after the stop request
+        # (plugin/plugin.py kill_if_still_running), and the helper shares the plugin's KILL_ON_JOB_CLOSE job
+        # (localplatform/winprocess.py _create_job), so both die. main.py repairs that at the next load.
         self._stopping = True
         loop = asyncio.get_running_loop()
         while self._armoury_inflight > 0 and loop.time() < self._armoury_until:

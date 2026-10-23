@@ -31,11 +31,15 @@ export function validateCurve(temps: number[], speeds: number[]): string | null 
     if (speeds[i] < 0 || speeds[i] > CURVE_SPEED_MAX) {
       return 'Point ' + n + ': fan speed must be between 0 and ' + CURVE_SPEED_MAX + ' %.';
     }
-    if (i > 0 && temps[i] <= temps[i - 1]) {
-      return 'Point ' + n + ': temperature must be higher than point ' + i + '.';
+    // Firmware curves repeat their last temperature: non-decreasing temps, one speed per temperature.
+    if (i > 0 && temps[i] < temps[i - 1]) {
+      return 'Point ' + n + ": temperature can't be lower than point " + i + '.';
     }
     if (i > 0 && speeds[i] < speeds[i - 1]) {
       return 'Point ' + n + ": fan speed can't be lower than point " + i + '.';
+    }
+    if (i > 0 && temps[i] === temps[i - 1] && speeds[i] !== speeds[i - 1]) {
+      return 'Point ' + n + ': same temperature as point ' + i + ', so the fan speed must be the same.';
     }
     const min = minSpeedAt(temps[i]);
     if (speeds[i] < min) {
@@ -60,4 +64,29 @@ function show(v: number | null | undefined): string {
 
 export function liveLine(cpuTempC: number | null | undefined, fanRpm: number | null | undefined): string {
   return 'CPU ' + show(cpuTempC) + ' °C · Fan ' + show(fanRpm) + ' RPM';
+}
+
+// ---------- mode and power display (probe follow-ups) ----------
+
+export type DeviceMode = 'silent' | 'balanced' | 'turbo' | 'other' | null;
+export type ShownMode = 'silent' | 'balanced' | 'turbo' | 'manual' | 'other' | null;
+
+// Which mode button the panel highlights. A device mode Overdrive does not set ("other", e.g. Armoury Crate's own)
+// always wins, as nothing else is true then; before the owner changed anything the device's mode is shown (the
+// stored default is only a default); after that the stored mode (Manual reads back as Balanced on the device).
+export function shownMode(stored: string, userSet: boolean | undefined, device: DeviceMode | undefined): ShownMode {
+  if (device === 'other') return 'other';
+  if (userSet === false) return device ?? null;
+  return stored as ShownMode;
+}
+
+export const MODE_OTHER_TEXT = 'Set by Armoury Crate';
+export const FIRMWARE_DEFAULT_TEXT = 'Firmware default';
+
+// Power limits line outside Manual: the firmware's limits apply. The device reads 0 (not reported) on the Ally,
+// so watts are only added when it reports real values.
+export function powerLine(spl: number | null | undefined, sppt: number | null | undefined, fppt: number | null | undefined): string {
+  const ok = (v: number | null | undefined) => typeof v === 'number' && isFinite(v) && v > 0;
+  if (ok(spl) && ok(sppt) && ok(fppt)) return 'Power limits: ' + FIRMWARE_DEFAULT_TEXT + ' (' + spl + ' / ' + sppt + ' / ' + fppt + ' W)';
+  return 'Power limits: ' + FIRMWARE_DEFAULT_TEXT;
 }

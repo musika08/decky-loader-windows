@@ -67,9 +67,10 @@ namespace Overdrive.Helper.Tests
             public FakeAcpi Acpi = new FakeAcpi();
             public FakeAdl Adl = new FakeAdl();
             public FakeServices Services = new FakeServices();
+            public List<int> Sleeps = new List<int>();      // delays the helper asked for, never actually waited
             public HelperCore Core;
-            public Rig() { Core = new HelperCore(Acpi, Adl, Services, true); }
-            public Rig(bool ally) { Core = new HelperCore(Acpi, Adl, Services, ally); }
+            public Rig() : this(true) { }
+            public Rig(bool ally) { Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms)); }
 
             public Dictionary<string, object> Send(string line)
             {
@@ -209,6 +210,35 @@ namespace Overdrive.Helper.Tests
                 rig.Acpi.Calls, "balanced first, then SPL, sPPT, fPPT");
         }
 
+        // G-Helper ModeControl.SetPerformanceMode (commit in helper\GHELPER_COMMIT): mode write, 100 ms, AutoFans,
+        // 1000 ms, AutoPower. The limits wait the same 1.1 s after the mode write; modes without limits do not wait.
+        public static void Mode_Manual_WaitsLikeGHelperBeforePower()
+        {
+            var log = new List<string>();
+            var acpi = new FakeAcpi();
+            var core = new HelperCore(acpi, new FakeAdl(), new FakeServices(), true, ms =>
+            {
+                log.AddRange(acpi.Calls); acpi.Calls.Clear(); log.Add("sleep " + ms);
+            });
+            True(Ok((Dictionary<string, object>)Json.DeserializeObject(core.HandleLine(
+                "{\"id\":1,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"manual\",\"spl\":15,\"sppt\":20,\"fppt\":25}}"))), "manual ok");
+            log.AddRange(acpi.Calls); acpi.Calls.Clear();
+            SeqEqual(new[] { "set 0x00120075=0", "sleep 100", "sleep 1000", "set 0x001200A3=15", "set 0x001200A0=20", "set 0x001200C1=25" },
+                log, "mode, 100 ms, 1000 ms, then the limits");
+            Equal(1100, HelperCore.ModeToFansDelayMs + HelperCore.FansToPowerDelayMs, "1.1 s in total");
+
+            log.Clear();
+            True(Ok((Dictionary<string, object>)Json.DeserializeObject(core.HandleLine("{\"id\":2,\"cmd\":\"reset_fans\"}"))), "reset ok");
+            log.AddRange(acpi.Calls); acpi.Calls.Clear();
+            SeqEqual(new[] { "set 0x00120075=0", "sleep 100", "sleep 1000", "set 0x001200A3=15", "set 0x001200A0=20", "set 0x001200C1=25" },
+                log, "reset_fans in Manual waits the same before the limits");
+
+            var rig = new Rig();
+            True(Ok(rig.Send("{\"id\":3,\"cmd\":\"set_mode\",\"args\":{\"mode\":\"turbo\"}}")), "turbo");
+            True(Ok(rig.Send("{\"id\":4,\"cmd\":\"reset_fans\"}")), "reset turbo");
+            Equal(0, rig.Sleeps.Count, "no limits, no wait");
+        }
+
         public static void Mode_Values_MatchSpec()
         {
             var rig = new Rig();
@@ -277,14 +307,29 @@ namespace Overdrive.Helper.Tests
             Equal("Point 5: fan speed can't be lower than point 4.", reason, "reason");
         }
 
-        public static void Curve_RejectsNonRisingTemps()
+        public static void Curve_RejectsFallingTemps_AndUnequalSpeedsAtOneTemp()
         {
             string reason;
-            int[] t = GoodTemps(); t[3] = 50;    // equal to point 3
-            True(!Validation.CheckCurve(t, GoodSpeeds(), out reason), "equal temps refused");
-            Equal("Point 4: temperature must be higher than point 3.", reason, "reason");
-            t = GoodTemps(); t[1] = 25;
+            int[] t = GoodTemps(); t[1] = 25;
             True(!Validation.CheckCurve(t, GoodSpeeds(), out reason), "falling temps refused");
+            Equal("Point 2: temperature can't be lower than point 1.", reason, "reason");
+            t = GoodTemps(); t[3] = 50;          // equal to point 3, but 30 % against 20 %
+            True(!Validation.CheckCurve(t, GoodSpeeds(), out reason), "equal temps with different speeds refused");
+            Equal("Point 4: same temperature as point 3, so the fan speed must be the same.", reason, "reason");
+            int[] sp = GoodSpeeds(); sp[3] = 20;
+            True(Validation.CheckCurve(t, sp, out reason), "equal temps with equal speeds accepted: " + reason);
+        }
+
+        // The Ally's own curves (read-only probe on the device, 2026-10-23) repeat their last temperature.
+        public static void Curve_AcceptsAllyFirmwareCurves()
+        {
+            string reason;
+            True(Validation.CheckCurve(T(48, 54, 59, 62, 62, 62, 62, 62), T(1, 9, 18, 22, 22, 22, 22, 22), out reason), "balanced: " + reason);
+            True(Validation.CheckCurve(T(48, 55, 58, 62, 66, 73, 73, 94), T(9, 26, 39, 48, 56, 65, 65, 78), out reason), "turbo: " + reason);
+            True(Validation.CheckCurve(T(47, 49, 54, 54, 54, 54, 54, 54), T(1, 9, 13, 13, 13, 13, 13, 13), out reason), "silent: " + reason);
+            // Quiet (-10, at least 0) and Cool (+15) as the plugin derives them
+            True(Validation.CheckCurve(T(48, 55, 58, 62, 66, 73, 73, 94), T(0, 16, 29, 38, 46, 55, 55, 68), out reason), "turbo quiet: " + reason);
+            True(Validation.CheckCurve(T(48, 55, 58, 62, 66, 73, 73, 94), T(24, 41, 54, 63, 71, 80, 80, 93), out reason), "turbo cool: " + reason);
         }
 
         // G-Helper app/Fans.cs (commit in helper\GHELPER_COMMIT): tempMin = 20, tempMax = 110, fansMax = 100
@@ -427,9 +472,10 @@ namespace Overdrive.Helper.Tests
             var r = rig.Send("{\"id\":1,\"cmd\":\"status\"}");
             True(Ok(r), "status ok");
             var d = (Dictionary<string, object>)r["data"];
-            SeqEqual(new[] { "modeRaw", "spl", "sppt", "fppt", "lastMode", "fpsLimit", "cpuTempC", "fanRpm", "errors" },
+            SeqEqual(new[] { "modeRaw", "mode", "spl", "sppt", "fppt", "lastMode", "fpsLimit", "cpuTempC", "fanRpm", "errors" },
                 new List<string>(d.Keys), "status keys");
             Equal(0, d["modeRaw"], "modeRaw");
+            Equal("balanced", d["mode"], "mode name");
             Equal(15, d["spl"], "spl");
             Equal(20, d["sppt"], "sppt");
             Equal(25, d["fppt"], "fppt");
@@ -439,6 +485,43 @@ namespace Overdrive.Helper.Tests
             Equal(2000, d["fanRpm"], "fan");
             Equal(0, ((object[])d["errors"]).Length, "no errors");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get "), "status only reads: " + c);
+        }
+
+        // Probe on the Ally: mode 7 (an Armoury Crate mode) and power limits 0 while the firmware's limits apply.
+        public static void Status_OtherModeAndZeroPower_ReportedNotErrors()
+        {
+            var rig = new Rig();
+            rig.Acpi.Values[DeviceIds.PerformanceMode] = 7;
+            rig.Acpi.Values[DeviceIds.Spl] = 0;
+            rig.Acpi.Values[DeviceIds.Sppt] = 0;
+            rig.Acpi.Values[DeviceIds.Fppt] = 0;
+            rig.Acpi.Values[DeviceIds.TempCpu] = 60;
+            rig.Acpi.Values[DeviceIds.CpuFan] = 42;
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"status\"}")["data"];
+            Equal(7, d["modeRaw"], "raw kept");
+            Equal("other", d["mode"], "mode other");
+            True(d["spl"] == null && d["sppt"] == null && d["fppt"] == null, "0 = not reported");
+            Equal(0, ((object[])d["errors"]).Length, "no errors");
+            foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get "), "status only reads: " + c);
+            Equal("silent", HelperCore.ModeName(2), "2 silent");
+            Equal("turbo", HelperCore.ModeName(1), "1 turbo");
+            True(HelperCore.ModeName(null) == null, "null stays null");
+
+            var acpi = new FakeAcpi();
+            acpi.ThrowOnWrite = true;
+            acpi.Values[DeviceIds.PerformanceMode] = 7;
+            acpi.Values[DeviceIds.Spl] = 0;
+            acpi.Values[DeviceIds.Sppt] = 0;
+            acpi.Values[DeviceIds.Fppt] = 0;
+            acpi.Values[DeviceIds.TempCpu] = 60;
+            acpi.Values[DeviceIds.CpuFan] = 42;
+            foreach (int m in new[] { 0, 1, 2 })
+                acpi.Curves[m] = new byte[] { 48, 54, 59, 62, 62, 62, 62, 62, 1, 9, 18, 22, 22, 22, 22, 22 };
+            var p = (Dictionary<string, object>)Json.DeserializeObject(Probe.Run(acpi, "RC71L"));
+            Equal(7, p["mode"], "probe raw mode");
+            Equal("other", p["modeName"], "probe mode name");
+            True(p["spl"] == null && p["sppt"] == null && p["fppt"] == null, "probe 0 = not reported");
+            Equal(0, ((object[])p["errors"]).Length, "probe has no errors");
         }
 
         public static void Status_ReadFailures_InErrors()
@@ -542,7 +625,7 @@ namespace Overdrive.Helper.Tests
             string json = Probe.Run(acpi, "ROG Xbox Ally X RC73XA_RC73XA");
             True(json.IndexOf('\n') < 0, "one line");
             var p = (Dictionary<string, object>)Json.DeserializeObject(json);
-            SeqEqual(new[] { "product", "mode", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "fanCurve", "fanCurves", "errors" },
+            SeqEqual(new[] { "product", "mode", "modeName", "spl", "sppt", "fppt", "cpuTempC", "fanRpm", "fanCurve", "fanCurves", "errors" },
                 new List<string>(p.Keys), "keys in brief order, fanCurves added by ruling P7");
             Equal("ROG Xbox Ally X RC73XA_RC73XA", p["product"], "product");
             Equal(1, p["mode"], "mode raw");
@@ -872,11 +955,46 @@ namespace Overdrive.Helper.Tests
             Equal("ASUSOptimization=Manual, ArmouryCrateControlInterface=Automatic+run, ArmouryCrateSEService=AutomaticDelayedStart+run, AsusAppService=Automatic+run, LightingService=Manual+run",
                 Snapshot(s), "recorded state applied");
             SeqEqual(new[] {
-                "start ArmouryCrateControlInterface Automatic",
+                "type ArmouryCrateControlInterface Automatic",
                 "type ASUSOptimization Manual",
+                "type AsusAppService Automatic",
+                "type ArmouryCrateSEService AutomaticDelayedStart",
+                "type LightingService Manual",
+                "start ArmouryCrateControlInterface Automatic",
                 "start AsusAppService Automatic",
                 "start ArmouryCrateSEService AutomaticDelayedStart",
-                "start LightingService Manual" }, s.Changes(), "in G-Helper list order");
+                "start LightingService Manual" }, s.Changes(), "every start type first (list order), then starts (recorded order)");
+        }
+
+        // Final review I4: a running service early in the list that depends on a listed service later in the list
+        // starts only after every start type is back, so the dependency is no longer Disabled.
+        public static void Armoury_Restore_StartsAfterEveryStartTypeIsBack()
+        {
+            var rig = new Rig();
+            var s = rig.Services;
+            s.Types["ArmouryCrateControlInterface"] = "Disabled";
+            s.Types["AsHidService"] = "Disabled";
+            s.Types["LightingService"] = "Manual";
+            s.DependsOn["ArmouryCrateControlInterface"] = "LightingService";   // earlier in the list than its dependency
+            s.Types["LightingService"] = "Disabled";
+            var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{"
+                + "\"ArmouryCrateControlInterface\":\"Automatic\",\"AsHidService\":\"Automatic\",\"LightingService\":\"Manual\"},"
+                + "\"running\":[\"LightingService\",\"ArmouryCrateControlInterface\"]}}");
+            True(Ok(r), "restore ok: " + Msg(r));
+            SeqEqual(new[] {
+                "type ArmouryCrateControlInterface Automatic",
+                "type AsHidService Automatic",
+                "type LightingService Manual",
+                "start LightingService Manual",
+                "start ArmouryCrateControlInterface Automatic" }, s.Changes(), "types, then starts in the recorded order");
+            Equal("ArmouryCrateControlInterface=Automatic+run, AsHidService=Automatic, LightingService=Manual+run", Snapshot(s), "end state");
+
+            // The fake refuses to start a service whose dependency is Disabled, like the service manager.
+            var bare = new FakeServices();
+            bare.Types["A"] = "Automatic"; bare.Types["B"] = "Disabled"; bare.DependsOn["A"] = "B";
+            bool threw = false;
+            try { bare.Start("A", "Automatic"); } catch (InvalidOperationException) { threw = true; }
+            True(threw, "fake enforces the dependency");
         }
 
         public static void Armoury_Restore_SkipsUninstalledServices()
@@ -886,7 +1004,7 @@ namespace Overdrive.Helper.Tests
             var r = rig.Send("{\"id\":1,\"cmd\":\"armoury_restore\",\"args\":{\"recorded\":{\"ArmouryCrateSEService\":\"Automatic\",\"AsHidService\":\"Automatic\"},\"running\":[\"ArmouryCrateSEService\",\"AsHidService\"]}}");
             True(Ok(r), "ok: " + Msg(r));
             Equal("AsHidService", string.Join(",", (object[])((Dictionary<string, object>)r["data"])["skipped"]), "skipped");
-            SeqEqual(new[] { "start ArmouryCrateSEService Automatic" }, rig.Services.Changes(), "only the installed one");
+            SeqEqual(new[] { "type ArmouryCrateSEService Automatic", "start ArmouryCrateSEService Automatic" }, rig.Services.Changes(), "only the installed one");
         }
 
         public static void Armoury_Restore_RefusesBadInputBeforeAnyCall()

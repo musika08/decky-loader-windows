@@ -2,7 +2,7 @@
 // Node 22.18+ / 23.6+ strip TypeScript types natively, so the pure module is imported straight from src.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { validateCurve, minSpeedAt, stepValue, liveLine, defaultDraft } from '../../src/curve.ts';
+import { validateCurve, minSpeedAt, stepValue, liveLine, defaultDraft, shownMode, powerLine } from '../../src/curve.ts';
 
 const TEMPS = [30, 40, 50, 60, 70, 80, 90, 100];
 const SPEEDS = [0, 10, 20, 30, 40, 50, 60, 70];
@@ -13,12 +13,29 @@ test('curve_editor_blocks_decreasing_points', () => {
   assert.equal(validateCurve(TEMPS, speeds), "Point 5: fan speed can't be lower than point 4.");
 });
 
-test('curve_editor_blocks_non_rising_temps', () => {
+test('curve_editor_blocks_falling_temps_and_two_speeds_at_one_temp', () => {
   const temps = [...TEMPS];
-  temps[3] = 50; // point 4 equal to point 3
-  assert.equal(validateCurve(temps, SPEEDS), 'Point 4: temperature must be higher than point 3.');
-  temps[3] = 45;
-  assert.equal(validateCurve(temps, SPEEDS), 'Point 4: temperature must be higher than point 3.');
+  temps[3] = 45; // point 4 below point 3
+  assert.equal(validateCurve(temps, SPEEDS), "Point 4: temperature can't be lower than point 3.");
+  temps[3] = 50; // point 4 equal to point 3, 30 % against 20 %
+  assert.equal(validateCurve(temps, SPEEDS), 'Point 4: same temperature as point 3, so the fan speed must be the same.');
+  const speeds = [...SPEEDS];
+  speeds[3] = 20;
+  assert.equal(validateCurve(temps, speeds), null);
+});
+
+test('the Ally firmware curves and their Quiet/Cool presets pass', () => {
+  // Read-only probe on the device, 2026-10-23; Quiet = -10 (at least 0), Cool = +15, as the backend derives them.
+  const curves = [
+    [[48, 54, 59, 62, 62, 62, 62, 62], [1, 9, 18, 22, 22, 22, 22, 22]],
+    [[48, 55, 58, 62, 66, 73, 73, 94], [9, 26, 39, 48, 56, 65, 65, 78]],
+    [[47, 49, 54, 54, 54, 54, 54, 54], [1, 9, 13, 13, 13, 13, 13, 13]],
+  ];
+  for (const [t, s] of curves) {
+    assert.equal(validateCurve(t, s), null);
+    assert.equal(validateCurve(t, s.map((v) => Math.max(0, v - 10))), null);
+    assert.equal(validateCurve(t, s.map((v) => Math.min(100, v + 15))), null);
+  }
 });
 
 test('valid_curve_passes', () => {
@@ -66,4 +83,20 @@ test('liveLine formats sensors', () => {
   assert.equal(liveLine(62, 3100), 'CPU 62 °C · Fan 3100 RPM');
   assert.equal(liveLine(null, null), 'CPU -- °C · Fan -- RPM');
   assert.equal(liveLine(61.6, 0), 'CPU 62 °C · Fan 0 RPM');
+});
+
+test('mode read back as other shows Set by Armoury Crate, never a stored mode', () => {
+  assert.equal(shownMode('balanced', false, 'other'), 'other');
+  assert.equal(shownMode('manual', true, 'other'), 'other');
+  assert.equal(shownMode('balanced', false, 'turbo'), 'turbo'); // untouched install: what the device runs
+  assert.equal(shownMode('balanced', false, null), null);
+  assert.equal(shownMode('manual', true, 'balanced'), 'manual'); // Manual reads back as Balanced
+  assert.equal(shownMode('silent', undefined, undefined), 'silent'); // older backend without read-back
+});
+
+test('power limits outside Manual are the firmware default; 0 or null means not reported', () => {
+  assert.equal(powerLine(null, null, null), 'Power limits: Firmware default');
+  assert.equal(powerLine(0, 0, 0), 'Power limits: Firmware default');
+  assert.equal(powerLine(undefined, 20, 25), 'Power limits: Firmware default');
+  assert.equal(powerLine(15, 20, 25), 'Power limits: Firmware default (15 / 20 / 25 W)');
 });

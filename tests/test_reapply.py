@@ -288,3 +288,81 @@ def test_start_and_stop_poll_loop(tmp_path):
         await r.stop()
         assert r._task is None
     run(go())
+
+
+async def _ok_async(args):
+    return ok(dict(args))
+
+
+def test_transport_failure_is_retried_next_poll_a_few_times(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def restarted(args):
+            return {"id": None, "ok": False, "message": "Overdrive helper restarted, try again", "data": None}
+        c.handlers["set_mode"] = restarted
+        s = make(tmp_path, default_curve={m: LOW for m in ("balanced", "turbo", "silent")})
+        clock = Clock()
+        r = Reapplier(c, s, clock=clock, power_source=Power())
+        r.prime()
+        await r.apply_all()
+        assert r.rerun is True
+        ran = []
+        for _ in range(5):
+            clock.step(5)
+            ran.append(await r.tick())
+        assert ran == [True, True, True, False, False]    # 3 retries, then it waits for the next trigger
+        assert r.rerun is False
+
+        c.handlers["set_mode"] = _ok_async
+        clock.step(3600, mono=5)                          # resume
+        assert await r.tick() is True and r.rerun is False and r.warning == ""
+    run(go())
+
+
+def test_timeout_is_retried_but_refusal_is_not(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def timeout(args):
+            return {"id": None, "ok": False, "message": "Overdrive helper did not answer in 10 s.", "data": None}
+        c.handlers["set_fps_limit"] = timeout
+        s = make(tmp_path, fps=60, default_curve={m: LOW for m in ("balanced", "turbo", "silent")})
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r.apply_all()
+        assert r.rerun is True
+
+        async def refused(args):
+            return {"id": 1, "ok": False, "message": "The device refused the performance mode (result 0).",
+                    "data": None}
+        c.handlers.clear()
+        c.handlers["set_mode"] = refused
+        r2 = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r2.apply_all()
+        assert r2.rerun is False and "refused" in r2.warning
+    run(go())
+
+
+def test_partial_default_curve_read_is_completed_later(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def turbo_fails(args):
+            if args["mode"] == "turbo":
+                return {"id": None, "ok": False, "message": "Overdrive helper did not answer in 10 s.", "data": None}
+            return ok({"mode": args["mode"], **LOW})
+        c.handlers["get_fans"] = turbo_fails
+        s = make(tmp_path, user_set=False)
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r.apply_all()
+        assert set(Settings.load(s.path).default_curve) == {"balanced", "silent"}
+        c.calls.clear()
+        del c.handlers["get_fans"]
+        await r.apply_all()
+        assert [a for cmd, a in c.calls if cmd == "get_fans"] == [{"mode": "turbo"}]   # only the missing mode
+        saved = Settings.load(s.path).default_curve
+        assert set(saved) == {"balanced", "turbo", "silent"} and saved["balanced"] == LOW
+        c.calls.clear()
+        await r.apply_all()
+        assert all(cmd != "get_fans" for cmd, _ in c.calls)
+    run(go())

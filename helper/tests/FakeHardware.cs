@@ -97,6 +97,8 @@ namespace Overdrive.Helper.Tests
         public readonly List<string> Calls = new List<string>();      // every call, reads included, in order
         public readonly List<string> FailStop = new List<string>();   // stops the service, then throws before setting the type
         public readonly List<string> FailStart = new List<string>();  // throws before changing anything
+        // name -> a service it depends on; starting it fails while that one is Disabled (like the service manager)
+        public readonly Dictionary<string, string> DependsOn = new Dictionary<string, string>();
 
         public Dictionary<string, string> StartTypes(IEnumerable<string> names)
         {
@@ -128,6 +130,9 @@ namespace Overdrive.Helper.Tests
             Calls.Add("start " + name + " " + startType);
             Exists(name);
             if (FailStart.Contains(name)) throw new InvalidOperationException("the service did not start");
+            string dep;
+            if (DependsOn.TryGetValue(name, out dep) && Types.ContainsKey(dep) && Types[dep] == "Disabled")
+                throw new InvalidOperationException("a dependency service is disabled");
             Types[name] = startType;
             if (!RunningNames.Contains(name)) RunningNames.Add(name);
         }

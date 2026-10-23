@@ -15,10 +15,21 @@ import logging
 import time
 from typing import Callable, Optional
 
+from .helper_client import RESTARTED
 from .settings import CURVE_MODES, Settings, curve_mode, preset_curve
 
 POLL = 5.0
 RESUME_GAP = 30.0
+TRANSPORT_RETRIES = 3   # reapplies that hit a helper restart/timeout are retried at the next poll, at most this often
+
+
+def transport_failure(reply: dict) -> bool:
+    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal."""
+    if reply.get("ok"):
+        return False
+    msg = str(reply.get("message") or "")
+    return (msg == RESTARTED or msg.startswith("Overdrive helper did not answer")
+            or msg.startswith("Overdrive helper is not running"))
 
 
 def ac_online_win32() -> Optional[bool]:
@@ -95,6 +106,7 @@ class Reapplier:
         self._ac: Optional[bool] = None
         self.busy_check: Optional[Callable[[], bool]] = None   # main.py: an Armoury operation is running
         self._deferring = False
+        self._retries = 0          # consecutive reapplies retried after a transport failure
 
     # ---------- user changes ----------
 
@@ -126,11 +138,14 @@ class Reapplier:
             return await self.client.call(cmd, args)
 
     async def read_default_curves(self) -> None:
-        """First run: read each mode's firmware curve once (reads only) and store it."""
-        if self.settings.default_curve:
+        """Read each mode's firmware curve once (reads only) and store it. Modes that could not be read (a partial
+        result) are read again at the next reapply; curves already stored are never read again."""
+        have = dict(self.settings.default_curve or {})
+        missing = [m for m in CURVE_MODES if m not in have]
+        if not missing:
             return
         curves = {}
-        for m in CURVE_MODES:
+        for m in missing:
             r = await self.client.call("get_fans", {"mode": m})
             data = r.get("data") if r.get("ok") else None
             if isinstance(data, dict) and isinstance(data.get("temps"), list) and isinstance(data.get("speeds"), list):
@@ -138,7 +153,8 @@ class Reapplier:
             else:
                 self.log.warning(f"Could not read the {m} fan curve: {r.get('message')}")
         if curves:
-            self.settings.default_curve = curves
+            have.update(curves)
+            self.settings.default_curve = have
             try:
                 self.settings.save()
             except OSError as e:
@@ -159,8 +175,10 @@ class Reapplier:
             self.log.info("Reapply skipped: no Overdrive settings chosen yet")
             return True
         problems = []
+        transport = False
         try:
             r = await self._step(gen, "set_mode", mode_args(s))
+            transport |= transport_failure(r)
             if not r.get("ok"):
                 problems.append(r.get("message") or "The performance mode was not applied.")
             else:
@@ -170,17 +188,27 @@ class Reapplier:
                     problems.append(warn)
                 if curve is not None:
                     r = await self._step(gen, "set_fans", {"temps": curve["temps"], "speeds": curve["speeds"]})
+                    transport |= transport_failure(r)
                     if not r.get("ok"):
                         problems.append(r.get("message") or "The fan curve was not applied.")
             if s.fps != 0:   # 0 (off) is only sent when the owner picks it, so an Adrenalin limit is left alone
                 r = await self._step(gen, "set_fps_limit", {"fps": s.fps})
+                transport |= transport_failure(r)
                 if not r.get("ok"):
                     problems.append(r.get("message") or "The FPS limit was not applied.")
         except Dropped:
             self.rerun = True
             self.log.info("Reapply dropped: a newer change was made meanwhile")
             return False
-        self.rerun = False
+        # A helper restart or timeout (e.g. right after resume) is retried at the next poll, a few times at most;
+        # a device refusal is not (it would only be refused again).
+        if transport and self._retries < TRANSPORT_RETRIES:
+            self._retries += 1
+            self.rerun = True
+            self.log.info(f"Reapply will be retried at the next poll ({self._retries}/{TRANSPORT_RETRIES})")
+        else:
+            self._retries = 0
+            self.rerun = False
         self.warning = " ".join(problems)
         if problems:
             self.log.warning(f"Reapply incomplete: {self.warning}")
@@ -216,7 +244,7 @@ class Reapplier:
         """One poll: True when a reapply ran."""
         reasons = self._triggers()
         if self.rerun:
-            reasons.append("redo after a newer change")
+            reasons.append("redo")
         if not reasons:
             return False
         if self._busy():

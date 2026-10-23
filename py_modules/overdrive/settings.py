@@ -61,10 +61,13 @@ def check_curve(temps, speeds) -> Optional[str]:
             return f"Point {n}: temperature must be between {CURVE_TEMP_MIN} and {CURVE_TEMP_MAX} °C."
         if speeds[i] < 0 or speeds[i] > CURVE_SPEED_MAX:
             return f"Point {n}: fan speed must be between 0 and {CURVE_SPEED_MAX} %."
-        if i > 0 and temps[i] <= temps[i - 1]:
-            return f"Point {n}: temperature must be higher than point {i}."
+        # Firmware curves repeat their last temperature: non-decreasing temps, one speed per temperature.
+        if i > 0 and temps[i] < temps[i - 1]:
+            return f"Point {n}: temperature can't be lower than point {i}."
         if i > 0 and speeds[i] < speeds[i - 1]:
             return f"Point {n}: fan speed can't be lower than point {i}."
+        if i > 0 and temps[i] == temps[i - 1] and speeds[i] != speeds[i - 1]:
+            return f"Point {n}: same temperature as point {i}, so the fan speed must be the same."
         m = min_speed_at(temps[i])
         if speeds[i] < m:
             return f"Point {n}: at {temps[i]} °C the fan must be at least {m} %."

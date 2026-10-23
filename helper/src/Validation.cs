@@ -63,14 +63,21 @@ namespace Overdrive.Helper
                     reason = "Point " + n + ": fan speed must be between 0 and " + CurveSpeedMax + " %.";
                     return false;
                 }
-                if (i > 0 && temps[i] <= temps[i - 1])
+                // The firmware's own curves repeat the last temperature (e.g. 62,62,62 on the Ally), so temperatures
+                // only have to be non-decreasing; points that share a temperature must share the fan speed.
+                if (i > 0 && temps[i] < temps[i - 1])
                 {
-                    reason = "Point " + n + ": temperature must be higher than point " + i + ".";
+                    reason = "Point " + n + ": temperature can't be lower than point " + i + ".";
                     return false;
                 }
                 if (i > 0 && speeds[i] < speeds[i - 1])
                 {
                     reason = "Point " + n + ": fan speed can't be lower than point " + i + ".";
+                    return false;
+                }
+                if (i > 0 && temps[i] == temps[i - 1] && speeds[i] != speeds[i - 1])
+                {
+                    reason = "Point " + n + ": same temperature as point " + i + ", so the fan speed must be the same.";
                     return false;
                 }
                 int min = MinSpeedAt(temps[i]);

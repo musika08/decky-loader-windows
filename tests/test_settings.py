@@ -100,7 +100,10 @@ def test_check_curve_messages_match_helper():
     assert st.check_curve(ok[:7], [0] * 7) == "The fan curve needs 8 points."
     assert st.check_curve([10] + ok[1:], [0] * 8) == "Point 1: temperature must be between 20 and 110 °C."
     assert st.check_curve(ok, [0, 101, 0, 0, 0, 0, 0, 0]) == "Point 2: fan speed must be between 0 and 100 %."
-    assert st.check_curve([30, 30] + ok[2:], [0] * 8) == "Point 2: temperature must be higher than point 1."
+    assert st.check_curve([30, 25] + ok[2:], [0] * 8) == "Point 2: temperature can't be lower than point 1."
+    assert st.check_curve([30, 30] + ok[2:], [0, 0, 10, 20, 30, 40, 50, 60]) is None   # equal temps, equal speeds
+    assert st.check_curve([30, 30] + ok[2:], [0, 5, 10, 20, 30, 40, 50, 60]) == \
+        "Point 2: same temperature as point 1, so the fan speed must be the same."
     assert st.check_curve(ok, [10, 5, 10, 20, 30, 40, 50, 60]) == "Point 2: fan speed can't be lower than point 1."
     assert st.check_curve(ok, [0, 5, 10, 20, 30, 40, 50, 35]) == \
         "Point 8: fan speed can't be lower than point 7."
@@ -133,7 +136,28 @@ def test_presets_derive_from_default_and_pass_validation():
     assert st.preset_curve("default", safe) == (safe, False)
 
 
+# The Ally's own curves (read-only probe on the device, 2026-10-23): they repeat their last temperature.
+ALLY_CURVES = {
+    "balanced": {"temps": [48, 54, 59, 62, 62, 62, 62, 62], "speeds": [1, 9, 18, 22, 22, 22, 22, 22]},
+    "turbo": {"temps": [48, 55, 58, 62, 66, 73, 73, 94], "speeds": [9, 26, 39, 48, 56, 65, 65, 78]},
+    "silent": {"temps": [47, 49, 54, 54, 54, 54, 54, 54], "speeds": [1, 9, 13, 13, 13, 13, 13, 13]},
+}
+
+
+def test_ally_firmware_curves_and_their_presets_pass():
+    for mode, c in ALLY_CURVES.items():
+        assert st.check_curve(c["temps"], c["speeds"]) is None, mode
+        for name in ("default", "quiet", "cool"):
+            curve, adjusted = st.preset_curve(name, c)
+            assert curve is not None, (mode, name)
+            assert st.check_curve(curve["temps"], curve["speeds"]) is None, (mode, name)
+            assert adjusted is False, (mode, name)          # all well above G-Helper's minimum
+    assert st.preset_curve("default", ALLY_CURVES["turbo"])[0] == ALLY_CURVES["turbo"]
+    assert st.preset_curve("quiet", ALLY_CURVES["turbo"])[0]["speeds"] == [0, 16, 29, 38, 46, 55, 55, 68]
+    assert st.preset_curve("cool", ALLY_CURVES["turbo"])[0]["speeds"] == [24, 41, 54, 63, 71, 80, 80, 93]
+
+
 def test_preset_unusable_default_curve():
-    bad = {"temps": [30, 30, 50, 60, 70, 80, 90, 100], "speeds": [0] * 8}   # temps not rising
+    bad = {"temps": [40, 30, 50, 60, 70, 80, 90, 100], "speeds": [0] * 8}   # temps falling
     assert st.preset_curve("quiet", bad) == (None, False)
     assert st.preset_curve("default", None) == (None, False)

@@ -21,8 +21,12 @@ import {
   CURVE_TEMP_MAX,
   CURVE_TEMP_MIN,
   Curve,
+  DeviceMode,
+  MODE_OTHER_TEXT,
   defaultDraft,
   liveLine,
+  powerLine,
+  shownMode,
   stepValue,
   validateCurve,
 } from './curve';
@@ -47,6 +51,10 @@ type State = {
   warning: string;
   fan_note: string;
   busy?: boolean; // ruling P12; read when the backend reports it
+  user_set?: boolean;
+  power_set?: boolean;
+  // What the device reports (read only): mode "other" = a mode Overdrive does not set; null = not reported.
+  device?: { mode: DeviceMode; spl: number | null; sppt: number | null; fppt: number | null };
 };
 type Sensors = { ok: boolean; message: string; cpuTempC: number | null; fanRpm: number | null; errors: string[] };
 
@@ -81,6 +89,7 @@ const POWER_MAX = 50;
 const POWER_DEBOUNCE_MS = 700;
 const SENSOR_POLL_MS = 2000;
 const UNAVAILABLE_RECHECK_MS = 5000;
+const BUSY_RECHECK_MS = 3000;
 const CONFIRM_MS = 3000;
 const CONFIRM_LABEL = 'Press again to confirm';
 
@@ -277,6 +286,17 @@ function Content() {
     return () => clearInterval(id);
   }, [unavailable]);
 
+  // A switch this panel did not start (the load-time re-stop or repair, or one from an earlier panel whose promise
+  // is gone): re-read every 3 s while the backend reports busy, so the controls come back without reopening.
+  const backendBusy = !!state?.busy && !armouryBusy;
+  useEffect(() => {
+    if (!backendBusy) return;
+    const id = setInterval(() => {
+      refresh();
+    }, BUSY_RECHECK_MS);
+    return () => clearInterval(id);
+  }, [backendBusy]);
+
   const run = async (key: string, fn: () => Promise<Result>) => {
     if (key !== 'power') cancelPowerTimer();
     setWorking(true);
@@ -355,12 +375,13 @@ function Content() {
   }
 
   const disabled = working || busy || !!unavailable;
+  const shown = shownMode(state.mode, state.user_set, state.device?.mode);
 
   // ---------- actions ----------
 
   const chooseMode = (mode: Mode) => {
     cancelPowerTimer();
-    if (mode === state.mode && mode !== 'manual') return;
+    if (mode === shown && mode !== 'manual') return;
     if (mode === 'manual') run('mode', () => setMode('manual', power.spl, power.sppt, power.fppt));
     else run('mode', () => setMode(mode));
   };
@@ -452,7 +473,7 @@ function Content() {
           <Field label="Mode" childrenLayout="below" padding="compact">
             <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '4px' }}>
               {MODES.map((m) => {
-                const Btn = state.mode === m.mode ? DialogButtonPrimary : DialogButton;
+                const Btn = shown === m.mode ? DialogButtonPrimary : DialogButton;
                 return (
                   <Btn
                     key={m.mode}
@@ -467,8 +488,12 @@ function Content() {
             </Focusable>
           </Field>
         </PanelSectionRow>
+        {shown === 'other' && <Note text={'Mode: ' + MODE_OTHER_TEXT} />}
         <StatusRow status={statuses.mode} />
-        {state.mode === 'manual' && (
+        {shown !== 'manual' && (
+          <Note text={powerLine(state.device?.spl, state.device?.sppt, state.device?.fppt)} />
+        )}
+        {shown === 'manual' && (
           <>
             {(
               [

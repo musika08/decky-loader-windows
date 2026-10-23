@@ -59,12 +59,26 @@ namespace Overdrive.Helper
         private string lastMode;
         private int[] lastPower;
 
+        // G-Helper app/Mode/ModeControl.cs SetPerformanceMode: mode write, 100 ms, AutoFans, 1000 ms, AutoPower.
+        // The firmware applies the mode's own limits after a mode write, so manual limits wait for the same 1.1 s.
+        public const int ModeToFansDelayMs = 100;
+        public const int FansToPowerDelayMs = 1000;
+
+        private readonly Action<int> sleep;
+
         public HelperCore(IAcpi acpi, IAdl adl, IServices services, bool ally)
+            : this(acpi, adl, services, ally, System.Threading.Thread.Sleep)
+        {
+        }
+
+        // sleep is injectable so tests record the delays instead of waiting.
+        public HelperCore(IAcpi acpi, IAdl adl, IServices services, bool ally, Action<int> sleep)
         {
             this.acpi = acpi;
             this.adl = adl;
             this.services = services;
             this.ally = ally;
+            this.sleep = sleep ?? System.Threading.Thread.Sleep;
         }
 
         // Never throws: every line gets exactly one single-line reply.
@@ -155,10 +169,12 @@ namespace Overdrive.Helper
         {
             var d = new Dictionary<string, object>();
             var errors = new List<string>();
-            d["modeRaw"] = ReadSetting(acpi, DeviceIds.PerformanceMode, "mode", errors);
-            d["spl"] = ReadSetting(acpi, DeviceIds.Spl, "spl", errors);
-            d["sppt"] = ReadSetting(acpi, DeviceIds.Sppt, "sppt", errors);
-            d["fppt"] = ReadSetting(acpi, DeviceIds.Fppt, "fppt", errors);
+            int? modeRaw = ReadSetting(acpi, DeviceIds.PerformanceMode, "mode", errors);
+            d["modeRaw"] = modeRaw;
+            d["mode"] = ModeName(modeRaw);
+            d["spl"] = ReadPower(acpi, DeviceIds.Spl, "spl", errors);
+            d["sppt"] = ReadPower(acpi, DeviceIds.Sppt, "sppt", errors);
+            d["fppt"] = ReadPower(acpi, DeviceIds.Fppt, "fppt", errors);
             d["lastMode"] = lastMode;
             object fps = null;
             try
@@ -218,6 +234,29 @@ namespace Overdrive.Helper
             return v;
         }
 
+        // A power limit read (spl, sppt, fppt): like ReadSetting, and 0 is "not reported" too (null, no error): the Ally
+        // reads 0 while the firmware's own limits are in force (probe on the device, 2026-10-23).
+        public static int? ReadPower(IAcpi acpi, uint devId, string name, List<string> errors)
+        {
+            int? v = ReadSetting(acpi, devId, name, errors);
+            if (v.HasValue && v.Value == 0) return null;
+            return v;
+        }
+
+        // Mode read back from the device: balanced/turbo/silent for 0/1/2, "other" for any other value (Armoury
+        // Crate's own modes, e.g. 7 on the Ally), null when not read. Only ever reported, never written back.
+        public static string ModeName(int? raw)
+        {
+            if (!raw.HasValue) return null;
+            switch (raw.Value)
+            {
+                case DeviceIds.ModeBalanced: return "balanced";
+                case DeviceIds.ModeTurbo: return "turbo";
+                case DeviceIds.ModeSilent: return "silent";
+                default: return "other";
+            }
+        }
+
         // 16-byte curve -> {temps, speeds}, or null when G-Helper's AsusACPI.IsInvalidCurve rejects it
         // (wrong length or all zero).
         public static Dictionary<string, object> SplitCurve(byte[] curve)
@@ -260,6 +299,7 @@ namespace Overdrive.Helper
             d["mode"] = mode;
             if (power != null)
             {
+                WaitForModeLimits();
                 if (!ApplyPower(power, out err)) return Reply(id, false, err, null);
                 AddPower(d, power);
             }
@@ -330,6 +370,7 @@ namespace Overdrive.Helper
             bool reapplied = false;
             if (mode == "manual" && lastPower != null)
             {
+                WaitForModeLimits();
                 if (!ApplyPower(lastPower, out err)) return Reply(id, false, err, null);
                 reapplied = true;
             }
@@ -442,6 +483,9 @@ namespace Overdrive.Helper
             Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
             List<string> running = services.Running(ArmouryServices.All);
 
+            // Two passes, so a service that depends on another listed service never starts while that one is still
+            // Disabled: first every recorded start type (G-Helper list order), then the services that were running,
+            // in the recorded order. A failure rolls back every step so far, as before.
             var steps = new List<ServiceStep>();
             var skipped = new List<string>();
             foreach (string name in ArmouryServices.All)
@@ -449,7 +493,12 @@ namespace Overdrive.Helper
                 string type;
                 if (!recorded.TryGetValue(name, out type)) continue;
                 if (!types.ContainsKey(name)) { skipped.Add(name); continue; }
-                steps.Add(new ServiceStep(name, toStart.Contains(name) ? ServiceAction.Start : ServiceAction.SetType, type));
+                steps.Add(new ServiceStep(name, ServiceAction.SetType, type));
+            }
+            foreach (string name in toStart)
+            {
+                if (!types.ContainsKey(name)) continue;
+                steps.Add(new ServiceStep(name, ServiceAction.Start, recorded[name]));
             }
 
             var data = new Dictionary<string, object>();
@@ -534,6 +583,14 @@ namespace Overdrive.Helper
         }
 
         // ---------- hardware helpers ----------
+
+        // G-Helper's gap between the mode write and AutoPower (100 ms, then AutoFans, then 1000 ms). The fan curve
+        // is written by the plugin after the reply (the protocol sends limits together with mode "manual").
+        private void WaitForModeLimits()
+        {
+            sleep(ModeToFansDelayMs);
+            sleep(FansToPowerDelayMs);
+        }
 
         private bool ApplyPower(int[] p, out string err)
         {

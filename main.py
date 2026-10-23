@@ -95,11 +95,16 @@ class Plugin:
     async def _startup_sequence(self) -> None:
         if self.settings.armoury_replaced:
             await self._restop_on_load()
+        elif self.settings.armoury_recorded:
+            await self._recover_on_load()
         self.reapplier.start()
 
     async def _unload(self) -> None:
-        # Never kill the helper halfway through changing services: wait for the Armoury operation to finish,
-        # bounded by its own call timeout.
+        # Try not to kill the helper halfway through changing services: wait for the Armoury operation to finish,
+        # bounded by its own call timeout. Decky does not wait that long: it kills the plugin process 5 s after
+        # asking it to stop (decky-loader plugin/plugin.py kill_if_still_running), and the helper runs in the
+        # plugin's job object with KILL_ON_JOB_CLOSE (localplatform/winprocess.py _create_job), so it dies too.
+        # A switch cut short that way is put right at the next load (_recover_on_load, or the P8 re-stop).
         loop = asyncio.get_running_loop()
         while self._armoury_busy and loop.time() < self._armoury_until:
             await asyncio.sleep(0.05)
@@ -135,7 +140,10 @@ class Plugin:
             "support": support, "mode": s.mode, "spl": s.spl, "sppt": s.sppt, "fppt": s.fppt, "fps": s.fps,
             "fan_preset": s.fan_preset, "fan_curve": self._effective_curve(s),
             "armoury": {"installed": False, "replaced": s.armoury_replaced},
-            "unavailable": "", "warning": "", "fan_note": "", "busy": False,
+            "unavailable": "", "warning": "", "fan_note": "", "busy": False, "user_set": s.user_set,
+            # The owner's own limits exist only once Manual was chosen; otherwise the firmware's limits apply.
+            "power_set": bool(s.user_set and s.mode == "manual"),
+            "device": _device_readback(None),
         }
         if self.client is None:
             return state
@@ -144,6 +152,10 @@ class Plugin:
             r = await self.client.call("armoury_state")
             if r.get("ok") and isinstance(r.get("data"), dict):
                 self._armoury_installed = bool(r["data"].get("installed"))
+        if not state["busy"]:
+            r = await self.client.call("status")   # reads only; shown, never written back
+            if r.get("ok"):
+                state["device"] = _device_readback(r.get("data"))
         state["armoury"]["installed"] = bool(self._armoury_installed)
         state["unavailable"] = self.client.unavailable_reason or ""
         state["warning"] = " ".join(w for w in (self.reapplier.warning, self._armoury_warning) if w)
@@ -372,6 +384,40 @@ class Plugin:
                 self._armoury_warning = "Armoury Crate services could not be stopped again: " + str(r.get("message"))
                 decky.logger.warning(self._armoury_warning)
 
+    async def _recover_on_load(self) -> None:
+        """A record with the switch off at load: a switch-on (or its save-failure restore) was cut short, typically
+        by Decky killing the plugin 5 s into an unload. Some services may be stopped and Disabled/Manual, so put the
+        recorded state back now (busy while it runs) and tell the owner how it went."""
+        s = self.settings
+        async with self._armoury_op():
+            timeout, state, why = await self._armoury_timeout(len(s.armoury_running))
+            if state is None:
+                self._armoury_warning = ("A previous Armoury Crate switch did not finish, and the services could not "
+                                         f"be checked at load ({why}). Turn the switch on and off again to put "
+                                         "them back.")
+                decky.logger.warning(self._armoury_warning)
+                return
+            decky.logger.info("Overdrive: a previous Armoury Crate switch did not finish; putting the services back")
+            r = await self._armoury_call("armoury_restore",
+                                         {"recorded": dict(s.armoury_recorded), "running": list(s.armoury_running)},
+                                         timeout)
+            if not r.get("ok"):
+                self._armoury_warning = ("A previous Armoury Crate switch did not finish, and putting the services "
+                                         f"back failed: {r.get('message')} Turn the switch on and off again to "
+                                         "retry.")
+                decky.logger.warning(self._armoury_warning)
+                return
+            s.armoury_recorded, s.armoury_running = {}, []
+            msg = "A previous Armoury Crate switch did not finish, so Armoury Crate was put back."
+            skipped = (r.get("data") or {}).get("skipped") if isinstance(r.get("data"), dict) else None
+            if skipped:
+                msg += " Not installed any more, skipped: " + ", ".join(map(str, skipped)) + "."
+            saved = self._save()
+            if saved:
+                msg += " The cleared record could not be saved, so this runs again at the next load."
+            self._armoury_warning = msg
+            decky.logger.info(f"Overdrive: {msg}")
+
     async def set_armoury_replaced(self, on) -> dict:
         refused = self._refuse_write()
         if refused:
@@ -450,6 +496,20 @@ class Plugin:
         except OSError as e:
             return _fail(f"Armoury Crate was restored, but the setting could not be saved ({e}).")
         return {"ok": True, "message": " ".join(msgs)}
+
+
+DEVICE_MODES = ("silent", "balanced", "turbo", "other")
+
+
+def _device_readback(data) -> dict:
+    """What the device reports (helper status): mode silent/balanced/turbo, "other" for a mode Overdrive does not set
+    (Armoury Crate's own, e.g. raw 7), or None; power limits in watts, None when not reported (0 on the Ally)."""
+    d = data if isinstance(data, dict) else {}
+    out = {"mode": d.get("mode") if d.get("mode") in DEVICE_MODES else None}
+    for key in ("spl", "sppt", "fppt"):
+        v = _int(d.get(key))
+        out[key] = v if v is not None and v > 0 else None
+    return out
 
 
 def _clean_record(data: dict):

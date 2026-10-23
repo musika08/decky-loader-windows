@@ -31,9 +31,10 @@ namespace Overdrive.Helper
 
     // asus-helper.exe --probe: one JSON line with what the device reports. Read-only by construction:
     // every call goes through ReadOnlyAcpi, and only DeviceGet and GetFanCurve are used.
-    // {"product","mode","spl","sppt","fppt","cpuTempC","fanRpm","fanCurve":{"temps","speeds"},
+    // {"product","mode","modeName","spl","sppt","fppt","cpuTempC","fanRpm","fanCurve":{"temps","speeds"},
     //  "fanCurves":{"balanced","turbo","silent"},"errors"}
-    // mode, spl, sppt, fppt are the raw DeviceGet values (null plus an error when -65536, nothing reported);
+    // mode, spl, sppt, fppt are the raw DeviceGet values (null plus an error when -65536, nothing reported; a power
+    // limit of 0 is null without an error); modeName is balanced/turbo/silent or "other" (HelperCore.ModeName);
     // cpuTempC and fanRpm are converted as G-Helper does; fanCurve is the current mode's curve.
     public static class Probe
     {
@@ -48,9 +49,10 @@ namespace Overdrive.Helper
 
             int? mode = HelperCore.ReadSetting(acpi, DeviceIds.PerformanceMode, "mode", errors);
             d["mode"] = mode;
-            d["spl"] = HelperCore.ReadSetting(acpi, DeviceIds.Spl, "spl", errors);
-            d["sppt"] = HelperCore.ReadSetting(acpi, DeviceIds.Sppt, "sppt", errors);
-            d["fppt"] = HelperCore.ReadSetting(acpi, DeviceIds.Fppt, "fppt", errors);
+            d["modeName"] = HelperCore.ModeName(mode);
+            d["spl"] = HelperCore.ReadPower(acpi, DeviceIds.Spl, "spl", errors);
+            d["sppt"] = HelperCore.ReadPower(acpi, DeviceIds.Sppt, "sppt", errors);
+            d["fppt"] = HelperCore.ReadPower(acpi, DeviceIds.Fppt, "fppt", errors);
             HelperCore.ReadSensors(acpi, d, errors);
 
             // Curve of the current mode; balanced when the mode is not one of 0, 1, 2.
