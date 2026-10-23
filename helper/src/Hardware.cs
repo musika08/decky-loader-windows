@@ -110,6 +110,32 @@ namespace Overdrive.Helper
         bool SetFeature(string path, byte[] report, out string err);
     }
 
+    // The touchscreen as Windows lists it (PnP FriendlyName like *touch*screen*).
+    public sealed class TouchInfo
+    {
+        public bool Found;
+        public bool Enabled;        // PnP status OK
+        public string InstanceId;
+        public string Error;        // set when the state could not be read (for example PowerShell took over 5 s)
+    }
+
+    // Touchscreen (PnP through PowerShell, as G-Helper TouchscreenHelper), Auto SR (HKCU) and the foreground app.
+    public interface ISystemControls
+    {
+        // Reads the touchscreen state; waits at most 5 s.
+        TouchInfo GetTouchscreen();
+        // Starts Enable-PnpDevice / Disable-PnpDevice and returns at once. The process is killed after 15 s if still
+        // running. False (with err) when it could not start or a previous change is still running.
+        bool StartSetTouchscreen(bool enabled, out string err);
+        // HKCU\Software\Microsoft\DirectX\UserGpuPreferences, DirectXUserGlobalSettings, or null when not set.
+        string ReadGpuSettings();
+        bool WriteGpuSettings(string value, out string err);
+        // True when a Microsoft.AutoSuperResolution2_* package folder exists; an access error counts as not installed.
+        bool AutoSrInstalled();
+        // Lowercase file name of the foreground window's process, or "" when there is none.
+        string ForegroundExe();
+    }
+
     // Device ids (spec section 3; same values as G-Helper app/AsusACPI.cs).
     public static class DeviceIds
     {

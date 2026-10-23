@@ -69,6 +69,7 @@ namespace Overdrive.Helper.Tests
             public FakeServices Services = new FakeServices();
             public FakeWinPower Power = new FakeWinPower();
             public FakeHidBus Bus = new FakeHidBus();
+            public FakeSystemControls Sys = new FakeSystemControls();
             public List<int> Sleeps = new List<int>();      // delays the helper asked for, never actually waited
             public HelperCore Core;
             public Rig() : this(true) { }
@@ -77,6 +78,7 @@ namespace Overdrive.Helper.Tests
                 Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms));
                 Core.WinPower = Power;
                 Core.Hid = new AsusHid(Bus);
+                Core.SystemControls = Sys;
                 Core.ProductName = "ROG Ally X RC72LA_RC72LA";
             }
 
@@ -1226,9 +1228,161 @@ namespace Overdrive.Helper.Tests
             Equal(0, rig.Bus.Writes.Count, "nothing written");
         }
 
+        // ---------- touchscreen, Auto SR, foreground (Task 3) ----------
+
+        private const string OwnerGpu = "VRROptimizeEnable=1;DXGIEffects=1028;SwapEffectUpgradeEnable=1;AutoHDREnable=0;";
+
+        public static void AutoSr_ReadValue()
+        {
+            Equal(1028, AutoSr.Read(OwnerGpu), "on");
+            Equal(1024, AutoSr.Read("VRROptimizeEnable=1;DXGIEffects=1024;"), "off");
+            Equal(null, AutoSr.Read("VRROptimizeEnable=1;AutoHDREnable=0;"), "missing");
+            Equal(null, AutoSr.Read(""), "empty");
+            Equal(null, AutoSr.Read(null), "null");
+            Equal(null, AutoSr.Read("DXGIEffects=abc;"), "not a number");
+            Equal(7, AutoSr.Read("DXGIEffects=7"), "other value, no trailing semicolon");
+        }
+
+        public static void AutoSr_KeepsOtherPairs()
+        {
+            Equal(OwnerGpu.Replace("1028", "1024"), AutoSr.Write(OwnerGpu, false), "off keeps the other pairs in order");
+            Equal(OwnerGpu, AutoSr.Write(OwnerGpu.Replace("1028", "1024"), true), "on restores 1028");
+            Equal(OwnerGpu, AutoSr.Write(OwnerGpu, true), "already on is unchanged");
+            Equal("A=1;DXGIEffects=1028;B=2;", AutoSr.Write("A=1;DXGIEffects=77;B=2;", true), "unknown value replaced in place");
+        }
+
+        public static void AutoSr_AppendsWhenMissing()
+        {
+            Equal("DXGIEffects=1024;", AutoSr.Write("", false), "empty string");
+            Equal("DXGIEffects=1028;", AutoSr.Write(null, true), "null");
+            Equal("A=1;B=2;DXGIEffects=1028;", AutoSr.Write("A=1;B=2;", true), "appended after the others");
+            Equal("A=1;DXGIEffects=1024;", AutoSr.Write("A=1", false), "no trailing semicolon");
+        }
+
+        public static void Touchscreen_SetReturnsAtOnce()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":false}}");
+            True(Ok(r), "set accepted: " + Msg(r));
+            Equal(false, ((Dictionary<string, object>)r["data"])["enabled"], "echo");
+            SeqEqual(new[] { "False" }, rig.Sys.TouchSets.ConvertAll(b => b.ToString()), "started once, disabling");
+            Equal(0, rig.Sys.TouchReads, "set never waits on a read");
+            // a second change while the first runs is refused
+            var r2 = rig.Send("{\"id\":2,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":true}}");
+            True(!Ok(r2) && Msg(r2).Contains("already running"), "busy refused: " + Msg(r2));
+            Equal(1, rig.Sys.TouchSets.Count, "second not started");
+            // arguments are checked
+            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":1}}")), "enabled must be a boolean");
+            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_touchscreen\"}")), "enabled required");
+            rig.Sys.TouchBusy = false;
+            rig.Sys.TouchStartFails = true;
+            var r3 = rig.Send("{\"id\":5,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":true}}");
+            True(!Ok(r3) && Msg(r3) == "Could not start PowerShell.", "start failure reported: " + Msg(r3));
+        }
+
+        public static void Touchscreen_GetReportsState()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"get_touchscreen\"}");
+            True(Ok(r), Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(true, d["found"], "found");
+            Equal(true, d["enabled"], "enabled");
+            Equal(@"HID\NVTK0603&COL01\5&1234&0&0000", d["instanceId"], "instance id");
+            rig.Sys.Touch = new TouchInfo { Found = true, Enabled = false, InstanceId = "x" };
+            Equal(false, ((Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"get_touchscreen\"}")["data"])["enabled"], "disabled");
+            rig.Sys.Touch = new TouchInfo { Error = "PowerShell did not answer in 5 seconds." };
+            var e = rig.Send("{\"id\":3,\"cmd\":\"get_touchscreen\"}");
+            True(!Ok(e) && Msg(e) == "PowerShell did not answer in 5 seconds.", "read timeout reported: " + Msg(e));
+        }
+
+        public static void Touchscreen_NotFound()
+        {
+            var rig = new Rig();
+            rig.Sys.Touch = new TouchInfo { Found = false };
+            var r = rig.Send("{\"id\":1,\"cmd\":\"get_touchscreen\"}");
+            True(Ok(r), "not found is a normal answer: " + Msg(r));
+            var d = (Dictionary<string, object>)r["data"];
+            Equal(false, d["found"], "found");
+            Equal(false, d["enabled"], "enabled");
+            Equal(null, d["instanceId"], "no instance id");
+        }
+
+        public static void System_NotAvailableWithoutSystemControls()
+        {
+            var rig = new Rig();
+            rig.Core.SystemControls = null;
+            foreach (string c in new[] { "get_touchscreen", "get_auto_sr", "foreground" })
+            {
+                var r = rig.Send("{\"id\":1,\"cmd\":\"" + c + "\"}");
+                True(!Ok(r) && Msg(r) == HelperCore.SystemUnavailable, c + ": " + Msg(r));
+            }
+        }
+
+        public static void AutoSr_GetReportsInstalledAndValue()
+        {
+            var rig = new Rig();
+            var d = (Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"get_auto_sr\"}")["data"];
+            Equal(true, d["installed"], "installed");
+            Equal(1028, d["value"], "value");
+            rig.Sys.Gpu = null;
+            Equal(null, ((Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"get_auto_sr\"}")["data"])["value"], "no setting yet");
+            rig.Sys.Installed = false;
+            var n = (Dictionary<string, object>)rig.Send("{\"id\":3,\"cmd\":\"get_auto_sr\"}")["data"];
+            Equal(false, n["installed"], "not installed");
+            Equal(null, n["value"], "no value when not installed");
+        }
+
+        public static void AutoSr_SetWritesOnlyThePair()
+        {
+            var rig = new Rig();
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}");
+            True(Ok(r), Msg(r));
+            SeqEqual(new[] { OwnerGpu.Replace("1028", "1024") }, rig.Sys.GpuWrites, "off write");
+            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":true}}")), "on");
+            SeqEqual(new[] { OwnerGpu.Replace("1028", "1024"), OwnerGpu }, rig.Sys.GpuWrites, "on write restores the owner's string");
+            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":\"yes\"}}")), "on must be a boolean");
+            rig.Sys.GpuWriteFails = true;
+            var f = rig.Send("{\"id\":4,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}");
+            True(!Ok(f) && Msg(f) == "registry write failed", "write failure reported: " + Msg(f));
+        }
+
+        public static void AutoSr_NotInstalledRefused()
+        {
+            var rig = new Rig();
+            rig.Sys.Installed = false;
+            var r = rig.Send("{\"id\":1,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":true}}");
+            True(!Ok(r) && Msg(r) == HelperCore.AutoSrNotInstalled, "refused: " + Msg(r));
+            Equal(0, rig.Sys.GpuWrites.Count, "nothing written");
+        }
+
+        public static void Foreground_Lowercase()
+        {
+            var rig = new Rig();
+            rig.Sys.Foreground = "steam.exe";
+            Equal("steam.exe", ((Dictionary<string, object>)rig.Send("{\"id\":1,\"cmd\":\"foreground\"}")["data"])["exe"], "exe");
+            rig.Sys.Foreground = "Steam.EXE";
+            Equal("steam.exe", ((Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"foreground\"}")["data"])["exe"], "lowercased by the protocol too");
+            rig.Sys.Foreground = null;
+            Equal("", ((Dictionary<string, object>)rig.Send("{\"id\":3,\"cmd\":\"foreground\"}")["data"])["exe"], "none gives empty");
+        }
+
+        public static void Foreground_AllowedOffAlly()
+        {
+            var rig = new Rig(false);
+            rig.Sys.Foreground = "game.exe";
+            True(Ok(rig.Send("{\"id\":1,\"cmd\":\"foreground\"}")), "read");
+            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"get_touchscreen\"}")), "read");
+            True(Ok(rig.Send("{\"id\":3,\"cmd\":\"get_auto_sr\"}")), "read");
+            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":false}}")), "write refused");
+            True(!Ok(rig.Send("{\"id\":5,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}")), "write refused");
+            Equal(0, rig.Sys.TouchSets.Count, "no touch change");
+            Equal(0, rig.Sys.GpuWrites.Count, "no registry write");
+        }
+
         public static void NotAlly_RefusesAllButReadAllowList()
         {
-            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode" },
+            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode", "get_touchscreen", "get_auto_sr", "foreground" },
                 new List<string>(HelperCore.ReadCommands), "read allow-list");
             var rig = new Rig(false);
             int n = 0, refused = 0;
@@ -1239,7 +1393,7 @@ namespace Overdrive.Helper.Tests
                 if (read) True(Msg(r) != HelperCore.NotAllyMessage, cmd + " is a read and must not be refused as non-Ally");
                 else { True(!Ok(r) && Msg(r) == HelperCore.NotAllyMessage, cmd + " refused: " + Msg(r)); refused++; }
             }
-            Equal(12, refused, "every non-read command refused");
+            Equal(14, refused, "every non-read command refused");
             Equal(0, rig.Power.Writes().Count, "no power write");
             Equal(0, rig.Bus.Writes.Count, "no HID write");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get"), "only reads reached ACPI: " + c);

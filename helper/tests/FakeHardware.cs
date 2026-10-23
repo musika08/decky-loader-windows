@@ -166,6 +166,47 @@ namespace Overdrive.Helper.Tests
         }
     }
 
+    // Touchscreen, Auto SR registry value and foreground app stand-in. Nothing blocks: a touchscreen set only records.
+    public class FakeSystemControls : ISystemControls
+    {
+        public TouchInfo Touch = new TouchInfo { Found = true, Enabled = true, InstanceId = @"HID\NVTK0603&COL01\5&1234&0&0000" };
+        public readonly List<bool> TouchSets = new List<bool>();
+        public bool TouchBusy;          // a previous change "still running"
+        public bool TouchStartFails;
+        public int TouchReads;
+        public string Gpu = "VRROptimizeEnable=1;DXGIEffects=1028;SwapEffectUpgradeEnable=1;AutoHDREnable=0;";
+        public readonly List<string> GpuWrites = new List<string>();
+        public bool GpuWriteFails;
+        public bool Installed = true;
+        public string Foreground = "";
+
+        public TouchInfo GetTouchscreen() { TouchReads++; return Touch; }
+
+        public bool StartSetTouchscreen(bool enabled, out string err)
+        {
+            err = null;
+            if (TouchBusy) { err = "A touchscreen change is already running."; return false; }
+            if (TouchStartFails) { err = "Could not start PowerShell."; return false; }
+            TouchSets.Add(enabled);
+            TouchBusy = true;   // like the real one: busy until the process ends
+            return true;
+        }
+
+        public string ReadGpuSettings() { return Gpu; }
+
+        public bool WriteGpuSettings(string value, out string err)
+        {
+            err = null;
+            if (GpuWriteFails) { err = "registry write failed"; return false; }
+            GpuWrites.Add(value);
+            Gpu = value;
+            return true;
+        }
+
+        public bool AutoSrInstalled() { return Installed; }
+        public string ForegroundExe() { return Foreground; }
+    }
+
     // Windows power stand-in: boost AC/DC values and the active overlay, with every call recorded.
     public class FakeWinPower : IWinPower
     {

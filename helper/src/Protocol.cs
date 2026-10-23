@@ -39,6 +39,11 @@ namespace Overdrive.Helper
             { "controller_info", None },
             { "set_controller_mode", new[] { "mode" } },
             { "set_vibration", new[] { "strength" } },
+            { "get_touchscreen", None },
+            { "set_touchscreen", new[] { "enabled" } },
+            { "get_auto_sr", None },
+            { "set_auto_sr", new[] { "on" } },
+            { "foreground", None },
         };
 
         private static readonly string[] TopLevel = { "id", "cmd", "args" };
@@ -48,7 +53,7 @@ namespace Overdrive.Helper
         public static readonly string[] ReadCommands =
         {
             "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state",
-            "get_cpu_boost", "get_power_mode"
+            "get_cpu_boost", "get_power_mode", "get_touchscreen", "get_auto_sr", "foreground"
         };
 
         // Windows power (CPU Boost and power mode). Set after construction; null means not available.
@@ -67,6 +72,13 @@ namespace Overdrive.Helper
         public string ProductName { get; set; }
 
         public const string ControllerUnavailable = "Controller control is not available.";
+
+        // Touchscreen, Auto SR and the foreground app. Set after construction; null means not available. Named
+        // SystemControls rather than System, which would hide the System namespace inside this class.
+        public ISystemControls SystemControls { get; set; }
+
+        public const string SystemUnavailable = "Touchscreen and graphics control is not available.";
+        public const string AutoSrNotInstalled = "Refused: Auto SR is not installed on this device.";
 
         public static IEnumerable<string> CommandNames { get { return Commands.Keys; } }
 
@@ -185,6 +197,11 @@ namespace Overdrive.Helper
                 case "controller_info": return ControllerInfo(id);
                 case "set_controller_mode": return SetControllerMode(id, args);
                 case "set_vibration": return SetVibration(id, args);
+                case "get_touchscreen": return GetTouchscreen(id);
+                case "set_touchscreen": return SetTouchscreen(id, args);
+                case "get_auto_sr": return GetAutoSr(id);
+                case "set_auto_sr": return SetAutoSr(id, args);
+                case "foreground": return Foreground(id);
             }
             return Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
         }
@@ -656,6 +673,81 @@ namespace Overdrive.Helper
                 if (!Hid.SetFeature(padded, out err)) return Reply(id, false, err ?? "The controller refused the report.", null);
             }
             return Reply(id, true, "", data);
+        }
+
+        // ---------- touchscreen, Auto SR, foreground app (spec sections 3.5, 3.6, 5.1) ----------
+
+        private string GetTouchscreen(object id)
+        {
+            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            TouchInfo t = SystemControls.GetTouchscreen();
+            if (t == null) return Reply(id, false, "The touchscreen state could not be read.", null);
+            if (t.Error != null) return Reply(id, false, t.Error, null);
+            var d = new Dictionary<string, object>();
+            d["found"] = t.Found;
+            d["enabled"] = t.Found && t.Enabled;
+            d["instanceId"] = t.Found ? t.InstanceId : null;
+            return Reply(id, true, "", d);
+        }
+
+        // Starts the change and replies at once; the panel reads the state back on its next polls.
+        private string SetTouchscreen(object id, Dictionary<string, object> args)
+        {
+            bool enabled;
+            string err;
+            if (!GetBool(args, "enabled", out enabled, out err)) return Reply(id, false, err, null);
+            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (!SystemControls.StartSetTouchscreen(enabled, out err))
+                return Reply(id, false, err ?? "The touchscreen change could not be started.", null);
+            var d = new Dictionary<string, object>();
+            d["enabled"] = enabled;
+            return Reply(id, true, "", d);
+        }
+
+        private string GetAutoSr(object id)
+        {
+            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            bool installed = SystemControls.AutoSrInstalled();
+            var d = new Dictionary<string, object>();
+            d["installed"] = installed;
+            int? v = installed ? AutoSr.Read(SystemControls.ReadGpuSettings()) : null;
+            d["value"] = v.HasValue ? (object)v.Value : null;
+            return Reply(id, true, "", d);
+        }
+
+        private string SetAutoSr(object id, Dictionary<string, object> args)
+        {
+            bool on;
+            string err;
+            if (!GetBool(args, "on", out on, out err)) return Reply(id, false, err, null);
+            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (!SystemControls.AutoSrInstalled()) return Reply(id, false, AutoSrNotInstalled, null);
+            string next = AutoSr.Write(SystemControls.ReadGpuSettings(), on);
+            if (!SystemControls.WriteGpuSettings(next, out err))
+                return Reply(id, false, err ?? "The graphics setting could not be written.", null);
+            var d = new Dictionary<string, object>();
+            d["on"] = on;
+            return Reply(id, true, "", d);
+        }
+
+        private string Foreground(object id)
+        {
+            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            string exe = SystemControls.ForegroundExe();
+            var d = new Dictionary<string, object>();
+            d["exe"] = exe == null ? "" : exe.ToLowerInvariant();
+            return Reply(id, true, "", d);
+        }
+
+        private static bool GetBool(Dictionary<string, object> args, string key, out bool value, out string err)
+        {
+            value = false;
+            err = null;
+            object raw;
+            if (!args.TryGetValue(key, out raw)) { err = "Refused: '" + key + "' is required."; return false; }
+            if (!(raw is bool)) { err = "Refused: '" + key + "' must be true or false."; return false; }
+            value = (bool)raw;
+            return true;
         }
 
         private string FpsUnavailable()
