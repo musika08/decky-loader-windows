@@ -11,7 +11,7 @@ namespace Overdrive.Helper
         int DeviceGet(uint id);
         // DEVS write; G-Helper treats a result of 1 as OK.
         int DeviceSet(uint id, int value);
-        // 16 bytes: temperatures in 0-7, fan percentages in 8-15. fan: 0 = CPU (G-Helper AsusFan.CPU).
+        // 16 bytes: temperatures in 0-7, fan percentages in 8-15. fan: 0 = CPU, 1 = GPU (G-Helper AsusFan.CPU/GPU).
         // mode: performance mode value (Balanced 0, Turbo 1, Silent 2); the implementation does G-Helper's swap.
         byte[] GetFanCurve(int fan, int mode);
         // Same 16-byte layout; result 1 = OK.
@@ -54,12 +54,15 @@ namespace Overdrive.Helper
         public const uint Fppt = 0x001200C1;  // PPT_APUC1, fast boost
         public const uint TempCpu = 0x00120094;
         public const uint CpuFan = 0x00110013;
+        public const uint GpuFan = 0x00110014;        // GPU_Fan, read only (RPM)
         public const uint CpuFanCurve = 0x00110024;   // DevsCPUFanCurve, written by SetFanCurve
+        public const uint GpuFanCurve = 0x00110025;   // DevsGPUFanCurve, written by SetFanCurve
 
         public const int ModeBalanced = 0;
         public const int ModeTurbo = 1;
         public const int ModeSilent = 2;
 
         public const int FanCpu = 0;
+        public const int FanGpu = 1;
     }
 }

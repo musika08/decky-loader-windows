@@ -100,3 +100,11 @@ test('power limits outside Manual are the firmware default; 0 or null means not 
   assert.equal(powerLine(undefined, 20, 25), 'Power limits: Firmware default');
   assert.equal(powerLine(15, 20, 25), 'Power limits: Firmware default (15 / 20 / 25 W)');
 });
+
+test('liveLine shows both fans when the GPU fan is reported', () => {
+  assert.equal(liveLine(62, 3100, 2900), 'CPU 62 °C · CPU fan 3100 RPM · GPU fan 2900 RPM');
+  assert.equal(liveLine(62, null, 2900), 'CPU 62 °C · CPU fan -- RPM · GPU fan 2900 RPM');
+  assert.equal(liveLine(62, 3100, null), 'CPU 62 °C · Fan 3100 RPM');
+  assert.equal(liveLine(62, 3100, undefined), 'CPU 62 °C · Fan 3100 RPM');
+  assert.equal(liveLine(62, 3100, NaN), 'CPU 62 °C · Fan 3100 RPM');
+});

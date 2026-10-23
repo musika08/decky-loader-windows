@@ -4,7 +4,7 @@ import json
 import pytest
 
 import main
-from fake_helper import FakeClient, fail, ok
+from fake_helper import GPU_CURVE, FakeClient, fail, ok
 from overdrive.reapply import Reapplier
 from overdrive.settings import Settings
 
@@ -83,8 +83,8 @@ def test_get_state_shape(tmp_path, monkeypatch):
         p, c, s = plugin_with(tmp_path, mode="manual", spl=10, sppt=20, fppt=30, fps=60)
         return await p.get_state()
     st = run(go())
-    assert set(st) >= {"support", "mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "armoury",
-                       "unavailable"}
+    assert set(st) >= {"support", "mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "fan_curve_gpu",
+                       "armoury", "unavailable"}
     assert st["support"] == {"supported": True, "product": "ROG Ally RC71L"}
     assert (st["mode"], st["spl"], st["sppt"], st["fppt"], st["fps"]) == ("manual", 10, 20, 30, 60)
     assert st["armoury"] == {"installed": True, "replaced": False}
@@ -131,17 +131,18 @@ def test_refused_change_keeps_stored_value(tmp_path):
 
 def test_fan_curve_and_presets(tmp_path):
     async def go():
-        p, c, s = plugin_with(tmp_path, default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")})
+        p, c, s = plugin_with(tmp_path, default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")},
+                              default_curve_gpu={m: dict(GPU_CURVE) for m in ("balanced", "turbo", "silent")})
         temps = [30, 40, 50, 60, 70, 80, 90, 100]
         speeds = [10, 20, 30, 40, 50, 60, 70, 80]
         assert (await p.set_fan_curve(temps, speeds))["ok"] is True
         assert (s.fan_preset, s.fan_curve) == ("custom", {"temps": temps, "speeds": speeds})
         c.calls.clear()
         assert (await p.set_fan_preset("default"))["ok"] is True
-        assert [cmd for cmd, _ in c.writes()] == ["set_mode"]   # the firmware curve comes back with the mode write
+        assert [cmd for cmd, _ in c.writes()] == ["set_mode"]   # both firmware curves come back with the mode write
         c.calls.clear()
         assert (await p.set_fan_preset("quiet"))["ok"] is True
-        assert [cmd for cmd, _ in c.writes()] == ["set_fans"]
+        assert [(cmd, a.get("fan")) for cmd, a in c.writes()] == [("set_fans", None), ("set_fans", "gpu")]
         assert (await p.set_fan_preset("custom"))["ok"] is True  # stored custom curve still there
         assert (await p.set_fan_preset("loud"))["ok"] is False
         st = await p.get_state()
@@ -530,7 +531,7 @@ def test_get_sensors(tmp_path):
         p, c, s = plugin_with(tmp_path)
         return await p.get_sensors()
     r = run(go())
-    assert r == {"ok": True, "message": "", "cpuTempC": 55, "fanRpm": 3100, "errors": []}
+    assert r == {"ok": True, "message": "", "cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []}
 
 
 def test_plugin_json_runs_as_root():
@@ -700,3 +701,135 @@ def test_unreadable_settings_recover_record_from_bak_and_restore_on_load(monkeyp
             in st["warning"])
     assert "recovered from overdrive.json.bak" in st["warning"]
     assert "did not finish, so Armoury Crate was put back" in st["warning"]
+
+
+# ---------- GPU fan curve ----------
+
+GPU_A = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
+
+
+def both_defaults():
+    return dict(default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")},
+                default_curve_gpu={m: dict(GPU_CURVE) for m in ("balanced", "turbo", "silent")})
+
+
+def test_set_fan_curve_gpu_writes_gpu_and_keeps_cpu_as_it_runs(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, fan_preset="cool", **both_defaults())
+        cool_cpu = main.preset_curve("cool", main_curve())[0]
+        r = await p.set_fan_curve(GPU_A["temps"], GPU_A["speeds"], "gpu")
+        assert r["ok"] is True
+        assert c.writes() == [("set_fans", {"temps": GPU_A["temps"], "speeds": GPU_A["speeds"], "fan": "gpu"})]
+        assert (s.fan_preset, s.fan_curve_gpu, s.fan_curve) == ("custom", GPU_A, cool_cpu)   # CPU keeps "cool"
+        saved = Settings.load(s.path)
+        assert (saved.fan_preset, saved.fan_curve_gpu, saved.fan_curve) == ("custom", GPU_A, cool_cpu)
+        st = await p.get_state()
+        assert (st["fan_curve"], st["fan_curve_gpu"]) == (cool_cpu, GPU_A)
+
+        # A later CPU edit (already custom) leaves the GPU custom curve alone.
+        c.calls.clear()
+        cpu = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]}
+        assert (await p.set_fan_curve(cpu["temps"], cpu["speeds"]))["ok"] is True
+        assert c.writes() == [("set_fans", cpu)]
+        assert (s.fan_curve, s.fan_curve_gpu) == (cpu, GPU_A)
+    run(go())
+
+
+def test_set_fan_curve_from_default_preset_leaves_other_fan_on_firmware(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, fan_curve_gpu=dict(GPU_A), **both_defaults())   # stale GPU custom curve
+        cpu = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]}
+        assert (await p.set_fan_curve(cpu["temps"], cpu["speeds"], "cpu"))["ok"] is True
+        assert s.fan_curve_gpu is None      # the GPU fan ran its firmware curve, and still does
+        c.calls.clear()
+        await p.reapplier.apply_all()
+        assert [a.get("fan") for cmd, a in c.writes() if cmd == "set_fans"] == [None]
+    run(go())
+
+
+def test_set_fan_curve_gpu_validation_and_bad_fan(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, **both_defaults())
+        r = await p.set_fan_curve([30, 40, 50, 60, 70, 75, 80, 100], [0, 0, 0, 0, 0, 6, 12, 30], "gpu")
+        assert r == {"ok": False, "message": "Point 8: at 100 °C the fan must be at least 36 %."}
+        assert (await p.set_fan_curve(GPU_A["temps"], GPU_A["speeds"], "mid")) == \
+            {"ok": False, "message": "Fan must be cpu or gpu."}
+        assert c.writes() == [] and s.fan_curve_gpu is None and s.fan_preset == "default"
+    run(go())
+
+
+def test_set_fan_curve_gpu_refused_keeps_settings(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def refuse(args):
+            return fail("The device refused the GPU fan curve (result 0).")
+        c.handlers["set_fans"] = refuse
+        p, c, s = plugin_with(tmp_path, client=c, **both_defaults())
+        r = await p.set_fan_curve(GPU_A["temps"], GPU_A["speeds"], "gpu")
+        assert r == {"ok": False, "message": "The device refused the GPU fan curve (result 0)."}
+        assert (s.fan_preset, s.fan_curve, s.fan_curve_gpu) == ("default", None, None)
+    run(go())
+
+
+def test_preset_with_unknown_gpu_default_applies_cpu_and_says_so(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, default_curve={m: main_curve() for m in ("balanced", "turbo", "silent")})
+        r = await p.set_fan_preset("quiet")
+        assert r["ok"] is True
+        assert r["message"] == ("The device's default GPU fan curve is not known yet, so the fan preset was not "
+                                "applied to the GPU fan.")
+        # the GPU fan is put back on its firmware curve by the mode write, then the CPU's quiet curve goes on
+        assert [(cmd, a.get("fan")) for cmd, a in c.writes()] == [("set_mode", None), ("set_fans", None)]
+        assert s.fan_preset == "quiet"
+    run(go())
+
+
+def test_preset_with_unknown_cpu_default_changes_nothing(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, default_curve_gpu={m: dict(GPU_CURVE) for m in ("balanced", "turbo", "silent")})
+        r = await p.set_fan_preset("cool")
+        assert r == {"ok": False,
+                     "message": "The device's default fan curve is not known yet, so the fan preset was not applied."}
+        assert c.writes() == [] and s.fan_preset == "default"
+    run(go())
+
+
+def test_custom_preset_needs_a_custom_curve_on_either_fan(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, **both_defaults())
+        assert (await p.set_fan_preset("custom"))["ok"] is False
+        s.fan_curve_gpu = dict(GPU_A)
+        assert (await p.set_fan_preset("custom"))["ok"] is True
+        # GPU custom, CPU without one: the CPU's firmware curve comes back with the mode write
+        assert [(cmd, a.get("fan")) for cmd, a in c.writes()] == [("set_mode", None), ("set_fans", "gpu")]
+    run(go())
+
+
+def test_mode_change_and_reset_rewrite_both_fans(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, fan_preset="cool", **both_defaults())
+        assert (await p.set_mode("turbo"))["ok"] is True
+        assert [(cmd, a.get("fan")) for cmd, a in c.writes()] == \
+            [("set_mode", None), ("set_fans", None), ("set_fans", "gpu")]
+        c.calls.clear()
+        assert (await p.reset_defaults())["ok"] is True
+        assert c.writes() == [("set_mode", {"mode": "balanced"}), ("set_fps_limit", {"fps": 0})]
+    run(go())
+
+
+def test_get_state_gpu_curve_follows_preset(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path, fan_preset="quiet", **both_defaults())
+        st = await p.get_state()
+        assert st["fan_curve_gpu"] == main.preset_curve("quiet", GPU_CURVE)[0]
+        assert st["fan_curve"] == main.preset_curve("quiet", main_curve())[0]
+        s.fan_preset = "default"
+        st = await p.get_state()
+        assert st["fan_curve_gpu"] == GPU_CURVE and st["fan_note"] == ""
+    run(go())
+
+
+def test_get_sensors_without_helper_has_gpu_field():
+    r = asyncio.run(main.Plugin().get_sensors())
+    assert r["gpuFanRpm"] is None and r["ok"] is False

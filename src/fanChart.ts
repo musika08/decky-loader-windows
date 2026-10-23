@@ -2,6 +2,12 @@
 // directly (same rule as curve.ts). The panel passes validateCurve's reason and minSpeedAt in from curve.ts.
 
 export type ChartCurve = { temps: number[]; speeds: number[] };
+// Which fan the chart shows and edits (G-Helper AsusFan.CPU / AsusFan.GPU).
+export type Fan = 'cpu' | 'gpu';
+export const FANS: { fan: Fan; label: string }[] = [
+  { fan: 'cpu', label: 'CPU fan' },
+  { fan: 'gpu', label: 'GPU fan' },
+];
 // 'idle': the chart is only focused and the D-pad navigates past it; 'point' / 'temp': engaged by A.
 export type EditMode = 'idle' | 'point' | 'temp';
 
@@ -77,6 +83,40 @@ export function fillPath(c: ChartCurve): string {
   return linePath(c) + ' L' + fmt(xOf(last)) + ' ' + fmt(PLOT.y1) + ' L' + fmt(xOf(first)) + ' ' + fmt(PLOT.y1) + ' Z';
 }
 
+// Past the last point the fan holds that point's speed up to TEMP_MAX (the firmware keeps the last level), drawn
+// as a lighter, dashed continuation of the line. '' when the last point already sits at TEMP_MAX.
+export function tailPath(c: ChartCurve): string {
+  const n = c.temps.length;
+  if (n === 0 || c.temps[n - 1] >= TEMP_MAX) return '';
+  const y = fmt(yOf(c.speeds[n - 1]));
+  return 'M' + fmt(xOf(c.temps[n - 1])) + ' ' + y + ' L' + fmt(xOf(TEMP_MAX)) + ' ' + y;
+}
+
+// Area under that continuation, down to the 0 % axis (drawn lighter than fillPath).
+export function tailFillPath(c: ChartCurve): string {
+  const tail = tailPath(c);
+  if (!tail) return '';
+  const last = c.temps[c.temps.length - 1];
+  return tail + ' L' + fmt(xOf(TEMP_MAX)) + ' ' + fmt(PLOT.y1) + ' L' + fmt(xOf(last)) + ' ' + fmt(PLOT.y1) + ' Z';
+}
+
+// One dot per distinct position: stacked points (firmware curves repeat their last temperature and speed) draw as a
+// single dot. index is the point that a press there picks (the highest one, as nearestPoint's tie rule); indices
+// lists every point at that position, so an invalid one among them still colours the dot.
+export function dotPoints(c: ChartCurve): { index: number; indices: number[]; temp: number; speed: number }[] {
+  const dots: { index: number; indices: number[]; temp: number; speed: number }[] = [];
+  for (let i = 0; i < c.temps.length; i++) {
+    const same = dots.find((d) => d.temp === c.temps[i] && d.speed === c.speeds[i]);
+    if (same) {
+      same.index = i;
+      same.indices.push(i);
+    } else {
+      dots.push({ index: i, indices: [i], temp: c.temps[i], speed: c.speeds[i] });
+    }
+  }
+  return dots;
+}
+
 // The safety floor: the lowest fan % allowed at each whole temperature.
 export function floorPath(minAt: (temp: number) => number): string {
   const parts: string[] = [];
@@ -87,13 +127,16 @@ export function floorPath(minAt: (temp: number) => number): string {
 }
 
 // Current CPU temperature marker; null when there is no reading. Off-scale readings sit on the edge.
+// Both fans are charted against the CPU temperature, as in G-Helper (Fans.cs has one 20..110 °C axis for both charts
+// and reads no GPU temperature for them).
 export function markerX(temp: number | null | undefined): number | null {
   if (typeof temp !== 'number' || !isFinite(temp)) return null;
   return xOf(Math.min(TEMP_MAX, Math.max(TEMP_MIN, temp)));
 }
 
-export function markerLabel(temp: number): string {
-  return Math.round(temp) + ' °C';
+// prefix names the sensor when it is not obvious (the GPU fan chart shows the CPU temperature: "CPU 57 °C").
+export function markerLabel(temp: number, prefix = ''): string {
+  return prefix + Math.round(temp) + ' °C';
 }
 
 // ---------- picking ----------

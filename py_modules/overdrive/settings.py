@@ -20,6 +20,7 @@ from typing import Optional
 MODES = ("silent", "balanced", "turbo", "manual")
 CURVE_MODES = ("balanced", "turbo", "silent")          # firmware curves; manual uses balanced's
 PRESETS = ("default", "quiet", "cool", "custom")
+FANS = ("cpu", "gpu")                                  # G-Helper AsusFan.CPU / AsusFan.GPU; written in this order
 ALLOWED_FPS = (0, 30, 40, 45, 50, 60, 75, 90, 120)     # 0 = off (the helper maps it to the driver's value)
 POWER_MIN, POWER_MAX, POWER_DEFAULT = 5, 50, 30
 CURVE_POINTS, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX = 8, 20, 110, 100
@@ -162,8 +163,10 @@ class Settings:
         self.fppt = POWER_DEFAULT
         self.fps = 0
         self.fan_preset = "default"
-        self.fan_curve: Optional[dict] = None          # the custom curve
+        self.fan_curve: Optional[dict] = None          # the custom CPU fan curve
         self.default_curve: Optional[dict] = None      # {mode: {temps, speeds}} read from the device on first run
+        self.fan_curve_gpu: Optional[dict] = None      # the custom GPU fan curve
+        self.default_curve_gpu: Optional[dict] = None  # the GPU fan's {mode: {temps, speeds}}, read like the CPU one
         self.armoury_replaced = False
         self.armoury_recorded: dict = {}
         self.armoury_running: list = []
@@ -175,7 +178,26 @@ class Settings:
         self._unreadable_pending = False    # the unreadable file is still on disk with no copy kept yet
 
     FIELDS = ("mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "default_curve",
+              "fan_curve_gpu", "default_curve_gpu",
               "armoury_replaced", "armoury_recorded", "armoury_running", "user_set")
+
+    # Per-fan attribute names: (custom curve, default curves by mode).
+    _FAN_ATTRS = {"cpu": ("fan_curve", "default_curve"), "gpu": ("fan_curve_gpu", "default_curve_gpu")}
+
+    def custom_curve(self, fan: str) -> Optional[dict]:
+        return getattr(self, self._FAN_ATTRS[fan][0])
+
+    def set_custom_curve(self, fan: str, curve: Optional[dict]) -> None:
+        setattr(self, self._FAN_ATTRS[fan][0], curve)
+
+    def default_curves(self, fan: str) -> Optional[dict]:
+        return getattr(self, self._FAN_ATTRS[fan][1])
+
+    def set_default_curves(self, fan: str, curves: Optional[dict]) -> None:
+        setattr(self, self._FAN_ATTRS[fan][1], curves)
+
+    def has_custom(self) -> bool:
+        return any(self.custom_curve(f) for f in FANS)
 
     @classmethod
     def load(cls, path: str, logger=None, now=None) -> "Settings":
@@ -303,15 +325,17 @@ class Settings:
         if _is_int(raw.get("fps")) and raw["fps"] in ALLOWED_FPS:
             self.fps = raw["fps"]
         self.fan_curve = _valid_curve(raw.get("fan_curve"))
+        self.fan_curve_gpu = _valid_curve(raw.get("fan_curve_gpu"))
         if raw.get("fan_preset") in PRESETS:
             self.fan_preset = raw["fan_preset"]
-        if self.fan_preset == "custom" and self.fan_curve is None:
+        if self.fan_preset == "custom" and not self.has_custom():
             self.fan_preset = "default"
-        dc = raw.get("default_curve")
-        if isinstance(dc, dict):
-            curves = {m: _device_curve(dc.get(m)) for m in CURVE_MODES}
-            curves = {m: c for m, c in curves.items() if c is not None}
-            self.default_curve = curves or None
+        for key in ("default_curve", "default_curve_gpu"):
+            dc = raw.get(key)
+            if isinstance(dc, dict):
+                curves = {m: _device_curve(dc.get(m)) for m in CURVE_MODES}
+                curves = {m: c for m, c in curves.items() if c is not None}
+                setattr(self, key, curves or None)
         if isinstance(raw.get("armoury_replaced"), bool):
             self.armoury_replaced = raw["armoury_replaced"]
         rec = raw.get("armoury_recorded")

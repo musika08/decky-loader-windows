@@ -9,12 +9,14 @@ from overdrive.settings import Settings
 
 # A plausible device curve whose top points sit below G-Helper's minimum (ruling P6).
 LOW_CURVE = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [0, 0, 5, 8, 10, 11, 12, 20]}
+GPU_LOW = {"temps": [48, 54, 59, 62, 62, 62, 62, 62], "speeds": [1, 9, 18, 22, 22, 22, 22, 22]}
 
 
 def test_missing_file_gives_defaults(tmp_path):
     s = Settings.load(str(tmp_path / "overdrive.json"))
     assert (s.mode, s.spl, s.sppt, s.fppt, s.fps) == ("balanced", 30, 30, 30, 0)
     assert (s.fan_preset, s.fan_curve, s.default_curve) == ("default", None, None)
+    assert (s.fan_curve_gpu, s.default_curve_gpu) == (None, None)
     assert (s.armoury_replaced, s.armoury_recorded, s.armoury_running) == (False, {}, [])
     assert s.user_set is False
 
@@ -36,6 +38,8 @@ def test_settings_roundtrip(tmp_path):
     s.fan_preset = "custom"
     s.fan_curve = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]}
     s.default_curve = {"balanced": LOW_CURVE, "turbo": LOW_CURVE, "silent": LOW_CURVE}
+    s.fan_curve_gpu = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
+    s.default_curve_gpu = {"balanced": GPU_LOW, "turbo": GPU_LOW, "silent": GPU_LOW}
     s.armoury_replaced = True
     s.armoury_recorded = {"ArmouryCrateSEService": "AutomaticDelayedStart", "LightingService": "Manual"}
     s.armoury_running = ["ArmouryCrateSEService"]
@@ -44,7 +48,11 @@ def test_settings_roundtrip(tmp_path):
     again = Settings.load(p)
     assert again.to_dict() == s.to_dict()
     with open(p, encoding="utf-8") as f:
-        assert json.load(f)["armoury_replaced"] is True
+        on_disk = json.load(f)
+    assert on_disk["armoury_replaced"] is True
+    assert on_disk["fan_curve_gpu"] == s.fan_curve_gpu and on_disk["default_curve_gpu"]["turbo"] == GPU_LOW
+    with open(p + ".bak", encoding="utf-8") as f:
+        assert json.load(f) == on_disk   # the .bak carries the GPU fields too
 
 
 def test_corrupt_settings_fall_back_per_field(tmp_path):
@@ -175,7 +183,9 @@ NOW = datetime.datetime(2026, 10, 23, 8, 30, 5, tzinfo=datetime.timezone.utc)
 
 def _full_settings():
     return {"mode": "manual", "spl": 12, "sppt": 20, "fppt": 35, "fps": 45, "fan_preset": "quiet",
-            "fan_curve": None, "default_curve": None, "armoury_replaced": True,
+            "fan_curve": None, "default_curve": None,
+            "fan_curve_gpu": {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]},
+            "default_curve_gpu": {"balanced": dict(GPU_LOW)}, "armoury_replaced": True,
             "armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"], "user_set": True}
 
 
@@ -299,3 +309,69 @@ def test_armoury_record_recovered_from_newest_readable_copy(tmp_path):
         (True, RECORD, ["ArmouryCrateSEService"])
     assert s.mode == "balanced"
     assert "recovered from overdrive.json.unreadable-20261001T000000Z" in s.warning
+
+
+# ---------- GPU fan curve ----------
+
+def test_gpu_fields_fall_back_per_field(tmp_path):
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({
+        "fan_curve": {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]},
+        "fan_curve_gpu": {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [50, 40, 30, 20, 10, 5, 5, 5]},
+        "default_curve_gpu": {"balanced": GPU_LOW, "turbo": {"temps": [1, 2], "speeds": [3]}, "evil": GPU_LOW},
+        "fan_preset": "custom",
+    }), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert s.fan_curve_gpu is None                          # decreasing speeds: invalid, dropped
+    assert s.default_curve_gpu == {"balanced": GPU_LOW}      # bad and unknown modes dropped, the rest kept
+    assert s.fan_curve is not None and s.fan_preset == "custom"
+
+
+def test_gpu_default_curve_not_a_dict_is_ignored(tmp_path):
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"default_curve_gpu": [1, 2, 3], "fan_curve_gpu": "loud"}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert (s.default_curve_gpu, s.fan_curve_gpu) == (None, None)
+
+
+def test_custom_preset_kept_with_only_a_gpu_curve(tmp_path):
+    p = tmp_path / "overdrive.json"
+    gpu = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
+    p.write_text(json.dumps({"fan_preset": "custom", "fan_curve_gpu": gpu}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert (s.fan_preset, s.fan_curve, s.fan_curve_gpu) == ("custom", None, gpu)
+    assert s.has_custom() and s.custom_curve("gpu") == gpu and s.custom_curve("cpu") is None
+
+
+def test_unreadable_file_keeps_gpu_defaults_out_of_recovery(tmp_path):
+    """Recovery only takes the Armoury record from the .bak; the GPU fields start fresh like the CPU ones."""
+    p = tmp_path / "overdrive.json"
+    s = Settings.load(str(p))
+    s.armoury_recorded = dict(RECORD)
+    s.fan_curve_gpu = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
+    s.default_curve_gpu = {"balanced": GPU_LOW}
+    s.save()
+    with open(str(p) + ".bak", encoding="utf-8") as f:
+        assert json.load(f)["default_curve_gpu"] == {"balanced": GPU_LOW}
+    p.write_text("{broken", encoding="utf-8")
+    again = Settings.load(str(p), now=NOW)
+    assert again.armoury_recorded == RECORD
+    assert (again.fan_curve_gpu, again.default_curve_gpu) == (None, None)   # read from the device again
+
+
+def test_gpu_presets_derive_from_the_gpu_default():
+    from overdrive.reapply import fan_note, fan_plan
+    s = Settings("")
+    s.default_curve = {m: dict(LOW_CURVE) for m in st.CURVE_MODES}
+    s.default_curve_gpu = {m: dict(GPU_LOW) for m in st.CURVE_MODES}
+    s.fan_preset = "cool"
+    cpu, _, _ = fan_plan(s, "cpu")
+    gpu, _, _ = fan_plan(s, "gpu")
+    assert cpu == st.preset_curve("cool", LOW_CURVE)[0]
+    assert gpu == st.preset_curve("cool", GPU_LOW)[0]
+    assert gpu["temps"] == GPU_LOW["temps"] and gpu["speeds"][0] == 16
+    s.fan_preset = "default"
+    assert fan_plan(s, "gpu") == (None, "", "")          # the firmware curve already passes: nothing to write
+    assert fan_note(s) == "Adjusted to the safe minimum"   # only the CPU's LOW curve was raised
+    s.default_curve = {m: dict(GPU_LOW) for m in st.CURVE_MODES}
+    assert fan_note(s) == ""

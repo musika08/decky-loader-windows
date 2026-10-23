@@ -62,7 +62,15 @@ function show(v: number | null | undefined): string {
   return typeof v === 'number' && isFinite(v) ? String(Math.round(v)) : '--';
 }
 
-export function liveLine(cpuTempC: number | null | undefined, fanRpm: number | null | undefined): string {
+// The GPU fan is added when the device reports it (gpuFanRpm a number); otherwise the line keeps its one-fan form.
+export function liveLine(
+  cpuTempC: number | null | undefined,
+  fanRpm: number | null | undefined,
+  gpuFanRpm?: number | null,
+): string {
+  if (typeof gpuFanRpm === 'number' && isFinite(gpuFanRpm)) {
+    return 'CPU ' + show(cpuTempC) + ' °C · CPU fan ' + show(fanRpm) + ' RPM · GPU fan ' + show(gpuFanRpm) + ' RPM';
+  }
   return 'CPU ' + show(cpuTempC) + ' °C · Fan ' + show(fanRpm) + ' RPM';
 }
 

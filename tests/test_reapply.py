@@ -1,6 +1,6 @@
 import asyncio
 
-from fake_helper import FakeClient, ok
+from fake_helper import GPU_CURVE, FakeClient, ok
 from overdrive.reapply import Reapplier
 from overdrive.settings import Settings
 
@@ -49,8 +49,11 @@ def test_start_reads_default_curves_once_and_applies(tmp_path):
         s = make(tmp_path, mode="manual", spl=10, sppt=20, fppt=30, fps=60)
         r = Reapplier(c, s, clock=Clock(), power_source=Power())
         await r.apply_all()
-        assert [a for cmd, a in c.calls if cmd == "get_fans"] == [{"mode": m} for m in ("balanced", "turbo", "silent")]
+        assert [a for cmd, a in c.calls if cmd == "get_fans"] == \
+            [{"mode": m} for m in ("balanced", "turbo", "silent")] + \
+            [{"mode": m, "fan": "gpu"} for m in ("balanced", "turbo", "silent")]
         assert set(Settings.load(s.path).default_curve) == {"balanced", "turbo", "silent"}
+        assert Settings.load(s.path).default_curve_gpu == {m: GPU_CURVE for m in ("balanced", "turbo", "silent")}
         assert c.writes() == [("set_mode", {"mode": "manual", "spl": 10, "sppt": 20, "fppt": 30}),
                               ("set_fps_limit", {"fps": 60})]
         c.calls.clear()
@@ -67,6 +70,7 @@ def test_presets_are_written_after_mode(tmp_path):
         cmds = [cmd for cmd, _ in c.writes()]
         assert cmds == ["set_mode", "set_fans"]       # LOW is below the minimum, so "default" is written raised
         assert c.writes()[1][1]["speeds"][-1] == 36
+        assert "fan" not in c.writes()[1][1]           # the CPU fan (the helper's default); GPU_CURVE passes as is
     run(go())
 
 
@@ -350,7 +354,7 @@ def test_partial_default_curve_read_is_completed_later(tmp_path):
         async def turbo_fails(args):
             if args["mode"] == "turbo":
                 return {"id": None, "ok": False, "message": "Overdrive helper did not answer in 10 s.", "data": None}
-            return ok({"mode": args["mode"], **LOW})
+            return ok({"mode": args["mode"], **(GPU_CURVE if args.get("fan") == "gpu" else LOW)})
         c.handlers["get_fans"] = turbo_fails
         s = make(tmp_path, user_set=False)
         r = Reapplier(c, s, clock=Clock(), power_source=Power())
@@ -359,10 +363,92 @@ def test_partial_default_curve_read_is_completed_later(tmp_path):
         c.calls.clear()
         del c.handlers["get_fans"]
         await r.apply_all()
-        assert [a for cmd, a in c.calls if cmd == "get_fans"] == [{"mode": "turbo"}]   # only the missing mode
+        assert [a for cmd, a in c.calls if cmd == "get_fans"] == [{"mode": "turbo"}, {"mode": "turbo", "fan": "gpu"}]
         saved = Settings.load(s.path).default_curve
         assert set(saved) == {"balanced", "turbo", "silent"} and saved["balanced"] == LOW
+        saved_gpu = Settings.load(s.path).default_curve_gpu
+        assert set(saved_gpu) == {"balanced", "turbo", "silent"} and saved_gpu["balanced"] == GPU_CURVE
         c.calls.clear()
         await r.apply_all()
         assert all(cmd != "get_fans" for cmd, _ in c.calls)
+    run(go())
+
+
+# ---------- GPU fan curve ----------
+
+GPU_LOW = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [0, 0, 5, 8, 10, 11, 12, 20]}
+
+
+def test_reapply_writes_both_fans_each_from_its_own_default(tmp_path):
+    async def go():
+        c = FakeClient(curves={m: LOW for m in ("balanced", "turbo", "silent")},
+                       curves_gpu={m: GPU_LOW for m in ("balanced", "turbo", "silent")})
+        s = make(tmp_path, mode="silent", fan_preset="quiet")
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r.apply_all()
+        w = c.writes()
+        assert [cmd for cmd, _ in w] == ["set_mode", "set_fans", "set_fans"]   # mode, then CPU, then GPU
+        assert w[1][1]["temps"] == LOW["temps"] and "fan" not in w[1][1]
+        assert w[2][1]["temps"] == GPU_LOW["temps"] and w[2][1]["fan"] == "gpu"
+        assert w[2][1]["speeds"][-1] == 42            # 105 °C: G-Helper's floor ceil((105 - 70) * 1.2)
+        assert r.fan_note == "Both fans adjusted to the safe minimum"
+        assert r.warning == ""
+    run(go())
+
+
+def test_reapply_custom_uses_each_fans_custom_curve(tmp_path):
+    async def go():
+        c = FakeClient()
+        cpu = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]}
+        gpu = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
+        s = make(tmp_path, fan_preset="custom", fan_curve=cpu, fan_curve_gpu=gpu)
+        await Reapplier(c, s, clock=Clock(), power_source=Power()).apply_all()
+        assert c.writes()[1:] == [("set_fans", {"temps": cpu["temps"], "speeds": cpu["speeds"]}),
+                                  ("set_fans", {"temps": gpu["temps"], "speeds": gpu["speeds"], "fan": "gpu"})]
+    run(go())
+
+
+def test_reapply_custom_without_gpu_curve_keeps_gpu_firmware_curve(tmp_path):
+    async def go():
+        c = FakeClient()
+        cpu = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [10, 20, 30, 40, 50, 60, 70, 80]}
+        s = make(tmp_path, fan_preset="custom", fan_curve=cpu)
+        await Reapplier(c, s, clock=Clock(), power_source=Power()).apply_all()
+        assert c.writes()[1:] == [("set_fans", {"temps": cpu["temps"], "speeds": cpu["speeds"]})]
+    run(go())
+
+
+def test_reapply_gpu_default_unknown_warns_but_applies_cpu(tmp_path):
+    async def go():
+        c = FakeClient()
+
+        async def no_gpu(args):
+            if args.get("fan") == "gpu":
+                return {"id": 1, "ok": False, "message": "The device did not return a GPU fan curve.", "data": None}
+            return ok({"mode": args["mode"], **LOW})
+        c.handlers["get_fans"] = no_gpu
+        s = make(tmp_path, fan_preset="cool")
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r.apply_all()
+        assert [cmd for cmd, _ in c.writes()] == ["set_mode", "set_fans"]
+        assert "fan" not in c.writes()[1][1]
+        assert r.warning == ("The device's default GPU fan curve is not known yet, so the fan preset was not "
+                             "applied to the GPU fan.")
+        assert s.default_curve_gpu is None and set(s.default_curve) == {"balanced", "turbo", "silent"}
+    run(go())
+
+
+def test_reapply_gpu_curve_refusal_is_reported(tmp_path):
+    async def go():
+        c = FakeClient(curves_gpu={m: GPU_LOW for m in ("balanced", "turbo", "silent")})
+
+        async def refuse_gpu(args):
+            if args.get("fan") == "gpu":
+                return {"id": 1, "ok": False, "message": "", "data": None}
+            return ok(dict(args))
+        c.handlers["set_fans"] = refuse_gpu
+        s = make(tmp_path, fan_preset="quiet")
+        r = Reapplier(c, s, clock=Clock(), power_source=Power())
+        await r.apply_all()
+        assert r.warning == "The GPU fan curve was not applied."
     run(go())

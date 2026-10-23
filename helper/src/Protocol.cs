@@ -23,8 +23,8 @@ namespace Overdrive.Helper
             { "sensors", None },
             { "set_mode", new[] { "mode", "spl", "sppt", "fppt" } },
             { "set_power", new[] { "spl", "sppt", "fppt" } },
-            { "get_fans", new[] { "mode" } },
-            { "set_fans", new[] { "temps", "speeds" } },
+            { "get_fans", new[] { "mode", "fan" } },
+            { "set_fans", new[] { "temps", "speeds", "fan" } },
             { "reset_fans", new[] { "mode" } },
             { "get_fps_limit", None },
             { "set_fps_limit", new[] { "fps" } },
@@ -198,7 +198,8 @@ namespace Overdrive.Helper
             return Reply(id, true, "", d);
         }
 
-        // cpuTempC and fanRpm, converted as G-Helper does (GHelperSensors); null plus an error when not reported.
+        // cpuTempC, fanRpm (CPU fan) and gpuFanRpm (GPU fan), converted as G-Helper does (GHelperSensors; the GPU fan
+        // is G-Helper's GetFan(AsusFan.GPU), endpoint GPU_Fan); null plus an error when not reported.
         // Shared by status, sensors and --probe.
         public static void ReadSensors(IAcpi acpi, Dictionary<string, object> d, List<string> errors)
         {
@@ -219,6 +220,15 @@ namespace Overdrive.Helper
                 if (!rpm.HasValue) errors.Add("cpuFan: not reported by the device (raw " + fan.Value + ").");
             }
             d["fanRpm"] = rpm;
+
+            int? gpuFan = ReadRaw(acpi, DeviceIds.GpuFan, "gpuFan", errors);
+            int? gpuRpm = null;
+            if (gpuFan.HasValue)
+            {
+                gpuRpm = GHelperSensors.FanRpm(gpuFan.Value);
+                if (!gpuRpm.HasValue) errors.Add("gpuFan: not reported by the device (raw " + gpuFan.Value + ").");
+            }
+            d["gpuFanRpm"] = gpuRpm;
         }
 
         // A setting read (mode, spl, sppt, fppt): like ReadRaw, but the IOCTL-failure value -65536 is not a reading
@@ -317,17 +327,21 @@ namespace Overdrive.Helper
             return Reply(id, true, "", d);
         }
 
+        // fan: "cpu" (default) or "gpu" (G-Helper AsusFan.CPU / AsusFan.GPU).
         private string GetFans(object id, Dictionary<string, object> args)
         {
             string mode, err;
+            int fan;
             if (!GetMode(args, false, out mode, out err)) return Reply(id, false, err, null);
+            if (!GetFan(args, out fan, out err)) return Reply(id, false, err, null);
             if (mode == null) mode = lastMode ?? "balanced";
 
-            Dictionary<string, object> curve = SplitCurve(acpi.GetFanCurve(DeviceIds.FanCpu, ModeValue(mode)));
-            if (curve == null) return Reply(id, false, "The device did not return a fan curve.", null);
+            Dictionary<string, object> curve = SplitCurve(acpi.GetFanCurve(fan, ModeValue(mode)));
+            if (curve == null) return Reply(id, false, "The device did not return a " + FanName(fan) + " fan curve.", null);
 
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
+            d["fan"] = FanName(fan).ToLowerInvariant();
             d["temps"] = curve["temps"];
             d["speeds"] = curve["speeds"];
             return Reply(id, true, "", d);
@@ -336,7 +350,9 @@ namespace Overdrive.Helper
         private string SetFans(object id, Dictionary<string, object> args)
         {
             int[] temps, speeds;
+            int fan;
             string err;
+            if (!GetFan(args, out fan, out err)) return Reply(id, false, err, null);
             if (!GetIntArray(args, "temps", out temps, out err)) return Reply(id, false, err, null);
             if (!GetIntArray(args, "speeds", out speeds, out err)) return Reply(id, false, err, null);
             string reason;
@@ -344,9 +360,11 @@ namespace Overdrive.Helper
 
             var curve = new byte[16];
             for (int i = 0; i < 8; i++) { curve[i] = (byte)temps[i]; curve[i + 8] = (byte)speeds[i]; }
-            int result = acpi.SetFanCurve(DeviceIds.FanCpu, curve);
-            if (result != 1) return Reply(id, false, "The device refused the fan curve (result " + result + ").", null);
+            int result = acpi.SetFanCurve(fan, curve);
+            if (result != 1)
+                return Reply(id, false, "The device refused the " + FanName(fan) + " fan curve (result " + result + ").", null);
             var d = new Dictionary<string, object>();
+            d["fan"] = FanName(fan).ToLowerInvariant();
             d["temps"] = temps;
             d["speeds"] = speeds;
             return Reply(id, true, "", d);
@@ -356,6 +374,7 @@ namespace Overdrive.Helper
         // (app/Mode/ModeControl.cs AutoFans: DeviceSet(PerformanceMode, Modes.GetCurrentBase(), "Reset Mode")).
         // Like G-Helper, "current" is the mode this program set (it never reads the mode back from the device).
         // It never switches modes: without a mode set by this helper, or with a different mode, it refuses.
+        // The mode write puts back the firmware curve of both fans (CPU and GPU) at once, as in G-Helper.
         private string ResetFans(object id, Dictionary<string, object> args)
         {
             string mode, err;
@@ -377,6 +396,7 @@ namespace Overdrive.Helper
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
             d["powerReapplied"] = reapplied;
+            d["fans"] = new[] { "cpu", "gpu" };
             return Reply(id, true, "", d);
         }
 
@@ -648,6 +668,25 @@ namespace Overdrive.Helper
             }
             mode = s;
             return true;
+        }
+
+        // Optional "fan": "cpu" (the default when absent) or "gpu".
+        private static bool GetFan(Dictionary<string, object> args, out int fan, out string err)
+        {
+            fan = DeviceIds.FanCpu;
+            err = null;
+            object raw;
+            if (!args.TryGetValue("fan", out raw)) return true;
+            string s = raw as string;
+            if (s == "cpu") return true;
+            if (s == "gpu") { fan = DeviceIds.FanGpu; return true; }
+            err = "Refused: fan must be cpu or gpu.";
+            return false;
+        }
+
+        public static string FanName(int fan)
+        {
+            return fan == DeviceIds.FanGpu ? "GPU" : "CPU";
         }
 
         private static bool GetPower(Dictionary<string, object> args, out int[] power, out string err)

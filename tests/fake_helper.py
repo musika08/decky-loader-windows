@@ -15,6 +15,7 @@ import sys
 import time
 
 CURVE = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [0, 5, 10, 20, 30, 40, 50, 60]}
+GPU_CURVE = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [0, 6, 12, 22, 32, 42, 52, 62]}
 
 
 def main(argv):
@@ -64,9 +65,10 @@ def main(argv):
         elif cmd == "set_mode":
             data = dict(args)
         elif cmd == "get_fans":
-            data = {"mode": args.get("mode", "balanced"), **CURVE}
+            data = {"mode": args.get("mode", "balanced"), "fan": args.get("fan", "cpu"),
+                    **(GPU_CURVE if args.get("fan") == "gpu" else CURVE)}
         elif cmd == "sensors":
-            data = {"cpuTempC": 55, "fanRpm": 3100, "errors": []}
+            data = {"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []}
         elif cmd in ("set_fans", "set_fps_limit"):
             data = dict(args)
         else:
@@ -78,7 +80,7 @@ def main(argv):
 class FakeClient:
     """Records (cmd, args) and answers like the helper. handlers[cmd] = async fn(args) -> reply overrides a reply."""
 
-    def __init__(self, curves=None):
+    def __init__(self, curves=None, curves_gpu=None):
         self.calls = []
         self.timeouts = {}
         self.handlers = {}
@@ -87,6 +89,7 @@ class FakeClient:
         self.stopped = False
         self.armoury_inflight = 0
         self.curves = curves or {m: dict(CURVE) for m in ("balanced", "turbo", "silent")}
+        self.curves_gpu = curves_gpu or {m: dict(GPU_CURVE) for m in ("balanced", "turbo", "silent")}
         self.armoury = {"startTypes": {"ArmouryCrateSEService": "AutomaticDelayedStart",
                                        "LightingService": "Automatic"},
                         "running": ["ArmouryCrateSEService"]}
@@ -121,7 +124,9 @@ class FakeClient:
             return await self.handlers[cmd](args)
         args = args or {}
         if cmd == "get_fans":
-            return ok({"mode": args.get("mode"), **self.curves[args.get("mode", "balanced")]})
+            gpu = args.get("fan") == "gpu"
+            table = self.curves_gpu if gpu else self.curves
+            return ok({"mode": args.get("mode"), "fan": "gpu" if gpu else "cpu", **table[args.get("mode", "balanced")]})
         if cmd == "armoury_state":
             return ok({"installed": True, "startTypes": dict(self.armoury["startTypes"]),
                        "running": list(self.armoury["running"])})
@@ -130,7 +135,7 @@ class FakeClient:
         if cmd == "armoury_restore":
             return ok({"skipped": []})
         if cmd == "sensors":
-            return ok({"cpuTempC": 55, "fanRpm": 3100, "errors": []})
+            return ok({"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "errors": []})
         return ok(dict(args))
 
 

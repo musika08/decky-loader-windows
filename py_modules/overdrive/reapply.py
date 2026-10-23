@@ -16,7 +16,7 @@ import time
 from typing import Callable, Optional
 
 from .helper_client import RESTARTED
-from .settings import CURVE_MODES, Settings, curve_mode, preset_curve
+from .settings import CURVE_MODES, FANS, Settings, curve_mode, preset_curve
 
 POLL = 5.0
 RESUME_GAP = 30.0
@@ -52,28 +52,55 @@ def ac_online_win32() -> Optional[bool]:
         return None
 
 
-def fan_plan(s: Settings) -> "tuple[Optional[dict], str, str]":
-    """(curve to write after the mode write or None, note, warning) for the stored mode and preset.
+ADJUSTED = "Adjusted to the safe minimum"
 
-    Writing the performance mode puts the firmware curve back (G-Helper's fan reset), so the "default" preset needs
-    no curve write unless the device curve sits below G-Helper's minimum (ruling P6: then the raised curve is
-    written and the note says so)."""
-    if s.fan_preset == "custom" and s.fan_curve:
-        return s.fan_curve, "", ""
-    base = (s.default_curve or {}).get(curve_mode(s.mode))
+
+def fan_plan(s: Settings, fan: str = "cpu") -> "tuple[Optional[dict], str, str]":
+    """(curve to write after the mode write or None, note, warning) for one fan ("cpu" or "gpu"), the stored mode
+    and the preset. Each fan's preset curve is derived from that fan's own default curve.
+
+    Writing the performance mode puts the firmware curve of both fans back (G-Helper's fan reset), so the "default"
+    preset needs no curve write unless the device curve sits below G-Helper's minimum (ruling P6: then the raised
+    curve is written and the note says so). Under "custom", a fan without a custom curve keeps its default curve."""
+    custom = s.custom_curve(fan)
+    if s.fan_preset == "custom" and custom:
+        return custom, "", ""
+    preset = "default" if s.fan_preset == "custom" else s.fan_preset
+    base = (s.default_curves(fan) or {}).get(curve_mode(s.mode))
+    which, tail = ("", "") if fan == "cpu" else ("GPU ", " to the GPU fan")
     if base is None:
-        if s.fan_preset == "default":
+        if preset == "default":
             return None, "", ""
-        return None, "", "The device's default fan curve is not known yet, so the fan preset was not applied."
-    curve, adjusted = preset_curve(s.fan_preset, base)
+        return None, "", f"The device's default {which}fan curve is not known yet, so the fan preset was not applied{tail}."
+    curve, adjusted = preset_curve(preset, base)
     if curve is None:
-        if s.fan_preset == "default":
+        if preset == "default":
             return None, "", ""
-        return None, "", "The device's default fan curve is not usable, so the fan preset was not applied."
-    note = "Adjusted to the safe minimum" if adjusted else ""
-    if s.fan_preset == "default" and not adjusted:
+        return None, "", f"The device's default {which}fan curve is not usable, so the fan preset was not applied{tail}."
+    note = ADJUSTED if adjusted else ""
+    if preset == "default" and not adjusted:
         return None, note, ""
     return curve, note, ""
+
+
+def fan_note(s: Settings) -> str:
+    """The panel's note for both fans: which ones were raised to G-Helper's minimum."""
+    adjusted = [f for f in FANS if fan_plan(s, f)[1]]
+    if not adjusted:
+        return ""
+    if adjusted == ["cpu"]:
+        return ADJUSTED
+    if adjusted == ["gpu"]:
+        return "GPU fan adjusted to the safe minimum"
+    return "Both fans adjusted to the safe minimum"
+
+
+def fan_args(curve: dict, fan: str) -> dict:
+    """set_fans arguments; the CPU fan is the helper's default, so only the GPU fan is named."""
+    args = {"temps": curve["temps"], "speeds": curve["speeds"]}
+    if fan != "cpu":
+        args["fan"] = fan
+    return args
 
 
 def mode_args(s: Settings) -> dict:
@@ -138,23 +165,29 @@ class Reapplier:
             return await self.client.call(cmd, args)
 
     async def read_default_curves(self) -> None:
-        """Read each mode's firmware curve once (reads only) and store it. Modes that could not be read (a partial
-        result) are read again at the next reapply; curves already stored are never read again."""
-        have = dict(self.settings.default_curve or {})
-        missing = [m for m in CURVE_MODES if m not in have]
-        if not missing:
-            return
-        curves = {}
-        for m in missing:
-            r = await self.client.call("get_fans", {"mode": m})
-            data = r.get("data") if r.get("ok") else None
-            if isinstance(data, dict) and isinstance(data.get("temps"), list) and isinstance(data.get("speeds"), list):
-                curves[m] = {"temps": list(data["temps"]), "speeds": list(data["speeds"])}
-            else:
-                self.log.warning(f"Could not read the {m} fan curve: {r.get('message')}")
-        if curves:
-            have.update(curves)
-            self.settings.default_curve = have
+        """Read each mode's firmware curve of each fan once (reads only) and store it. Modes that could not be read
+        (a partial result) are read again at the next reapply; curves already stored are never read again."""
+        changed = False
+        for fan in FANS:
+            have = dict(self.settings.default_curves(fan) or {})
+            missing = [m for m in CURVE_MODES if m not in have]
+            if not missing:
+                continue
+            curves = {}
+            for m in missing:
+                args = {"mode": m} if fan == "cpu" else {"mode": m, "fan": fan}
+                r = await self.client.call("get_fans", args)
+                data = r.get("data") if r.get("ok") else None
+                if (isinstance(data, dict) and isinstance(data.get("temps"), list)
+                        and isinstance(data.get("speeds"), list)):
+                    curves[m] = {"temps": list(data["temps"]), "speeds": list(data["speeds"])}
+                else:
+                    self.log.warning(f"Could not read the {m} {fan.upper()} fan curve: {r.get('message')}")
+            if curves:
+                have.update(curves)
+                self.settings.set_default_curves(fan, have)
+                changed = True
+        if changed:
             try:
                 self.settings.save()
             except OSError as e:
@@ -182,15 +215,17 @@ class Reapplier:
             if not r.get("ok"):
                 problems.append(r.get("message") or "The performance mode was not applied.")
             else:
-                curve, note, warn = fan_plan(s)
-                self.fan_note = note
-                if warn:
-                    problems.append(warn)
-                if curve is not None:
-                    r = await self._step(gen, "set_fans", {"temps": curve["temps"], "speeds": curve["speeds"]})
-                    transport |= transport_failure(r)
-                    if not r.get("ok"):
-                        problems.append(r.get("message") or "The fan curve was not applied.")
+                self.fan_note = fan_note(s)
+                for fan in FANS:   # CPU then GPU, as G-Helper's AutoFans
+                    curve, _, warn = fan_plan(s, fan)
+                    if warn:
+                        problems.append(warn)
+                    if curve is not None:
+                        r = await self._step(gen, "set_fans", fan_args(curve, fan))
+                        transport |= transport_failure(r)
+                        if not r.get("ok"):
+                            what = "fan curve" if fan == "cpu" else "GPU fan curve"
+                            problems.append(r.get("message") or f"The {what} was not applied.")
             if s.fps != 0:   # 0 (off) is only sent when the owner picks it, so an Adrenalin limit is left alone
                 r = await self._step(gen, "set_fps_limit", {"fps": s.fps})
                 transport |= transport_failure(r)

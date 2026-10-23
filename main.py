@@ -13,8 +13,8 @@ if _PY_MODULES not in sys.path:
 
 from overdrive import device  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
-from overdrive.reapply import Reapplier, fan_plan, mode_args  # noqa: E402
-from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, MODES, PRESETS, START_TYPES,  # noqa: E402
+from overdrive.reapply import Reapplier, fan_args, fan_note, fan_plan, mode_args  # noqa: E402
+from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, FANS, MODES, PRESETS, START_TYPES,  # noqa: E402
                                 Settings, check_curve, clamp_power, curve_mode, preset_curve)
 
 NOT_ALLY = "Overdrive supports the ROG Ally family only"
@@ -126,19 +126,24 @@ class Plugin:
         product = device.product_name()
         return {"supported": device.is_ally(lambda: product), "product": product}
 
-    def _effective_curve(self, s: Settings):
-        if s.fan_preset == "custom" and s.fan_curve:
-            return s.fan_curve
-        base = (s.default_curve or {}).get(curve_mode(s.mode))
-        curve, _ = preset_curve(s.fan_preset, base)
-        return curve
+    def _effective_curve(self, s: Settings, fan: str = "cpu"):
+        """The curve this fan runs with now: the custom or preset curve, else the device's own (raised to the safe
+        minimum when needed); None when it is not known."""
+        curve, _, _ = fan_plan(s, fan)
+        if curve is not None:
+            return curve
+        if s.fan_preset in ("default", "custom"):
+            base = (s.default_curves(fan) or {}).get(curve_mode(s.mode))
+            return preset_curve("default", base)[0]
+        return None
 
     async def get_state(self) -> dict:
         support = await self.get_support()
         s = self.settings or Settings("")
         state = {
             "support": support, "mode": s.mode, "spl": s.spl, "sppt": s.sppt, "fppt": s.fppt, "fps": s.fps,
-            "fan_preset": s.fan_preset, "fan_curve": self._effective_curve(s),
+            "fan_preset": s.fan_preset, "fan_curve": self._effective_curve(s, "cpu"),
+            "fan_curve_gpu": self._effective_curve(s, "gpu"),
             "armoury": {"installed": False, "replaced": s.armoury_replaced},
             "unavailable": "", "warning": "", "fan_note": "", "busy": False, "user_set": s.user_set,
             # The owner's own limits exist only once Manual was chosen; otherwise the firmware's limits apply.
@@ -159,16 +164,17 @@ class Plugin:
         state["armoury"]["installed"] = bool(self._armoury_installed)
         state["unavailable"] = self.client.unavailable_reason or ""
         state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, self._armoury_warning) if w)
-        state["fan_note"] = fan_plan(s)[1]
+        state["fan_note"] = fan_note(s)
         return state
 
     async def get_sensors(self) -> dict:
         if self.client is None:
-            return {"ok": False, "message": NOT_ALLY, "cpuTempC": None, "fanRpm": None, "errors": []}
+            return {"ok": False, "message": NOT_ALLY, "cpuTempC": None, "fanRpm": None, "gpuFanRpm": None,
+                    "errors": []}
         r = await self.client.call("sensors", None, 5.0)
         d = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else {}
         return {"ok": bool(r.get("ok")), "message": r.get("message") or "", "cpuTempC": d.get("cpuTempC"),
-                "fanRpm": d.get("fanRpm"), "errors": list(d.get("errors") or [])}
+                "fanRpm": d.get("fanRpm"), "gpuFanRpm": d.get("gpuFanRpm"), "errors": list(d.get("errors") or [])}
 
     # ---------- user changes ----------
 
@@ -181,13 +187,21 @@ class Plugin:
             return f"Applied, but the setting could not be saved ({e})."
 
     async def _rewrite_fans(self) -> str:
-        """After a mode write the firmware curve is back; put the chosen preset or custom curve on again."""
-        curve, note, warn = fan_plan(self.settings)
-        self.reapplier.fan_note = note
-        if curve is None:
-            return warn
-        r = await self.client.call("set_fans", {"temps": curve["temps"], "speeds": curve["speeds"]})
-        return "" if r.get("ok") else "The fan curve was not put back: " + str(r.get("message"))
+        """After a mode write the firmware curve of both fans is back; put the chosen preset or custom curves on
+        again (CPU, then GPU)."""
+        self.reapplier.fan_note = fan_note(self.settings)
+        msgs = []
+        for fan in FANS:
+            curve, _, warn = fan_plan(self.settings, fan)
+            if curve is None:
+                if warn:
+                    msgs.append(warn)
+                continue
+            r = await self.client.call("set_fans", fan_args(curve, fan))
+            if not r.get("ok"):
+                what = "fan curve" if fan == "cpu" else "GPU fan curve"
+                msgs.append(f"The {what} was not put back: " + str(r.get("message")))
+        return " ".join(msgs)
 
     async def set_mode(self, mode, spl=None, sppt=None, fppt=None) -> dict:
         refused = self._refuse_write()
@@ -246,32 +260,45 @@ class Plugin:
         s = self.settings
         if name not in PRESETS:
             return _fail("Fan preset must be default, quiet, cool or custom.")
-        if name == "custom" and not s.fan_curve:
+        if name == "custom" and not s.has_custom():
             return _fail("There is no custom fan curve yet; use Edit curve first.")
         async with self.reapplier.user_change():
             if self._busy():   # an Armoury switch may have begun while this waited for the lock
                 return _fail(BUSY)
             old = s.fan_preset
             s.fan_preset = name
-            curve, note, warn = fan_plan(s)
-            if warn:
+            plans = {fan: fan_plan(s, fan) for fan in FANS}
+            if plans["cpu"][2]:   # the CPU fan's preset cannot be made: change nothing
                 s.fan_preset = old
-                return _fail(warn)
-            if curve is None:   # the device's own curve: writing the mode again puts it back
-                r = await self.client.call("set_mode", mode_args(s))
-            else:
-                r = await self.client.call("set_fans", {"temps": curve["temps"], "speeds": curve["speeds"]})
-            if not r.get("ok"):
-                s.fan_preset = old
-                return _fail(str(r.get("message")))
-            self.reapplier.fan_note = note
+                return _fail(plans["cpu"][2])
+            # The GPU fan's preset cannot be made (e.g. its default curve was never read): it keeps the device's
+            # own curve and the reply says so.
+            warns = [plans["gpu"][2]] if plans["gpu"][2] else []
+            writes = []
+            if any(curve is None for curve, _, _ in plans.values()):
+                # The device's own curve: writing the mode again puts back both fans' firmware curves.
+                writes.append(("set_mode", mode_args(s)))
+            for fan in FANS:
+                curve = plans[fan][0]
+                if curve is not None:
+                    writes.append(("set_fans", fan_args(curve, fan)))
+            for cmd, args in writes:
+                r = await self.client.call(cmd, args)
+                if not r.get("ok"):
+                    s.fan_preset = old
+                    return _fail(str(r.get("message")))
+            self.reapplier.fan_note = fan_note(s)
             s.user_set = True
-            return {"ok": True, "message": self._save()}
+            return {"ok": True, "message": " ".join(m for m in warns + [self._save()] if m)}
 
-    async def set_fan_curve(self, temps, speeds) -> dict:
+    async def set_fan_curve(self, temps, speeds, fan="cpu") -> dict:
+        """One fan's custom curve ("cpu" or "gpu"). The preset becomes custom; the other fan keeps the curve it runs
+        with now (its preset curve becomes its custom curve when the preset was not custom yet)."""
         refused = self._refuse_write()
         if refused:
             return refused
+        if fan not in FANS:
+            return _fail("Fan must be cpu or gpu.")
         t, sp = _int_list(temps), _int_list(speeds)
         reason = check_curve(t, sp) if t is not None and sp is not None else "The fan curve needs 8 points."
         if reason:
@@ -279,14 +306,19 @@ class Plugin:
         async with self.reapplier.user_change():
             if self._busy():   # an Armoury switch may have begun while this waited for the lock
                 return _fail(BUSY)
-            r = await self.client.call("set_fans", {"temps": t, "speeds": sp})
+            curve = {"temps": t, "speeds": sp}
+            r = await self.client.call("set_fans", fan_args(curve, fan))
             if not r.get("ok"):
                 return _fail(str(r.get("message")))
             s = self.settings
-            s.fan_curve = {"temps": t, "speeds": sp}
+            if s.fan_preset != "custom":
+                for other in FANS:
+                    if other != fan:
+                        s.set_custom_curve(other, fan_plan(s, other)[0])
+            s.set_custom_curve(fan, curve)
             s.fan_preset = "custom"
             s.user_set = True
-            self.reapplier.fan_note = ""
+            self.reapplier.fan_note = fan_note(s)
             return {"ok": True, "message": self._save()}
 
     async def reset_defaults(self) -> dict:

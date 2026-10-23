@@ -8,7 +8,8 @@ namespace Overdrive.Helper.Tests
     {
         public readonly Dictionary<uint, int> Values = new Dictionary<uint, int>();
         public readonly List<string> Calls = new List<string>();
-        public readonly Dictionary<int, byte[]> Curves = new Dictionary<int, byte[]>();
+        public readonly Dictionary<int, byte[]> Curves = new Dictionary<int, byte[]>();       // CPU fan, by mode
+        public readonly Dictionary<int, byte[]> GpuCurves = new Dictionary<int, byte[]>();    // GPU fan, by mode
         public int SetResult = 1;          // G-Helper treats DeviceSet result 1 as OK
         public bool ThrowOnWrite;
         public bool ThrowOnRead;
@@ -34,7 +35,8 @@ namespace Overdrive.Helper.Tests
             if (ThrowOnRead) throw new InvalidOperationException("read failed");
             Calls.Add("getcurve " + fan + " " + mode);
             byte[] c;
-            return Curves.TryGetValue(mode, out c) ? (byte[])c.Clone() : new byte[16];
+            var table = fan == DeviceIds.FanGpu ? GpuCurves : Curves;
+            return table.TryGetValue(mode, out c) ? (byte[])c.Clone() : new byte[16];
         }
 
         public int SetFanCurve(int fan, byte[] curve)

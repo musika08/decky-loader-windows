@@ -36,6 +36,8 @@ import {
   CHART,
   Direction,
   EditMode,
+  FANS,
+  Fan,
   GRID_SPEEDS,
   GRID_TEMPS,
   LABEL_SPEEDS,
@@ -44,6 +46,7 @@ import {
   aLabel,
   caption,
   directionAction,
+  dotPoints,
   dragTo,
   fillPath,
   floorPath,
@@ -56,6 +59,8 @@ import {
   pressA,
   pressB,
   selectNext,
+  tailFillPath,
+  tailPath,
   toChart,
   xOf,
   yOf,
@@ -76,6 +81,7 @@ type State = {
   fps: number;
   fan_preset: Preset;
   fan_curve: Curve | null;
+  fan_curve_gpu?: Curve | null;
   armoury: { installed: boolean; replaced: boolean };
   unavailable: string;
   warning: string;
@@ -86,7 +92,14 @@ type State = {
   // What the device reports (read only): mode "other" = a mode Overdrive does not set; null = not reported.
   device?: { mode: DeviceMode; spl: number | null; sppt: number | null; fppt: number | null };
 };
-type Sensors = { ok: boolean; message: string; cpuTempC: number | null; fanRpm: number | null; errors: string[] };
+type Sensors = {
+  ok: boolean;
+  message: string;
+  cpuTempC: number | null;
+  fanRpm: number | null;
+  gpuFanRpm?: number | null;
+  errors: string[];
+};
 
 const getSupport = callable<[], Support>('get_support');
 const getState = callable<[], State>('get_state');
@@ -94,7 +107,7 @@ const getSensors = callable<[], Sensors>('get_sensors');
 const setMode = callable<[Mode, number?, number?, number?], Result>('set_mode');
 const setFps = callable<[number], Result>('set_fps');
 const setFanPreset = callable<[Preset], Result>('set_fan_preset');
-const setFanCurve = callable<[number[], number[]], Result>('set_fan_curve');
+const setFanCurve = callable<[number[], number[], Fan], Result>('set_fan_curve');
 const resetDefaults = callable<[], Result>('reset_defaults');
 const setArmouryReplaced = callable<[boolean], Result>('set_armoury_replaced');
 
@@ -210,6 +223,8 @@ const BTN_RIGHT = 12;
 
 const C_LINE = '#1a9fff';
 const C_FILL = 'rgba(26, 159, 255, 0.18)';
+const C_TAIL = 'rgba(26, 159, 255, 0.55)';
+const C_TAIL_FILL = 'rgba(26, 159, 255, 0.07)';
 const C_GRID = 'rgba(255, 255, 255, 0.08)';
 const C_AXIS = 'rgba(255, 255, 255, 0.25)';
 const C_LABEL = '#8b929a';
@@ -220,6 +235,7 @@ const FLOOR_PATH = floorPath(minSpeedAt);
 
 function ChartSvg(props: {
   curve: Curve | null;
+  fan: Fan;
   selected: number;
   invalid: number;
   cpuTemp: number | null;
@@ -228,7 +244,7 @@ function ChartSvg(props: {
   onPointerMove?: (e: ReactPointerEvent<SVGSVGElement>) => void;
   onPointerEnd?: (e: ReactPointerEvent<SVGSVGElement>) => void;
 }) {
-  const { curve, selected, invalid, cpuTemp, editable } = props;
+  const { curve, fan, selected, invalid, cpuTemp, editable } = props;
   const mx = markerX(cpuTemp);
   const labelAnchor = mx !== null && mx > PLOT.x1 - 24 ? 'end' : mx !== null && mx < PLOT.x0 + 24 ? 'start' : 'middle';
   return (
@@ -264,16 +280,26 @@ function ChartSvg(props: {
         <>
           <line x1={mx} x2={mx} y1={PLOT.y0 + 10} y2={PLOT.y1} stroke={C_MARKER} strokeWidth={1} />
           <text x={mx} y={PLOT.y0 + 7} fill={C_MARKER} fontSize={9} textAnchor={labelAnchor}>
-            {markerLabel(cpuTemp)}
+            {markerLabel(cpuTemp, fan === 'gpu' ? 'CPU ' : '')}
           </text>
         </>
       )}
       {curve ? (
         <>
           <path d={fillPath(curve)} fill={C_FILL} stroke="none" />
+          {/* Past the last point the fan holds its speed up to 110 °C. */}
+          <path d={tailFillPath(curve)} fill={C_TAIL_FILL} stroke="none" />
+          <path d={tailPath(curve)} fill="none" stroke={C_TAIL} strokeWidth={2} strokeDasharray="4 3" />
           <path d={linePath(curve)} fill="none" stroke={C_LINE} strokeWidth={2} strokeLinejoin="round" />
-          {curve.temps.map((t, i) => (
-            <circle key={'p' + i} cx={xOf(t)} cy={yOf(curve.speeds[i])} r={4} fill={i === invalid ? C_BAD : C_LINE} />
+          {dotPoints(curve).map((d) => (
+            // Stacked points (same temperature and speed) are one dot.
+            <circle
+              key={'p' + d.index}
+              cx={xOf(d.temp)}
+              cy={yOf(d.speed)}
+              r={4}
+              fill={d.indices.indexOf(invalid) >= 0 ? C_BAD : C_LINE}
+            />
           ))}
           {editable && selected >= 0 && selected < curve.temps.length && (
             // Drawn last so the selected point sits on top of stacked ones.
@@ -299,6 +325,7 @@ function ChartSvg(props: {
 // The editable chart: one Focusable for the controller, pointer drag for touch and mouse.
 function FanChartEditor(props: {
   curve: Curve;
+  fan: Fan;
   selected: number;
   invalid: number;
   cpuTemp: number | null;
@@ -395,6 +422,7 @@ function FanChartEditor(props: {
     >
       <ChartSvg
         curve={curve}
+        fan={props.fan}
         selected={selected}
         invalid={props.invalid}
         cpuTemp={props.cpuTemp}
@@ -409,6 +437,19 @@ function FanChartEditor(props: {
   );
 }
 
+// A curve from the backend the chart can draw (8 points each), else null.
+function usableCurve(c: Curve | null | undefined): Curve | null {
+  return c && Array.isArray(c.temps) && Array.isArray(c.speeds) && c.temps.length === CURVE_POINTS && c.speeds.length === CURVE_POINTS
+    ? c
+    : null;
+}
+
+// The editor's starting draft for one fan: its current curve, or a valid placeholder when it is not known yet.
+function draftFrom(c: Curve | null | undefined): Curve {
+  const u = usableCurve(c);
+  return u ? { temps: [...u.temps], speeds: [...u.speeds] } : defaultDraft();
+}
+
 // ---------- panel ----------
 
 function Content() {
@@ -418,12 +459,14 @@ function Content() {
   const [sensors, setSensors] = useState('');
   const [cpuTemp, setCpuTemp] = useState<number | null>(null);
   const [selected, setSelected] = useState(0);
+  const [fan, setFan] = useState<Fan>('cpu');
   const [statuses, setStatuses] = useState<Record<string, Status>>({});
   const [working, setWorking] = useState(false);
   const [armouryBusy, setArmouryBusy] = useState(armouryPending !== null);
   const [power, setPower] = useState({ spl: 30, sppt: 30, fppt: 30 });
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<Curve>(defaultDraft());
+  // One draft per fan, so switching fans while editing keeps both; Apply sends the selected fan's.
+  const [drafts, setDrafts] = useState<Record<Fan, Curve>>({ cpu: defaultDraft(), gpu: defaultDraft() });
   const [confirm, setConfirm] = useState<'reset' | 'armoury' | null>(null);
   const mounted = useRef(true);
   const powerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -507,7 +550,7 @@ function Content() {
       try {
         const s = await getSensors();
         if (!mounted.current) return;
-        setSensors(s.ok ? liveLine(s.cpuTempC, s.fanRpm) : s.message || 'Sensors not available');
+        setSensors(s.ok ? liveLine(s.cpuTempC, s.fanRpm, s.gpuFanRpm) : s.message || 'Sensors not available');
         setCpuTemp(s.ok && typeof s.cpuTempC === 'number' && isFinite(s.cpuTempC) ? s.cpuTempC : null);
       } catch (e) {
         if (!mounted.current) return;
@@ -644,14 +687,14 @@ function Content() {
   };
 
   const openEditor = () => {
-    const c = state.fan_curve;
-    setDraft(c && c.temps.length === CURVE_POINTS && c.speeds.length === CURVE_POINTS
-      ? { temps: [...c.temps], speeds: [...c.speeds] }
-      : defaultDraft());
+    setDrafts({ cpu: draftFrom(state.fan_curve), gpu: draftFrom(state.fan_curve_gpu) });
     setStatuses((s) => ({ ...s, curve: undefined }));
     setSelected(0);
     setEditing(true);
   };
+
+  // Edits go to the draft of the fan shown now.
+  const setDraft = (fn: (c: Curve) => Curve) => setDrafts((d) => ({ ...d, [fan]: fn(d[fan]) }));
 
   const editPoint = (kind: 'temps' | 'speeds', i: number, v: number) => {
     setDraft((d) => {
@@ -667,6 +710,8 @@ function Content() {
     run('fans', () => setFanPreset(p));
   };
 
+  const draft = drafts[fan];
+
   const applyCurve = async () => {
     const reason = validateCurve(draft.temps, draft.speeds);
     if (reason) {
@@ -676,8 +721,9 @@ function Content() {
     }
     cancelPowerTimer();
     setWorking(true);
-    const r = await safeCall(() => setFanCurve(draft.temps, draft.speeds));
-    setStatus('curve', r, 'Custom fan curve applied.');
+    const target = fan;
+    const r = await safeCall(() => setFanCurve(draft.temps, draft.speeds, target));
+    setStatus('curve', r, target === 'gpu' ? 'Custom GPU fan curve applied.' : 'Custom CPU fan curve applied.');
     await refresh();
     if (!mounted.current) return;
     setWorking(false);
@@ -703,11 +749,7 @@ function Content() {
 
   const draftReason = validateCurve(draft.temps, draft.speeds);
   const sel = Math.min(Math.max(selected, 0), CURVE_POINTS - 1);
-  const sc = state.fan_curve;
-  const shownCurve: Curve | null =
-    sc && Array.isArray(sc.temps) && Array.isArray(sc.speeds) && sc.temps.length === CURVE_POINTS && sc.speeds.length === CURVE_POINTS
-      ? sc
-      : null;
+  const shownCurve = usableCurve(fan === 'gpu' ? state.fan_curve_gpu : state.fan_curve);
   const fpsOptions = FPS_STEPS.map((f) => ({ data: f, label: f === 0 ? 'Off' : `${f} FPS` }));
 
   // ---------- layout ----------
@@ -805,10 +847,26 @@ function Content() {
         </PanelSectionRow>
         {state.fan_note && <Note text={state.fan_note} color="#ffb74d" />}
         <StatusRow status={statuses.fans} />
+        <PanelSectionRow>
+          <Focusable flow-children="horizontal" style={{ display: 'flex', gap: '4px' }}>
+            {FANS.map((f) => {
+              const Btn = fan === f.fan ? DialogButtonPrimary : DialogButton;
+              return (
+                <Btn
+                  key={f.fan}
+                  style={{ minWidth: '0', flex: '1 1 0', padding: '6px 2px', fontSize: '12px' }}
+                  onClick={() => setFan(f.fan)}
+                >
+                  {f.label}
+                </Btn>
+              );
+            })}
+          </Focusable>
+        </PanelSectionRow>
         {!editing && (
           <>
             <PanelSectionRow>
-              <ChartSvg curve={shownCurve} selected={-1} invalid={-1} cpuTemp={cpuTemp} editable={false} />
+              <ChartSvg curve={shownCurve} fan={fan} selected={-1} invalid={-1} cpuTemp={cpuTemp} editable={false} />
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem layout="below" disabled={disabled} onClick={openEditor}>
@@ -822,12 +880,13 @@ function Content() {
             <PanelSectionRow>
               <FanChartEditor
                 curve={draft}
+                fan={fan}
                 selected={sel}
                 invalid={invalidPoint(draftReason)}
                 cpuTemp={cpuTemp}
                 disabled={disabled}
                 onSelect={setSelected}
-                onEdit={(fn) => setDraft((d) => fn(d))}
+                onEdit={setDraft}
               />
             </PanelSectionRow>
             {draftReason && <Note text={draftReason} color="#ff6b6b" />}
@@ -855,7 +914,7 @@ function Content() {
             </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem layout="below" disabled={disabled || !!draftReason} onClick={applyCurve}>
-                Apply curve
+                {fan === 'gpu' ? 'Apply GPU fan curve' : 'Apply CPU fan curve'}
               </ButtonItem>
             </PanelSectionRow>
             <PanelSectionRow>
@@ -884,7 +943,7 @@ function Content() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            description="Balanced, factory power limits, default fan curve, FPS limit off."
+            description="Balanced, factory power limits, default fan curves, FPS limit off."
             disabled={disabled}
             onClick={() => {
               if (!confirmed('reset')) return;

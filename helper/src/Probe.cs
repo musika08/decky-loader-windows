@@ -31,11 +31,12 @@ namespace Overdrive.Helper
 
     // asus-helper.exe --probe: one JSON line with what the device reports. Read-only by construction:
     // every call goes through ReadOnlyAcpi, and only DeviceGet and GetFanCurve are used.
-    // {"product","mode","modeName","spl","sppt","fppt","cpuTempC","fanRpm","fanCurve":{"temps","speeds"},
-    //  "fanCurves":{"balanced","turbo","silent"},"errors"}
+    // {"product","mode","modeName","spl","sppt","fppt","cpuTempC","fanRpm","gpuFanRpm","fanCurve":{"temps","speeds"},
+    //  "fanCurves":{"balanced","turbo","silent"},"fanCurvesGpu":{"balanced","turbo","silent"},"errors"}
     // mode, spl, sppt, fppt are the raw DeviceGet values (null plus an error when -65536, nothing reported; a power
     // limit of 0 is null without an error); modeName is balanced/turbo/silent or "other" (HelperCore.ModeName);
-    // cpuTempC and fanRpm are converted as G-Helper does; fanCurve is the current mode's curve.
+    // cpuTempC, fanRpm and gpuFanRpm are converted as G-Helper does; fanCurve is the current mode's CPU fan curve;
+    // fanCurves / fanCurvesGpu are every mode's CPU / GPU fan curve (G-Helper DevsCPUFanCurve / DevsGPUFanCurve).
     public static class Probe
     {
         public static string Run(IAcpi device, string product)
@@ -59,25 +60,31 @@ namespace Overdrive.Helper
             int curveMode = DeviceIds.ModeBalanced;
             if (mode.HasValue && (mode.Value == DeviceIds.ModeBalanced || mode.Value == DeviceIds.ModeTurbo || mode.Value == DeviceIds.ModeSilent))
                 curveMode = mode.Value;
-            d["fanCurve"] = ReadCurve(acpi, curveMode, "fanCurve", errors);
+            d["fanCurve"] = ReadCurve(acpi, DeviceIds.FanCpu, curveMode, "fanCurve", errors);
 
-            // The curve of every mode (ruling P6/P7), so one run records all three defaults.
-            var curves = new Dictionary<string, object>();
-            curves["balanced"] = ReadCurve(acpi, DeviceIds.ModeBalanced, "fanCurves.balanced", errors);
-            curves["turbo"] = ReadCurve(acpi, DeviceIds.ModeTurbo, "fanCurves.turbo", errors);
-            curves["silent"] = ReadCurve(acpi, DeviceIds.ModeSilent, "fanCurves.silent", errors);
-            d["fanCurves"] = curves;
+            // The curve of every mode for each fan (ruling P6/P7), so one run records all six defaults.
+            d["fanCurves"] = ReadAllModes(acpi, DeviceIds.FanCpu, "fanCurves", errors);
+            d["fanCurvesGpu"] = ReadAllModes(acpi, DeviceIds.FanGpu, "fanCurvesGpu", errors);
             d["errors"] = errors;
 
             return new JavaScriptSerializer().Serialize(d);
         }
 
-        // {temps, speeds} of one mode's CPU fan curve, or null plus an error (G-Helper AsusACPI.IsInvalidCurve).
-        private static object ReadCurve(IAcpi acpi, int mode, string name, List<string> errors)
+        private static Dictionary<string, object> ReadAllModes(IAcpi acpi, int fan, string name, List<string> errors)
+        {
+            var curves = new Dictionary<string, object>();
+            curves["balanced"] = ReadCurve(acpi, fan, DeviceIds.ModeBalanced, name + ".balanced", errors);
+            curves["turbo"] = ReadCurve(acpi, fan, DeviceIds.ModeTurbo, name + ".turbo", errors);
+            curves["silent"] = ReadCurve(acpi, fan, DeviceIds.ModeSilent, name + ".silent", errors);
+            return curves;
+        }
+
+        // {temps, speeds} of one mode's fan curve, or null plus an error (G-Helper AsusACPI.IsInvalidCurve).
+        private static object ReadCurve(IAcpi acpi, int fan, int mode, string name, List<string> errors)
         {
             try
             {
-                object curve = HelperCore.SplitCurve(acpi.GetFanCurve(DeviceIds.FanCpu, mode));
+                object curve = HelperCore.SplitCurve(acpi.GetFanCurve(fan, mode));
                 if (curve == null) errors.Add(name + ": the device returned no fan curve for mode " + mode + ".");
                 return curve;
             }

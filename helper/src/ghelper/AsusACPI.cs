@@ -4,8 +4,8 @@
 // Modified for Overdrive (ported to C# 5 / .NET Framework 4.8), 2026
 //
 // Ported subset only: opening \\.\ATKACPI, the DSTS/DEVS IOCTL call, DeviceGet/DeviceSet,
-// Get/SetFanCurve for the CPU fan, and the device ids Overdrive uses. Changes from upstream:
-// C# 5 syntax; no logging or AppConfig (fan_scale fixed at its default 100); only the CPU fan;
+// Get/SetFanCurve for the CPU and GPU fans, and the device ids Overdrive uses. Changes from upstream:
+// C# 5 syntax; no logging or AppConfig (fan_scale fixed at its default 100); only the CPU and GPU fans (no Mid/XGM);
 // the mode swap of GetFanCurve moved into FanCurveMode so it can be tested without a device;
 // FanFromRaw is GetFan's conversion as a pure function; the Win32 error of a failed open is kept.
 // Nothing touching the battery charge limit (0x00120057) is ported.
@@ -18,7 +18,8 @@ namespace Overdrive.Helper.GHelper
 {
     public enum AsusFan
     {
-        CPU = 0
+        CPU = 0,
+        GPU = 1
     }
 
     public class AsusACPI
@@ -31,10 +32,12 @@ namespace Overdrive.Helper.GHelper
         const uint DEVS = 0x53564544;
 
         public const uint CPU_Fan = 0x00110013;
+        public const uint GPU_Fan = 0x00110014;
 
         public const uint PerformanceMode = 0x00120075; // Performance modes
 
         public const uint DevsCPUFanCurve = 0x00110024;
+        public const uint DevsGPUFanCurve = 0x00110025;
 
         public const int Temp_CPU = 0x00120094;
 
@@ -198,10 +201,30 @@ namespace Overdrive.Helper.GHelper
 
         public int GetFan(AsusFan device)
         {
-            return FanFromRaw(DeviceGet(CPU_Fan));
+            return FanFromRaw(DeviceGet(FanEndpoint(device)));
         }
 
-        // Body of upstream GetFan: raw is DeviceGet(CPU_Fan); -1 = no reading.
+        // Upstream GetFan's endpoint switch (GPU -> GPU_Fan, anything else -> CPU_Fan; Mid not ported).
+        public static uint FanEndpoint(AsusFan device)
+        {
+            switch (device)
+            {
+                case AsusFan.GPU: return GPU_Fan;
+                default: return CPU_Fan;
+            }
+        }
+
+        // Upstream SetFanCurve/GetFanCurve's device switch (GPU -> DevsGPUFanCurve, anything else -> DevsCPUFanCurve).
+        public static uint FanCurveDevice(AsusFan device)
+        {
+            switch (device)
+            {
+                case AsusFan.GPU: return DevsGPUFanCurve;
+                default: return DevsCPUFanCurve;
+            }
+        }
+
+        // Body of upstream GetFan: raw is DeviceGet(CPU_Fan or GPU_Fan); -1 = no reading.
         public static int FanFromRaw(int raw)
         {
             int fan = raw & 0xFFFF;
@@ -222,7 +245,7 @@ namespace Overdrive.Helper.GHelper
 
             for (int i = 8; i < curve.Length; i++) curve[i] = (byte)(Math.Max((byte)0, Math.Min((byte)100, curve[i])) * fanScale / 100);
 
-            result = DeviceSet(DevsCPUFanCurve, curve);
+            result = DeviceSet(FanCurveDevice(device), curve);
 
             return result;
         }
@@ -248,7 +271,7 @@ namespace Overdrive.Helper.GHelper
 
             byte[] result;
 
-            result = DeviceGetBuffer(DevsCPUFanCurve, fan_mode);
+            result = DeviceGetBuffer(FanCurveDevice(device), fan_mode);
 
             return result;
 

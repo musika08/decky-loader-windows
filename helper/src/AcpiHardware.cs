@@ -10,10 +10,11 @@ namespace Overdrive.Helper
     // battery charge limit (0x00120057, owned by Windows Quick Settings) can never be written by this helper.
     public class AcpiHardware : IAcpi, IDisposable
     {
-        // Performance mode, SPL, sPPT, fPPT, and the CPU fan curve (written by SetFanCurve).
+        // Performance mode, SPL, sPPT, fPPT, and the CPU and GPU fan curves (written by SetFanCurve).
         public static readonly IList<uint> WritableIds = Array.AsReadOnly(new[]
         {
-            DeviceIds.PerformanceMode, DeviceIds.Spl, DeviceIds.Sppt, DeviceIds.Fppt, DeviceIds.CpuFanCurve
+            DeviceIds.PerformanceMode, DeviceIds.Spl, DeviceIds.Sppt, DeviceIds.Fppt, DeviceIds.CpuFanCurve,
+            DeviceIds.GpuFanCurve
         });
 
         private readonly AsusACPI acpi;
@@ -48,18 +49,18 @@ namespace Overdrive.Helper
         {
             CheckFan(fan);
             EnsureConnected();
-            return acpi.GetFanCurve(AsusFan.CPU, mode);
+            return acpi.GetFanCurve((AsusFan)fan, mode);
         }
 
         public int SetFanCurve(int fan, byte[] curve)
         {
             CheckFan(fan);
             if (curve == null) throw new ArgumentNullException("curve");
-            // AsusACPI.SetFanCurve writes DevsCPUFanCurve for the CPU fan; keep it under the same allow-list.
-            CheckWritable(AsusACPI.DevsCPUFanCurve);
+            // AsusACPI.SetFanCurve writes DevsCPUFanCurve or DevsGPUFanCurve; keep it under the same allow-list.
+            CheckWritable(AsusACPI.FanCurveDevice((AsusFan)fan));
             EnsureConnected();
             // AsusACPI.SetFanCurve clamps the speed bytes in place; keep the caller's array untouched.
-            return acpi.SetFanCurve(AsusFan.CPU, (byte[])curve.Clone());
+            return acpi.SetFanCurve((AsusFan)fan, (byte[])curve.Clone());
         }
 
         public void Dispose()
@@ -82,7 +83,8 @@ namespace Overdrive.Helper
 
         private static void CheckFan(int fan)
         {
-            if (fan != DeviceIds.FanCpu) throw new ArgumentException("Only the CPU fan (0) is supported.");
+            if (fan != DeviceIds.FanCpu && fan != DeviceIds.FanGpu)
+                throw new ArgumentException("Only the CPU fan (0) and the GPU fan (1) are supported.");
         }
     }
 }

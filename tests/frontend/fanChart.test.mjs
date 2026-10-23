@@ -29,6 +29,10 @@ import {
   floorPath,
   markerX,
   markerLabel,
+  tailPath,
+  tailFillPath,
+  dotPoints,
+  FANS,
 } from '../../src/fanChart.ts';
 import { validateCurve, minSpeedAt, CURVE_TEMP_MIN, CURVE_TEMP_MAX, CURVE_SPEED_MAX } from '../../src/curve.ts';
 
@@ -184,6 +188,7 @@ test('CPU temperature marker: position, clamping and label', () => {
   assert.equal(markerX(5), xOf(20));
   assert.equal(markerX(130), xOf(110));
   assert.equal(markerLabel(57.4), '57 °C');
+  assert.equal(markerLabel(57.4, 'CPU '), 'CPU 57 °C', 'the GPU fan chart names the CPU sensor');
 });
 
 test('focused but not engaged: every D-pad direction navigates (no trap)', () => {
@@ -214,4 +219,35 @@ test('B finishes editing from either mode and is left alone while idle', () => {
   m = pressA(m);
   m = pressB(m).mode;
   assert.deepEqual(directionAction(m, 'down'), { kind: 'navigate' });
+});
+
+test('the line continues flat from the last point to 110 °C', () => {
+  const tail = tailPath(CURVE);
+  assert.equal(tail, 'M' + r1(xOf(100)) + ' ' + r1(yOf(70)) + ' L' + r1(xOf(110)) + ' ' + r1(yOf(70)));
+  const fill = tailFillPath(CURVE);
+  assert.ok(fill.startsWith(tail) && fill.endsWith('Z'));
+  assert.ok(fill.includes('L' + r1(xOf(110)) + ' ' + r1(PLOT.y1)), 'down to the 0 % axis at 110 °C');
+  // Stacked firmware curve: the tail starts at the stack (62 °C, 22 %).
+  assert.equal(tailPath(STACKED), 'M' + r1(xOf(62)) + ' ' + r1(yOf(22)) + ' L' + r1(xOf(110)) + ' ' + r1(yOf(22)));
+  // A last point already at 110 °C has nothing to extend.
+  const full = { temps: [30, 40, 50, 60, 70, 80, 90, 110], speeds: [0, 10, 20, 30, 40, 50, 60, 70] };
+  assert.equal(tailPath(full), '');
+  assert.equal(tailFillPath(full), '');
+  assert.equal(tailPath({ temps: [], speeds: [] }), '');
+});
+
+test('stacked points draw as one dot', () => {
+  const dots = dotPoints(STACKED);
+  assert.equal(dots.length, 4, '48, 54, 59 and the 62 °C stack');
+  assert.deepEqual(dots[3], { index: 7, indices: [3, 4, 5, 6, 7], temp: 62, speed: 22 });
+  assert.equal(dots[3].index, nearestPoint(STACKED, xOf(62), yOf(22)).index, 'the dot picks what a press picks');
+  assert.equal(dotPoints(CURVE).length, 8, 'distinct points stay separate');
+  // Same temperature, different speed: two dots (validation flags it; the chart still shows both).
+  const split = { temps: [30, 30], speeds: [10, 20] };
+  assert.equal(dotPoints(split).length, 2);
+});
+
+test('fan switch lists the CPU fan first, then the GPU fan', () => {
+  assert.deepEqual(FANS.map((f) => f.fan), ['cpu', 'gpu']);
+  assert.deepEqual(FANS.map((f) => f.label), ['CPU fan', 'GPU fan']);
 });
