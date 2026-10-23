@@ -539,6 +539,10 @@ namespace Overdrive.Helper.Tests
             hw.GetFrameRate();
             Equal(1, c.Starts, "started once");
             True(hw.FrameRateSupported, "supported");
+            c.FpsValue = float.PositiveInfinity;
+            Equal(0.0, Convert.ToDouble(hw.GetFrameRate()), "+Infinity fps = 0");
+            c.FpsValue = float.NaN;
+            Equal(0.0, Convert.ToDouble(hw.GetFrameRate()), "NaN fps = 0");
             hw.Dispose();
             Equal(1, c.Stops, "stopped on dispose");
 

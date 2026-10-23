@@ -97,7 +97,7 @@ namespace Overdrive.Helper
                 int r = control.FrameMetricsGet(out fps);
                 if (r != 0) { unavailable = "the graphics driver did not report a frame rate (ADL " + r + ")"; return null; }
                 unavailable = null;
-                if (float.IsNaN(fps) || fps < 0) return 0f;
+                if (float.IsNaN(fps) || float.IsInfinity(fps) || fps < 0) return 0f;
                 return fps;
             }
             catch (EntryPointNotFoundException)
