@@ -21,6 +21,10 @@ export function validateCurve(temps: number[], speeds: number[]): string | null 
   }
   for (let i = 0; i < CURVE_POINTS; i++) {
     const n = i + 1;
+    // The helper takes C# int[]; NaN, undefined or fractions can never be sent (not a CheckCurve message).
+    if (!Number.isInteger(temps[i]) || !Number.isInteger(speeds[i])) {
+      return 'Point ' + n + ': temperature and fan speed must be whole numbers.';
+    }
     if (temps[i] < CURVE_TEMP_MIN || temps[i] > CURVE_TEMP_MAX) {
       return 'Point ' + n + ': temperature must be between ' + CURVE_TEMP_MIN + ' and ' + CURVE_TEMP_MAX + ' °C.';
     }

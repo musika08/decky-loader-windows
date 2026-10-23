@@ -39,6 +39,15 @@ test('curve messages match Validation.CheckCurve', () => {
   assert.equal(validateCurve(TEMPS, [0, 1, 2, 3, 4, 12, 23, 70]), 'Point 7: at 90 °C the fan must be at least 24 %.');
 });
 
+test('curve_editor_blocks_non_integer_entries', () => {
+  const msg = (n) => `Point ${n}: temperature and fan speed must be whole numbers.`;
+  assert.equal(validateCurve([NaN, ...TEMPS.slice(1)], SPEEDS), msg(1));
+  assert.equal(validateCurve(TEMPS, [...SPEEDS.slice(0, 3), undefined, ...SPEEDS.slice(4)]), msg(4));
+  assert.equal(validateCurve(TEMPS, [...SPEEDS.slice(0, 7), 70.5]), msg(8));
+  assert.equal(validateCurve([...TEMPS.slice(0, 5), null, ...TEMPS.slice(6)], SPEEDS), msg(6));
+  assert.equal(validateCurve(TEMPS, [...SPEEDS.slice(0, 1), '10', ...SPEEDS.slice(2)]), msg(2));
+});
+
 test('minSpeedAt mirrors Validation.MinSpeedAt', () => {
   assert.equal(minSpeedAt(70), 0);
   assert.equal(minSpeedAt(20), 0);

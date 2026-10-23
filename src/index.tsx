@@ -80,9 +80,14 @@ const POWER_MIN = 5;
 const POWER_MAX = 50;
 const POWER_DEBOUNCE_MS = 700;
 const SENSOR_POLL_MS = 2000;
+const UNAVAILABLE_RECHECK_MS = 5000;
+const CONFIRM_MS = 3000;
+const CONFIRM_LABEL = 'Press again to confirm';
 
-// An Armoury switch can outlive the panel (closing the menu unmounts it), so the pending call lives at module level.
+// An Armoury switch can outlive the panel (closing the menu unmounts it), so the pending call and its result live at
+// module level: a panel opened later shows the result (a failure included) once.
 let armouryPending: Promise<Result> | null = null;
+let armouryResult: Result | null = null;
 
 function errorText(e: unknown): string {
   if (e instanceof Error) return e.message;
@@ -169,31 +174,50 @@ function Content() {
   const [power, setPower] = useState({ spl: 30, sppt: 30, fppt: 30 });
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Curve>(defaultDraft());
+  const [confirm, setConfirm] = useState<'reset' | 'armoury' | null>(null);
   const mounted = useRef(true);
   const powerTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // A pending slider write must not fire after a later action (it would put Manual back over it).
+  const cancelPowerTimer = () => {
+    if (powerTimer.current) clearTimeout(powerTimer.current);
+    powerTimer.current = null;
+  };
 
   const setStatus = (key: string, r: Result, okText = 'Applied.') => {
     if (!mounted.current) return;
     setStatuses((s) => ({ ...s, [key]: { ok: r.ok, text: r.ok ? r.message || okText : r.message || 'Failed.' } }));
   };
 
-  const refresh = async () => {
+  // Returns '' on success, else the reason the state could not be read.
+  const refresh = async (): Promise<string> => {
     try {
       const st = await getState();
-      if (!mounted.current) return;
+      if (!mounted.current) return '';
       setState(st);
-      setPower({ spl: st.spl, sppt: st.sppt, fppt: st.fppt });
+      // Slider edits still waiting for the debounce are not thrown away.
+      if (powerTimer.current === null) setPower({ spl: st.spl, sppt: st.sppt, fppt: st.fppt });
       setStartError('');
+      return '';
     } catch (e) {
-      if (mounted.current) setStartError(errorText(e));
+      const reason = errorText(e) || 'No reply from the plugin backend.';
+      if (mounted.current) setStartError(reason);
+      return reason;
     }
+  };
+
+  const showArmouryResult = () => {
+    if (!armouryResult || !mounted.current) return;
+    setStatus('armoury', armouryResult);
+    armouryResult = null;
   };
 
   const watchArmoury = (p: Promise<Result>) => {
     setArmouryBusy(true);
-    p.then((r) => {
+    p.then(() => {
       if (!mounted.current) return;
-      setStatus('armoury', r);
+      showArmouryResult();
       setArmouryBusy(false);
       refresh();
     });
@@ -212,9 +236,11 @@ function Content() {
         if (mounted.current) setStartError(errorText(e) || 'No reply from the plugin backend.');
       });
     if (armouryPending) watchArmoury(armouryPending);
+    else showArmouryResult();
     return () => {
       mounted.current = false;
       if (powerTimer.current) clearTimeout(powerTimer.current);
+      if (confirmTimer.current) clearTimeout(confirmTimer.current);
     };
   }, []);
 
@@ -242,12 +268,58 @@ function Content() {
     return () => clearInterval(id);
   }, [support?.supported, busy, unavailable]);
 
+  // While the helper is unavailable, re-read the state every 5 s so the panel recovers without reopening.
+  useEffect(() => {
+    if (!unavailable) return;
+    const id = setInterval(() => {
+      refresh();
+    }, UNAVAILABLE_RECHECK_MS);
+    return () => clearInterval(id);
+  }, [unavailable]);
+
   const run = async (key: string, fn: () => Promise<Result>) => {
+    if (key !== 'power') cancelPowerTimer();
     setWorking(true);
     const r = await safeCall(fn);
-    setStatus(key, r);
-    await refresh();
-    if (mounted.current) setWorking(false);
+    const failed = await refresh();
+    if (!mounted.current) return;
+    if (failed) {
+      const first = r.message || (r.ok ? 'Applied.' : 'Failed.');
+      setStatus(key, { ok: false, message: `${first} The panel could not reload the state: ${failed}` });
+    } else {
+      setStatus(key, r);
+    }
+    setWorking(false);
+  };
+
+  // Destructive actions take two presses within 3 s.
+  const confirmed = (key: 'reset' | 'armoury'): boolean => {
+    if (confirmTimer.current) clearTimeout(confirmTimer.current);
+    confirmTimer.current = null;
+    if (confirm === key) {
+      setConfirm(null);
+      return true;
+    }
+    setConfirm(key);
+    confirmTimer.current = setTimeout(() => {
+      confirmTimer.current = null;
+      if (mounted.current) setConfirm(null);
+    }, CONFIRM_MS);
+    return false;
+  };
+
+  const retryStart = () => {
+    setStartError('');
+    setSupport(null);
+    getSupport()
+      .then((s) => {
+        if (!mounted.current) return;
+        setSupport(s);
+        if (s.supported) refresh();
+      })
+      .catch((e) => {
+        if (mounted.current) setStartError(errorText(e) || 'No reply from the plugin backend.');
+      });
   };
 
   // ---------- start-up screens ----------
@@ -258,19 +330,7 @@ function Content() {
         <Note text="Overdrive could not start" color="#ff6b6b" />
         <Note text={startError} />
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={() => {
-              setStartError('');
-              setSupport(null);
-              getSupport()
-                .then((s) => {
-                  setSupport(s);
-                  if (s.supported) refresh();
-                })
-                .catch((e) => setStartError(errorText(e) || 'No reply from the plugin backend.'));
-            }}
-          >
+          <ButtonItem layout="below" onClick={retryStart}>
             Try again
           </ButtonItem>
         </PanelSectionRow>
@@ -299,6 +359,7 @@ function Content() {
   // ---------- actions ----------
 
   const chooseMode = (mode: Mode) => {
+    cancelPowerTimer();
     if (mode === state.mode && mode !== 'manual') return;
     if (mode === 'manual') run('mode', () => setMode('manual', power.spl, power.sppt, power.fppt));
     else run('mode', () => setMode(mode));
@@ -339,6 +400,7 @@ function Content() {
       setStatus('curve', { ok: false, message: reason });
       return;
     }
+    cancelPowerTimer();
     setWorking(true);
     const r = await safeCall(() => setFanCurve(draft.temps, draft.speeds));
     setStatus('curve', r, 'Custom fan curve applied.');
@@ -348,11 +410,18 @@ function Content() {
     if (r.ok) setEditing(false);
   };
 
-  const toggleArmoury = (on: boolean) => {
+  const toggleArmoury = () => {
     if (armouryPending) return;
+    // The target is always the opposite of the stored value, whatever the toggle reported on either press.
+    const on = !state.armoury.replaced;
+    if (!confirmed('armoury')) return;
+    cancelPowerTimer();
     setStatuses((s) => ({ ...s, armoury: undefined }));
-    const p = safeCall(() => setArmouryReplaced(on)).finally(() => {
+    armouryResult = null;
+    const p = safeCall(() => setArmouryReplaced(on)).then((r) => {
+      armouryResult = r;
       armouryPending = null;
+      return r;
     });
     armouryPending = p;
     watchArmoury(p);
@@ -501,10 +570,10 @@ function Content() {
       </PanelSection>
 
       <PanelSection title="Armoury Crate">
-        {state.armoury.installed && (
+        {(state.armoury.installed || state.armoury.replaced) && (
           <PanelSectionRow>
             <ToggleField
-              label="Use Overdrive instead of Armoury Crate"
+              label={confirm === 'armoury' ? CONFIRM_LABEL : 'Use Overdrive instead of Armoury Crate'}
               description="Stops the Armoury Crate services so they do not undo these settings. Turning it off restores them."
               checked={state.armoury.replaced}
               disabled={working || busy || !!unavailable}
@@ -519,11 +588,13 @@ function Content() {
             description="Balanced, factory power limits, default fan curve, FPS limit off."
             disabled={disabled}
             onClick={() => {
+              if (!confirmed('reset')) return;
+              cancelPowerTimer();
               setEditing(false);
               run('reset', resetDefaults);
             }}
           >
-            Reset to Armoury Crate defaults
+            {confirm === 'reset' ? CONFIRM_LABEL : 'Reset to Armoury Crate defaults'}
           </ButtonItem>
         </PanelSectionRow>
         <StatusRow status={statuses.reset} />
