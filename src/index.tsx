@@ -381,7 +381,8 @@ function Content() {
 
   const chooseMode = (mode: Mode) => {
     cancelPowerTimer();
-    if (mode === shown && mode !== 'manual') return;
+    // Until the user has chosen a mode, the shown one is only what the device reads, so pressing it still saves it.
+    if (mode === shown && mode !== 'manual' && state.user_set !== false) return;
     if (mode === 'manual') run('mode', () => setMode('manual', power.spl, power.sppt, power.fppt));
     else run('mode', () => setMode(mode));
   };
