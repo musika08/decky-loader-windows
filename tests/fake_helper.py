@@ -16,6 +16,7 @@ import time
 
 CURVE = {"temps": [30, 40, 50, 60, 70, 80, 90, 100], "speeds": [0, 5, 10, 20, 30, 40, 50, 60]}
 GPU_CURVE = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [0, 6, 12, 22, 32, 42, 52, 62]}
+FRAME_SAMPLE = {"supported": True, "fps": 60.0, "gpuPowerW": 10, "errors": []}
 
 
 def main(argv):
@@ -102,7 +103,8 @@ class FakeClient:
         self.stopped = True
 
     def writes(self):
-        return [c for c in self.calls if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello")]
+        return [c for c in self.calls
+                if c[0] not in ("get_fans", "sensors", "status", "armoury_state", "hello", "frame_sample")]
 
     @property
     def busy(self):
@@ -138,6 +140,8 @@ class FakeClient:
         if cmd == "sensors":
             return ok({"cpuTempC": 55, "fanRpm": 3100, "gpuFanRpm": 2900, "gpuTempC": 49, "gpuUse": 62, "cpuPowerW": 8,
                     "gpuPowerW": 6, "errors": []})
+        if cmd == "frame_sample":
+            return ok(dict(FRAME_SAMPLE))
         return ok(dict(args))
 
 

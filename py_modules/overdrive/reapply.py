@@ -145,6 +145,7 @@ class Reapplier:
         self.busy_check: Optional[Callable[[], bool]] = None   # main.py: an Armoury operation is running
         self._deferring = False
         self._retries = 0          # consecutive reapplies retried after a transport failure
+        self.on_applied: Optional[Callable[[], None]] = None   # main.py: Auto TDP restarts from the new ceiling
 
     # ---------- user changes ----------
 
@@ -260,6 +261,11 @@ class Reapplier:
             self.log.warning(f"Reapply incomplete: {self.warning}")
         else:
             self.log.info("Settings reapplied")
+        if self.on_applied is not None:
+            try:
+                self.on_applied()
+            except Exception:
+                self.log.exception("Auto TDP reset after the reapply failed")
         return True
 
     # ---------- triggers ----------
