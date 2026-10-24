@@ -2,6 +2,18 @@ import { compare, validate } from 'compare-versions';
 
 import { DisabledPlugin, InstallType, Plugin, installPlugin, installPlugins } from './plugin';
 import { getSetting, setSetting } from './utils/settings';
+import { WINDOWS_STORE_URL, mergePluginLists, mergeVersionLists } from './windowsStore';
+
+// A store reply as JSON, or null when it cannot be fetched or parsed (so the other store still shows).
+async function fetchStoreJson(url: string, version: string): Promise<unknown> {
+  try {
+    const r = await fetch(url, { method: 'GET', headers: { 'X-Decky-Version': version } });
+    return r.ok ? await r.json() : null;
+  } catch (e) {
+    console.warn('Store fetch failed', url, e);
+    return null;
+  }
+}
 
 export enum Store {
   Default,
@@ -91,12 +103,12 @@ export async function getPluginList(
 
   const storeURL = await getStoreBaseURL();
 
-  return fetch(storeURL + query, {
-    method: 'GET',
-    headers: {
-      'X-Decky-Version': version.current,
-    },
-  }).then((r) => r.json());
+  // The Windows plugin list is shown next to the selected store (once, if that store already is ours).
+  const [main, windows] = await Promise.all([
+    fetchStoreJson(storeURL + query, version.current),
+    storeURL === WINDOWS_STORE_URL ? Promise.resolve(null) : fetchStoreJson(WINDOWS_STORE_URL + query, version.current),
+  ]);
+  return mergePluginLists<StorePlugin>(main, windows);
 }
 
 export async function getVersionList(): Promise<UpdateEndpointVersions> {
@@ -104,12 +116,11 @@ export async function getVersionList(): Promise<UpdateEndpointVersions> {
 
   const storeURL = await getStoreBaseURL();
 
-  return fetch(storeURL + '/versions', {
-    method: 'GET',
-    headers: {
-      'X-Decky-Version': version.current,
-    },
-  }).then((r) => r.json());
+  const [main, windows] = await Promise.all([
+    fetchStoreJson(storeURL + '/versions', version.current),
+    storeURL === WINDOWS_STORE_URL ? Promise.resolve(null) : fetchStoreJson(WINDOWS_STORE_URL + '/versions', version.current),
+  ]);
+  return mergeVersionLists(main, windows) as UpdateEndpointVersions;
 }
 
 export async function installFromURL(url: string) {
