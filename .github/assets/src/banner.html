@@ -1,0 +1,73 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 400px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden;
+    background:
+      radial-gradient(900px 420px at 88% -10%, rgba(34, 211, 238, 0.26), transparent 60%),
+      radial-gradient(700px 380px at 72% 120%, rgba(59, 130, 246, 0.28), transparent 62%),
+      radial-gradient(520px 300px at 6% 110%, rgba(20, 184, 166, 0.14), transparent 65%),
+      linear-gradient(135deg, #060b12 0%, #0a1422 45%, #0b1d33 100%);
+    box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.14);
+  }
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(125, 211, 252, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(125, 211, 252, 0.06) 1px, transparent 1px);
+    background-size: 40px 40px;
+    -webkit-mask-image: linear-gradient(90deg, rgba(0,0,0,0.9), rgba(0,0,0,0.15) 60%, transparent);
+  }
+  .mark { position: absolute; right: 70px; top: 50%; transform: translateY(-50%); }
+  .content { position: absolute; left: 84px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; }
+  .eyebrow { font-size: 15px; letter-spacing: 0.32em; text-transform: uppercase; color: #67e8f9; font-weight: 600; margin-bottom: 14px; }
+  h1 {
+    margin: 0; font-size: 90px; line-height: 0.98; font-weight: 650; letter-spacing: -0.035em;
+    background: linear-gradient(180deg, #ffffff 0%, #e0f7ff 70%, #9fdcf2 100%);
+    -webkit-background-clip: text; color: transparent;
+  }
+  .tag { margin-top: 18px; font-size: 24px; color: #b6c6dc; font-weight: 400; }
+  .chips { margin-top: 28px; display: flex; gap: 10px; }
+  .chip { font-size: 14.5px; font-weight: 600; color: #d6f1fb; padding: 8px 14px; border-radius: 999px;
+    background: rgba(125, 211, 252, 0.08); box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.22); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="grid"></div>
+  <svg class="mark" width="300" height="300" viewBox="0 0 300 300" fill="none">
+    <defs>
+      <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#cffafe"/>
+        <stop offset="1" stop-color="#3b82f6" stop-opacity="0.6"/>
+      </linearGradient>
+      <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+        <stop offset="0" stop-color="#22d3ee" stop-opacity="0.32"/>
+        <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+    <circle cx="150" cy="150" r="140" fill="url(#glow)"/>
+    <!-- a plug: Decky's plugin loader -->
+    <rect x="96" y="112" width="108" height="92" rx="24" stroke="url(#g)" stroke-width="3" fill="rgba(34,211,238,0.10)"/>
+    <path d="M124 112 V70 M176 112 V70" stroke="#e0f7ff" stroke-width="10" stroke-linecap="round"/>
+    <path d="M150 204 V236 Q150 252 166 252 H196" stroke="url(#g)" stroke-width="6" stroke-linecap="round" fill="none"/>
+    <circle cx="150" cy="158" r="12" fill="#e0f7ff"/>
+  </svg>
+  <div class="content">
+    <div class="eyebrow">Unofficial Windows port</div>
+    <h1>Decky Loader<br>for Windows</h1>
+    <div class="tag">Decky plugins in Steam Big Picture on Windows handhelds</div>
+    <div class="chips">
+      <div class="chip">Quick Access plugins</div>
+      <div class="chip">Plugin store</div>
+      <div class="chip">Open source, GPL-2.0</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,68 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 560px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden; box-sizing: border-box;
+    padding: 52px 60px;
+    background:
+      radial-gradient(800px 360px at 100% 0%, rgba(34, 211, 238, 0.16), transparent 60%),
+      radial-gradient(700px 360px at 0% 100%, rgba(59, 130, 246, 0.16), transparent 62%),
+      linear-gradient(135deg, #060b12 0%, #0a1422 50%, #0b1d33 100%);
+    box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.14);
+    color: #dbe7f6;
+  }
+  .title { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 34px; font-weight: 650;
+    letter-spacing: -0.02em; color: #fff; margin: 0 0 6px; }
+  .sub { font-size: 18px; color: #93a8c4; margin: 0 0 40px; }
+  .row { display: grid; grid-template-columns: 1fr 56px 1fr 56px 1fr; align-items: stretch; }
+  .step { border-radius: 20px; padding: 26px 26px 24px;
+    background: linear-gradient(180deg, rgba(125, 211, 252, 0.08), rgba(125, 211, 252, 0.03));
+    box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.16); }
+  .num { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font-weight: 700;
+    font-size: 16px; color: #06101f; background: linear-gradient(135deg, #cffafe, #38bdf8); margin-bottom: 18px; }
+  .step h3 { margin: 0 0 10px; font-size: 22px; font-weight: 650; color: #fff; letter-spacing: -0.01em; }
+  .step p { margin: 0; font-size: 16px; line-height: 1.5; color: #a9bbd3; }
+  .step ul { margin: 12px 0 0; padding: 0; list-style: none; }
+  .step li { font-size: 15px; color: #c9d8ec; padding: 5px 0 5px 18px; position: relative; }
+  .step li::before { content: ''; position: absolute; left: 0; top: 13px; width: 7px; height: 7px; border-radius: 50%; background: #67e8f9; }
+  .arrow { display: grid; place-items: center; }
+  .foot { margin-top: 30px; display: flex; gap: 12px; align-items: center; font-size: 15px; color: #93a8c4; }
+  .pill { padding: 6px 12px; border-radius: 999px; font-weight: 600; color: #d6f1fb;
+    background: rgba(125, 211, 252, 0.08); box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.2); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title">How Decky runs on Windows</div>
+  <div class="sub">The same Decky you know from the Steam Deck, with a Windows layer underneath.</div>
+  <div class="row">
+    <div class="step">
+      <div class="num">1</div>
+      <h3>Starts with Windows</h3>
+      <p>A Windows scheduled task starts Decky's backend at sign-in, on its own private Python.</p>
+      <ul><li>No Python install needed</li><li>Runs quietly in the background</li></ul>
+    </div>
+    <div class="arrow"><svg width="40" height="20" viewBox="0 0 40 20"><path d="M2 10 H34 M26 3 L35 10 L26 17" stroke="#67e8f9" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div class="step">
+      <div class="num">2</div>
+      <h3>Joins Steam</h3>
+      <p>Decky adds its tab to Steam Big Picture's Quick Access menu, as on the Steam Deck.</p>
+      <ul><li>Plugin store built in</li><li>Comes back after Steam restarts</li></ul>
+    </div>
+    <div class="arrow"><svg width="40" height="20" viewBox="0 0 40 20"><path d="M2 10 H34 M26 3 L35 10 L26 17" stroke="#67e8f9" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div class="step">
+      <div class="num">3</div>
+      <h3>Runs plugins</h3>
+      <p>Each plugin runs as its own process. A Windows layer translates the Linux calls many plugins make.</p>
+      <ul><li>Admin rights only when a plugin asks</li><li>Windows plugins in a separate store</li></ul>
+    </div>
+  </div>
+  <div class="foot"><span class="pill">Safe mode</span> One switch starts Decky without plugins, to recover from a plugin that breaks Steam.</div>
+</div>
+</body>
+</html>
