@@ -515,31 +515,18 @@ def test_migrate_once(tmp_path):
     assert migrate_from_settings(rec, s) is True
     assert on_disk(tmp_path) == {"replaced": True, "recorded": {"ArmouryCrateService": "Automatic"},
                                  "running": ["ArmouryCrateService"]}
-    # the record changes afterwards (say Traction switched it with other types); a second move must not undo that
+    # the record is switched off afterwards (say by Traction); a second move must not undo that
     other = saved(tmp_path)
-    other.replaced, other.recorded, other.running = False, {"LightingService": "Manual"}, []
+    other.replaced, other.recorded, other.running = False, {}, []
     other.save()
     assert migrate_from_settings(ArmouryRecord(str(tmp_path / "armoury")), s) is False
-    assert on_disk(tmp_path) == {"replaced": False, "recorded": {"LightingService": "Manual"}, "running": []}
+    assert on_disk(tmp_path) == {"replaced": False, "recorded": {}, "running": []}
 
 
-def test_migrate_takes_old_record_over_an_empty_shared_one(tmp_path):
-    """Final review O1: an existing but empty shared record (nothing switched, nothing recorded) takes the old record
-    instead of dropping it."""
-    rec = ArmouryRecord(str(tmp_path / "armoury"))
-    rec.save()                                              # exists, empty
-    s = Settings.load(str(tmp_path / "overdrive.json"))
-    s.armoury_replaced = True
-    s.armoury_recorded = {"ArmouryCrateService": "Automatic"}
-    s.armoury_running = ["ArmouryCrateService"]
-    assert migrate_from_settings(ArmouryRecord(str(tmp_path / "armoury")), s) is True
-    assert on_disk(tmp_path) == {"replaced": True, "recorded": {"ArmouryCrateService": "Automatic"},
-                                 "running": ["ArmouryCrateService"]}
-
-
-def test_migrate_leaves_a_non_empty_shared_record(tmp_path):
-    for fields in ({"replaced": True}, {"recorded": {"LightingService": "Manual"}}):
-        folder = tmp_path / ("a" if "replaced" in fields else "b")
+def test_migrate_never_overwrites_an_existing_shared_record(tmp_path):
+    """Coordinator ruling on final review O1: an existing record, empty or not, is never overwritten."""
+    for fields in ({}, {"replaced": True}, {"recorded": {"LightingService": "Manual"}}):
+        folder = tmp_path / ("a" if "replaced" in fields else "b" if fields else "empty")
         rec = ArmouryRecord(str(folder))
         for k, v in fields.items():
             setattr(rec, k, v)

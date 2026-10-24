@@ -1144,6 +1144,25 @@ def test_startup_logs_old_record_it_drops(tmp_path, caplog):
     run(go())
 
 
+def test_old_record_never_taken_over_an_empty_shared_one(tmp_path, caplog):
+    """Coordinator ruling: an empty shared record means Armoury Crate was put back since; the old record is dropped
+    (logged), never taken, so the services are not stopped again."""
+    async def go():
+        path = tmp_path / "overdrive.json"
+        path.write_text(json.dumps({"armoury_replaced": True, "armoury_recorded": {"ArmouryCrateService": "Automatic"},
+                                    "armoury_running": ["ArmouryCrateService"]}), encoding="utf-8")
+        p, c, s = plugin_with(tmp_path, armoury_replaced=False)          # exists, empty
+        with caplog.at_level("WARNING"):
+            await p._startup_sequence()
+        await p.reapplier.stop()
+        rec = saved_record(tmp_path)
+        assert (rec.replaced, rec.recorded, rec.running) == (False, {}, [])
+        assert all(cmd not in ("armoury_stop", "armoury_restore") for cmd, _ in c.calls)
+        assert "armoury_replaced=True" in caplog.text and "dropped" in caplog.text
+        assert not any(k.startswith("armoury_") for k in json.loads(path.read_text(encoding="utf-8")))
+    run(go())
+
+
 def test_startup_keeps_old_record_when_it_cannot_be_moved(tmp_path, monkeypatch):
     async def go():
         path = tmp_path / "overdrive.json"
