@@ -5,9 +5,14 @@ import { getSetting, setSetting } from './utils/settings';
 import { WINDOWS_STORE_URL, mergePluginLists, mergeVersionLists } from './windowsStore';
 
 // A store reply as JSON, or null when it cannot be fetched or parsed (so the other store still shows).
+// The Windows store is static GitHub Pages: a custom header would trigger a CORS preflight that Pages does not
+// answer, so the fetch fails inside Steam. It is fetched as a plain GET (verified live 2026-10-24).
 async function fetchStoreJson(url: string, version: string): Promise<unknown> {
   try {
-    const r = await fetch(url, { method: 'GET', headers: { 'X-Decky-Version': version } });
+    const init: RequestInit = url.startsWith(WINDOWS_STORE_URL)
+      ? { method: 'GET' }
+      : { method: 'GET', headers: { 'X-Decky-Version': version } };
+    const r = await fetch(url, init);
     return r.ok ? await r.json() : null;
   } catch (e) {
     console.warn('Store fetch failed', url, e);
