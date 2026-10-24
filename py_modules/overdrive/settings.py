@@ -24,6 +24,9 @@ from .settings_file import UNREADABLE_TAG
 MODES = ("silent", "balanced", "turbo", "manual")
 CURVE_MODES = ("balanced", "turbo", "silent")          # firmware curves; manual uses balanced's
 PRESETS = ("default", "recommended", "quiet", "cool", "custom")
+# Written by Overdrive 0.1.0, now Traction's. Overdrive never uses them but keeps them in its file verbatim (when the
+# loaded file had them) so Traction can carry them over on its first load.
+PASSTHROUGH_KEYS = ("controller_mode", "grip_vibration")
 FANS = ("cpu", "gpu")                                  # G-Helper AsusFan.CPU / AsusFan.GPU; written in this order
 ALLOWED_FPS = (0, 30, 40, 45, 50, 60, 75, 90, 120)     # 0 = off (the helper maps it to the driver's value)
 CPU_BOOST_ON_DEFAULT = 2                               # Aggressive
@@ -154,6 +157,7 @@ class Settings:
         self.cpu_boost_on_value = CPU_BOOST_ON_DEFAULT   # 1..6: what CPU Boost "On" writes
         # False until the owner changes something: an untouched install only reads, it never writes the device.
         self.user_set = False
+        self._passthrough: dict = {}        # PASSTHROUGH_KEYS found in the loaded file, written back unchanged
         self.logger = None
         self._reset_note = ""               # why the file was reset (shown in get_state)
         self._recovered_note = ""           # where the Armoury record came back from
@@ -256,6 +260,7 @@ class Settings:
             return
 
     def _take(self, raw: dict) -> None:
+        self._passthrough = {k: raw[k] for k in PASSTHROUGH_KEYS if k in raw}
         if raw.get("mode") in MODES:
             self.mode = raw["mode"]
         power = []
@@ -303,6 +308,7 @@ class Settings:
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in self.FIELDS}
+        d.update(self._passthrough)
         if self._armoury_kept:   # not moved to the shared record yet: never dropped
             d.update({k: getattr(self, k) for k in ARMOURY_FIELDS})
         return d

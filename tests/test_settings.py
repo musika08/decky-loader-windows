@@ -472,8 +472,27 @@ def test_settings_from_0_1_0_with_controller_keys_still_load(tmp_path):
     s = Settings.load(str(p))
     assert (s.mode, s.fps, s.cpu_boost_on_value, s.user_set) == ("turbo", 60, 4, True)
     assert not hasattr(s, "controller_mode") and not hasattr(s, "grip_vibration")
+    s.mode = "silent"
     s.save()
-    assert "controller_mode" not in json.loads(p.read_text(encoding="utf-8"))
+    for f in (p, tmp_path / "overdrive.json.bak"):
+        saved = json.loads(f.read_text(encoding="utf-8"))
+        assert saved["controller_mode"] == "auto" and saved["grip_vibration"] is False, f.name
+    assert json.loads(p.read_text(encoding="utf-8"))["mode"] == "silent"
+    # kept verbatim, even odd values, and through another load and save
+    p.write_text(json.dumps({"controller_mode": "odd", "grip_vibration": 3}), encoding="utf-8")
+    again = Settings.load(str(p))
+    again.fps = 60
+    again.save()
+    saved = json.loads(p.read_text(encoding="utf-8"))
+    assert saved["controller_mode"] == "odd" and saved["grip_vibration"] == 3
+    # a file without them gets neither
+    q = tmp_path / "other.json"
+    q.write_text(json.dumps({"mode": "turbo"}), encoding="utf-8")
+    t = Settings.load(str(q))
+    t.fps = 60
+    t.save()
+    assert "controller_mode" not in json.loads(q.read_text(encoding="utf-8"))
+    assert "grip_vibration" not in json.loads(q.read_text(encoding="utf-8"))
 
 
 # ---------- the move to the shared Armoury Crate record ----------
