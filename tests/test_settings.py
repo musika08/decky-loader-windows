@@ -5,6 +5,7 @@ import os
 import pytest
 
 from overdrive import settings as st
+from overdrive import settings_file
 from overdrive.settings import Settings
 
 # A plausible device curve whose top points sit below G-Helper's minimum (ruling P6).
@@ -245,13 +246,13 @@ def test_save_is_atomic_and_writes_bak(tmp_path, monkeypatch):
 def test_bak_failure_does_not_fail_the_save(tmp_path, monkeypatch):
     p = tmp_path / "overdrive.json"
     s = Settings.load(str(p))
-    real = st._write_atomic
+    real = settings_file._write_atomic
 
     def no_bak(path, text):
         if path.endswith(".bak"):
             raise OSError("disk full")
         real(path, text)
-    monkeypatch.setattr(st, "_write_atomic", no_bak)
+    monkeypatch.setattr(settings_file, "_write_atomic", no_bak)
     s.mode = "silent"
     s.save()
     assert Settings.load(str(p)).mode == "silent"
@@ -282,10 +283,9 @@ def test_unreadable_file_is_not_overwritten_when_no_copy_can_be_kept(tmp_path, m
     p = tmp_path / "overdrive.json"
     p.write_bytes(b"{nope")
 
-    def fail(self, now=None):
-        if self._unreadable_pending:
-            raise OSError("access denied")
-    monkeypatch.setattr(Settings, "_keep_unreadable", fail)
+    def fail(path, log, now=None, owner="Overdrive"):
+        raise OSError("access denied")
+    monkeypatch.setattr(settings_file, "keep_unreadable", fail)
     s = Settings.load(str(p))
     assert "a copy could not be kept yet" in s.warning
     with pytest.raises(OSError):
@@ -296,7 +296,7 @@ def test_unreadable_file_is_not_overwritten_when_no_copy_can_be_kept(tmp_path, m
 def test_unreadable_link_is_not_copied(tmp_path, monkeypatch):
     p = tmp_path / "overdrive.json"
     p.write_bytes(b"{nope")
-    monkeypatch.setattr(st, "_is_link", lambda path: True)
+    monkeypatch.setattr(settings_file, "_is_link", lambda path: True)
     s = Settings.load(str(p), now=NOW)
     assert sorted(x.name for x in tmp_path.iterdir()) == ["overdrive.json"]
     assert s.warning == ("Overdrive settings could not be read and were reset; overdrive.json is a link, so no copy "
