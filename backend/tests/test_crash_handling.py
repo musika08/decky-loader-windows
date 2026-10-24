@@ -179,3 +179,59 @@ def test_startup_migrates_before_applying_the_setting(main_mod: Any, monkeypatch
     # Windows: a toggle saved while it did nothing is reset, so no port is opened. Linux unchanged.
     assert calls == (["stop"] if windows else ["start"])
     assert ("cef_forward_windows_reviewed" in pm.settings.values) is windows
+
+
+def test_own_webhelper_restart_is_not_counted_as_a_crash(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    # 2026-10-24 on the Ally: Decky restarted while Steam showed the old frontend; the webhelper restart Decky did
+    # itself was counted as a crash (within a minute of the last one), and after three of them fallback.js was injected.
+    pm, _tab, calls = _reinject(main_mod, monkeypatch, restarted=True)
+    assert calls == [1]
+    asyncio.run(pm.handle_crash()) # the CEF disconnect that follows Decky's own restart
+    assert pm.webhelper_crash_count == 0
+    asyncio.run(pm.handle_crash()) # a real crash afterwards still counts as before
+    assert pm.webhelper_crash_count == 1
+
+
+def test_windows_restarts_a_stale_frontend_only_once(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    # After the one cleanup restart, a frontend that is already there is this loader's own: no second restart,
+    # no second copy of the frontend.
+    pm, _tab, calls = _reinject(main_mod, monkeypatch, restarted=True)
+    asyncio.run(pm.handle_crash())
+    again = LoadedTab()
+    pm.js_ctx_tab = again
+    asyncio.run(pm.inject_javascript(again, True))
+    assert calls == [1]
+    assert again.scripts == [] and not again.closed and pm.js_ctx_tab is again
+    assert pm.frontend_loaded_since is not None
+
+
+def test_the_ally_sequence_never_reaches_fallback(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    # The logged pattern: inject -> restart -> disconnect, repeated. Three rounds must not end in fallback.js.
+    monkeypatch.setattr(main_mod, "ON_WINDOWS", True)
+    monkeypatch.setattr(main_mod, "ON_LINUX", False)
+    calls: list[int] = []
+
+    async def restart() -> bool:
+        calls.append(1)
+        return True
+    monkeypatch.setattr(main_mod, "restart_webhelper", restart)
+    pm = _manager(main_mod, 0)
+    pm.frontend_loaded_since = None
+    scripts: list[str] = []
+    for _ in range(3):
+        tab = LoadedTab()
+        pm.js_ctx_tab = tab
+        asyncio.run(pm.inject_javascript(tab, True))
+        scripts += tab.scripts
+        asyncio.run(pm.handle_crash())
+    fresh = FakeTab() # Steam's interface came back without a frontend
+    asyncio.run(pm.inject_javascript(fresh, True))
+    assert calls == [1]
+    assert pm.webhelper_crash_count < 3
+    assert len(fresh.scripts) == 1 and "index.js" in fresh.scripts[0] and "fallback.js" not in fresh.scripts[0]
+
+
+def test_failed_restart_does_not_hide_the_next_real_crash(main_mod: Any, monkeypatch: pytest.MonkeyPatch):
+    pm, _tab, _calls = _reinject(main_mod, monkeypatch, restarted=False)
+    asyncio.run(pm.handle_crash())
+    assert pm.webhelper_crash_count == 1

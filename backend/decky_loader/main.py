@@ -84,6 +84,13 @@ if get_chown_plugin_path() == True:
     chown_plugin_dir()
 
 class PluginManager:
+    # Windows: whether this loader already cleared a stale frontend (an earlier loader run's) by restarting the
+    # webhelper, and whether the CEF disconnect that restart causes is still to come. That disconnect is Decky's own
+    # doing, not a crash: counted as one, a loader restarted while Steam was open restarted the webhelper on every
+    # reconnect and reached fallback.js (no plugins) within a minute (owner's Ally, 2026-10-24).
+    stale_frontend_cleared: bool = False
+    own_webhelper_restart: bool = False
+
     def __init__(self, loop: AbstractEventLoop) -> None:
         self.loop = loop
         self.reinject: bool = True
@@ -137,6 +144,10 @@ class PluginManager:
 
     async def handle_crash(self):
         if not self.reinject:
+            return
+        if self.own_webhelper_restart:
+            self.own_webhelper_restart = False
+            logger.info("Steam's webhelper was restarted by Decky to clear an old frontend; not counted as a crash")
             return
         new_time = time()
         if (new_time - self.last_webhelper_exit < 60):
@@ -315,16 +326,24 @@ class PluginManager:
                 await restart_webhelper()
                 await sleep(1) # To give CEF enough time to close down the websocket
                 return # We'll catch the next tab in the main loop
+            if ON_WINDOWS and self.stale_frontend_cleared and await tab.has_global_var("deckyHasLoaded", False):
+                # Already cleared once: a frontend that is there now is this loader's own. Don't restart Steam's
+                # interface again or inject a second copy.
+                self.set_frontend_loaded(True)
+                return
             if ON_WINDOWS and await tab.has_global_var("deckyHasLoaded", False):
                 # Same as Linux, but only drop the tab once the webhelper is really gone: otherwise reconnecting would
                 # find the old frontend again and loop. If it can't be restarted, the inject script below falls back
-                # to restarting the JS context, as before.
+                # to restarting the JS context, as before. Only once per loader run (see stale_frontend_cleared).
+                self.stale_frontend_cleared = True
+                self.own_webhelper_restart = True
                 if await restart_webhelper():
                     self.set_frontend_loaded(False)
                     await tab.close_websocket()
                     self.js_ctx_tab = None
                     await sleep(1)
                     return
+                self.own_webhelper_restart = False # no restart, so no disconnect of ours to skip
                 logger.warning("Could not restart steamwebhelper; restarting the JS context instead")
             await tab.evaluate_js(create_inject_script("index.js" if self.webhelper_crash_count < 3 else "fallback.js"), False, False, False)
             self.set_frontend_loaded(True)
