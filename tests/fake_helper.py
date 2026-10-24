@@ -1,6 +1,8 @@
-"""Stand-in for bin\\traction-helper.exe in tests; it touches no hardware.
+"""Stand-ins for bin\\traction-helper.exe in tests; neither touches hardware.
 
-Run as a script it is a child process that speaks the helper's JSON-lines protocol (used by the HelperClient tests).
+- Run as a script: a child process that speaks the helper's JSON-lines protocol (used by the HelperClient tests).
+- FakeClient: an in-process HelperClient double with scripted replies (used by the controls, reapply, Controller Auto
+  and main tests).
 
 Script options (argv):
   --exit-at-start CODE   exit with CODE before reading anything
@@ -75,6 +77,79 @@ def main(argv):
             continue
         sys.stdout.write(json.dumps(reply(req)) + "\n")
         sys.stdout.flush()
+
+
+READS = ("hello", "frame_sample", "foreground", "armoury_state", "controller_info", "get_touchscreen")
+
+
+class FakeClient:
+    """Records (cmd, args) and answers like the helper. handlers[cmd] = async fn(args) -> reply overrides a reply."""
+
+    def __init__(self):
+        self.calls = []
+        self.timeouts = {}
+        self.handlers = {}
+        self.unavailable_reason = ""
+        self.started = False
+        self.stopped = False
+        self.armoury_inflight = 0
+        self.armoury = {"startTypes": {"ArmouryCrateSEService": "AutomaticDelayedStart",
+                                       "LightingService": "Automatic"},
+                        "running": ["ArmouryCrateSEService"]}
+
+    def start(self):
+        self.started = True
+
+    async def stop(self):
+        self.stopped = True
+
+    def writes(self):
+        return [c for c in self.calls if c[0] not in READS]
+
+    @property
+    def busy(self):
+        return self.armoury_inflight > 0
+
+    async def call(self, cmd, args=None, timeout=10.0):
+        armoury = cmd in ("armoury_stop", "armoury_restore")
+        if armoury:
+            self.armoury_inflight += 1
+        try:
+            return await self._call(cmd, args, timeout)
+        finally:
+            if armoury:
+                self.armoury_inflight -= 1
+
+    async def _call(self, cmd, args, timeout):
+        self.calls.append((cmd, args))
+        self.timeouts.setdefault(cmd, []).append(timeout)
+        if cmd in self.handlers:
+            return await self.handlers[cmd](args)
+        args = args or {}
+        if cmd == "armoury_state":
+            return ok({"installed": True, "startTypes": dict(self.armoury["startTypes"]),
+                       "running": list(self.armoury["running"])})
+        if cmd == "armoury_stop":
+            return ok({"startTypes": dict(self.armoury["startTypes"]), "running": list(self.armoury["running"])})
+        if cmd == "armoury_restore":
+            return ok({"skipped": []})
+        if cmd == "frame_sample":
+            return ok(dict(FRAME_SAMPLE))
+        if cmd == "foreground":
+            return ok({"exe": "steam.exe"})
+        if cmd == "controller_info":
+            return ok({"found": False, "pid": "0x1B4C", "xbox": False})   # off by default: no extra writes
+        if cmd == "get_touchscreen":
+            return ok({"found": False, "enabled": False, "instanceId": ""})
+        return ok(dict(args))
+
+
+def ok(data):
+    return {"id": 1, "ok": True, "message": "", "data": data}
+
+
+def fail(message, data=None):
+    return {"id": 1, "ok": False, "message": message, "data": data}
 
 
 if __name__ == "__main__":
