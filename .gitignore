@@ -6,3 +6,4 @@ __pycache__/
 .superpowers/
 *.pyc
 .pytest_cache/
+dist-release/
