@@ -346,9 +346,22 @@ namespace Overdrive.Helper
             }
             d["gpuTempC"] = temp;
             d["gpuUse"] = g != null ? InRange(g.Use, 0, 100) : null;
-            // A running CPU or GPU never draws 0 W: the Ally's driver leaves cpuPower at 0, so 0 means not reported.
-            d["cpuPowerW"] = g != null ? InRange(g.CpuPowerW, 1, 1000) : null;
+            // A running CPU or GPU never draws 0 W: the Ally's driver leaves cpuPower at 0-1 W, so below 2 W means not
+            // reported. Then the whole-chip power minus the graphics power stands in; that includes the chip's shared
+            // parts (memory controller etc.), not only the CPU cores.
+            d["cpuPowerW"] = g != null ? CpuPower(g) : null;
             d["gpuPowerW"] = g != null ? InRange(g.GfxPowerW, 1, 1000) : null;
+        }
+
+        private static int? CpuPower(GpuSensors g)
+        {
+            int? cpu = InRange(g.CpuPowerW, 2, 1000);
+            if (cpu.HasValue) return cpu;
+            int? asic = InRange(g.AsicPowerW, 1, 1000);
+            int? gfx = InRange(g.GfxPowerW, 1, 1000);
+            if (!asic.HasValue || !gfx.HasValue) return null;
+            int diff = asic.Value - gfx.Value;
+            return diff >= 1 ? (int?)diff : null;
         }
 
         private static int? InRange(int? v, int lo, int hi)

@@ -843,6 +843,14 @@ namespace Overdrive.Helper.Tests
             var z = (Dictionary<string, object>)rig.Send("{\"id\":3,\"cmd\":\"sensors\"}")["data"];
             True(z["cpuPowerW"] == null, "0 W cpu power is not reported");
             Equal(5, z["gpuPowerW"], "gpu power kept");
+            rig.Adl.Gpu = new GpuSensors { TempC = 54, GfxPowerW = 4, CpuPowerW = 1, AsicPowerW = 20 };
+            Equal(16, ((Dictionary<string, object>)rig.Send("{\"id\":4,\"cmd\":\"sensors\"}")["data"])["cpuPowerW"], "driver 1 W: asic minus gfx");
+            rig.Adl.Gpu = new GpuSensors { TempC = 54, GfxPowerW = 4, CpuPowerW = 8, AsicPowerW = 20 };
+            Equal(8, ((Dictionary<string, object>)rig.Send("{\"id\":5,\"cmd\":\"sensors\"}")["data"])["cpuPowerW"], "real driver cpu kept");
+            rig.Adl.Gpu = new GpuSensors { TempC = 54, GfxPowerW = 4, CpuPowerW = 1 };
+            True(((Dictionary<string, object>)rig.Send("{\"id\":6,\"cmd\":\"sensors\"}")["data"])["cpuPowerW"] == null, "asic missing: null");
+            rig.Adl.Gpu = new GpuSensors { TempC = 54, GfxPowerW = 20, CpuPowerW = 1, AsicPowerW = 20 };
+            True(((Dictionary<string, object>)rig.Send("{\"id\":7,\"cmd\":\"sensors\"}")["data"])["cpuPowerW"] == null, "asic <= gfx: null");
         }
 
         public static void GpuSensors_FallBackToAcpiTempGpu()
