@@ -1,0 +1,22 @@
+{
+  "files": {
+    "helper/src/shared/AdlHardware.cs": "f56c3f266c48f57349983b82ad1efa79a5a9ef3bbc2dca85e1885fc8e38ed598",
+    "helper/src/shared/ArmouryCommands.cs": "c607a030e6d81b52c2c38fc0e24e17a3cc4b0e79b690b9869f012f0a8196afb6",
+    "helper/src/shared/ArmouryServices.cs": "4177362bf422f7b8f889d318be518535b14e21c9a3b9d61f949e6c4670ee60f1",
+    "helper/src/shared/AsusHid.cs": "fa16bd15d2faef9b5c013664c6c01bbf7917f878ef8b58f13dcdbff70483da4a",
+    "helper/src/shared/ProtocolKit.cs": "7a9190c834e2b54a8c1e8ab30cf0b277085275f91e952218d558e83316b0cbc2",
+    "helper/src/shared/ServiceHardware.cs": "2b4852146932adc0b6fdc4eedbca52c148b400cb7503c6ab57411f2c7c34100e",
+    "helper/src/shared/SharedHardware.cs": "4c3ac1dc4f8c30fbce25f984842f846c7489ec48301854f9aac26fb66346ff8c",
+    "helper/src/shared/SystemControls.cs": "fdb06482b5bc5b5bfd9c8760a4dca8bbd7d7ae17a1ee816228978a442c604f07",
+    "helper/src/shared/Validation.cs": "23840b48563e6ee7276c937f724fcee479de2b0c37cb4a576982e611a960e417",
+    "helper/src/shared/ghelper/AmdAdl2.cs": "65855d7b6ad1bcf17fc0996f5f0361eae67ce8830f25319f31a105bf8e316fb1",
+    "helper/src/shared/ghelper/AmdGpuControl.cs": "b4a640a85f72b073c172c1775675716ad438b7883c6cd8d87eda9d86387a03db",
+    "py_modules/traction/armoury_record.py": "ad2b134de47a2ac5cdae518750a990b386166c41a3aad9cfc62402c7c6d85969",
+    "py_modules/traction/armoury_switch.py": "36fdf933e8572c2fab9a212f47ec151892566c466a9d4158274ba74426578934",
+    "py_modules/traction/device.py": "dbc29da891f4503948774fbe1bceb33ec635b4d06d36b807e03a0a4613209f72",
+    "py_modules/traction/helper_client.py": "86c02c77cf126a21ac102f66a9721e6d085beef8048ef976327fb6b5c117508e",
+    "py_modules/traction/reapply_core.py": "287c57cf57544de69db1b7e70c6c9abb1391e353d9b50eb71adcd19243d3accd",
+    "py_modules/traction/settings_file.py": "6f9400a36c4de45b2210976192e58de3da4284b28b587195b50c6dc40be83867"
+  },
+  "overdrive_commit": "6850aaaa574fc32057511d4a15973ccf672dea54"
+}

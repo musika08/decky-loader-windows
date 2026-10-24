@@ -1,0 +1,239 @@
+using System;
+using System.Collections.Generic;
+using Ally.Shared;
+
+namespace Traction.Helper.Tests
+{
+    // In-memory stand-ins for the hardware interfaces. Nothing here touches a device, a driver or a service.
+    public class FakeAdl : IAdl
+    {
+        public int Limit;
+        public bool Missing;
+        public string Problem = "fake ADL missing";
+        public readonly List<int> Sets = new List<int>();
+
+        public int GetFpsLimit() { return Missing ? -1 : Limit; }
+
+        public int SetFpsLimit(int fps)
+        {
+            if (Missing) return -1;
+            Sets.Add(fps);
+            Limit = fps;
+            return 1;
+        }
+
+        public string Unavailable { get { return Missing ? Problem : null; } }
+
+        // The iGPU readings the fake driver reports; null = the driver reports no sensors.
+        public GpuSensors Gpu = new GpuSensors { TempC = 45, Use = 30, GfxPowerW = 5, CpuPowerW = 8, AsicPowerW = 14 };
+        public GpuSensors GetGpuSensors() { return Missing ? null : Gpu; }
+
+        // The frame rate the fake driver reports; the metrics start on the first sample (like the real AdlHardware).
+        public float? Fps = 60f;
+        public bool FrameSupported = true;
+        public int FrameStarts;
+        private bool frameStarted;
+        public bool FrameRateSupported { get { return FrameSupported; } }
+
+        public float? GetFrameRate()
+        {
+            if (Missing || !FrameSupported) return null;
+            if (!frameStarted) { frameStarted = true; FrameStarts++; }
+            return Fps;
+        }
+
+        // A restarted helper: the fake's started flag is cleared, so the next sample starts the metrics again.
+        public void Reset() { frameStarted = false; }
+    }
+
+    // Stands in for the ported AmdGpuControl behind AdlHardware: same get/set contract as G-Helper
+    // (SetFPSLimit writes the AC and DC value, GetFPSLimit returns the AC value; 1 OK, 0 refused, -1 unavailable).
+    public class FakeFpsControl : IFpsControl
+    {
+        public string ProblemText;
+        public int Ac, Dc;
+        public bool Refuse;
+        public bool Disposed;
+
+        public string Problem { get { return ProblemText; } }
+        public int GetFPSLimit() { return Ac; }
+
+        public int SetFPSLimit(int limit)
+        {
+            if (Refuse) return 0;
+            Ac = limit;
+            Dc = limit;
+            return 1;
+        }
+
+        public GpuSensors Gpu;
+        public GpuSensors GetiGpuSensors() { return Gpu; }
+
+        public int StartResult, GetResult, StopResult;
+        public float FpsValue;
+        public bool NoEntryPoint;
+        public int Starts, Stops;
+        public int FrameMetricsStart() { if (NoEntryPoint) throw new EntryPointNotFoundException(); Starts++; return StartResult; }
+        public int FrameMetricsGet(out float fps) { if (NoEntryPoint) throw new EntryPointNotFoundException(); fps = FpsValue; return GetResult; }
+        public int FrameMetricsStop() { Stops++; return StopResult; }
+
+        public void Dispose() { Disposed = true; }
+    }
+
+    // Raw HID stand-in: a fixed list of collections and every feature report sent, by path.
+    // The default list is shaped like the owner's Ally: other vendors, an ASUS PID that is not a controller, the
+    // controller's collections without 0x5A, and exactly one controller collection with feature report 0x5A.
+    public class FakeHidBus : IHidBus
+    {
+        public const string MatchPath = @"\\?\hid#vid_0b05&pid_1b4c&mi_02&col03#match";
+        public readonly List<HidCollection> Devices = new List<HidCollection>();
+        public readonly List<KeyValuePair<string, byte[]>> Writes = new List<KeyValuePair<string, byte[]>>();
+        public bool Fail;
+        public int Lists;
+
+        public FakeHidBus() : this(64) { }
+
+        public FakeHidBus(int featureLength)
+        {
+            Add(@"\\?\hid#vid_046d&pid_c52b#other-vendor", 0x046D, 0xC52B, 64, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1234#asus-not-controller", 0x0B05, 0x1234, 64, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_02&col01#aura", 0x0B05, 0x1B4C, 64, 0x5D);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_02&col02#no-feature", 0x0B05, 0x1B4C, 0);
+            Add(@"\\?\hid#vid_046d&pid_1b4c#other-vendor-same-pid", 0x046D, 0x1B4C, 64, 0x5A);
+            Add(MatchPath, 0x0B05, 0x1B4C, featureLength, 0x5D, 0x5A);
+            Add(@"\\?\hid#vid_0b05&pid_1b4c&mi_05#gamepad", 0x0B05, 0x1B4C, 0);
+        }
+
+        public void Add(string path, int vid, int pid, int featureLength, params byte[] ids)
+        {
+            Devices.Add(new HidCollection { Path = path, Vid = vid, Pid = pid, FeatureLength = featureLength, FeatureReportIds = ids });
+        }
+
+        public List<HidCollection> List()
+        {
+            Lists++;
+            return new List<HidCollection>(Devices);
+        }
+
+        public bool SetFeature(string path, byte[] report, out string err)
+        {
+            err = null;
+            Writes.Add(new KeyValuePair<string, byte[]>(path, (byte[])report.Clone()));
+            if (Fail) { err = "feature write failed"; return false; }
+            return true;
+        }
+    }
+
+    // Touchscreen, Auto SR registry value and foreground app stand-in. Nothing blocks: a touchscreen set only records.
+    public class FakeSystemControls : ISystemControls
+    {
+        public TouchInfo Touch = new TouchInfo { Found = true, Enabled = true, InstanceId = @"HID\NVTK0603&COL01\5&1234&0&0000" };
+        public readonly List<bool> TouchSets = new List<bool>();
+        public bool TouchBusy;          // a previous change "still running"
+        public bool TouchStartFails;
+        public int TouchReads;
+        public string Gpu = "VRROptimizeEnable=1;DXGIEffects=1028;SwapEffectUpgradeEnable=1;AutoHDREnable=0;";
+        public readonly List<string> GpuWrites = new List<string>();
+        public bool GpuWriteFails;
+        public bool Installed = true;
+        public string Foreground = "";
+
+        public TouchInfo GetTouchscreen() { TouchReads++; return Touch; }
+
+        public bool StartSetTouchscreen(bool enabled, out string err)
+        {
+            err = null;
+            if (TouchBusy) { err = "A touchscreen change is already running."; return false; }
+            if (TouchStartFails) { err = "Could not start PowerShell."; return false; }
+            TouchSets.Add(enabled);
+            TouchBusy = true;   // like the real one: busy until the process ends
+            return true;
+        }
+
+        public string GpuReadError;     // simulates a registry read failure
+
+        public string ReadGpuSettings(out string err) { err = GpuReadError; return err != null ? null : Gpu; }
+
+        public bool WriteGpuSettings(string value, out string err)
+        {
+            err = null;
+            if (GpuWriteFails) { err = "registry write failed"; return false; }
+            GpuWrites.Add(value);
+            Gpu = value;
+            return true;
+        }
+
+        public bool AutoSrInstalled() { return Installed; }
+        public string ForegroundExe() { return Foreground; }
+    }
+
+    // Service manager stand-in with state: start types, which services run, and injectable failures.
+    // A service that is not in Types does not exist.
+    public class FakeServices : IServices
+    {
+        public readonly Dictionary<string, string> Types = new Dictionary<string, string>();
+        public readonly List<string> RunningNames = new List<string>();
+        public readonly List<string> Calls = new List<string>();      // every call, reads included, in order
+        public readonly List<string> FailStop = new List<string>();   // stops the service, then throws before setting the type
+        public readonly List<string> FailStart = new List<string>();  // throws before changing anything
+        // name -> a service it depends on; starting it fails while that one is Disabled (like the service manager)
+        public readonly Dictionary<string, string> DependsOn = new Dictionary<string, string>();
+
+        public Dictionary<string, string> StartTypes(IEnumerable<string> names)
+        {
+            Calls.Add("query types");
+            var d = new Dictionary<string, string>();
+            foreach (string n in names) { string t; if (Types.TryGetValue(n, out t)) d[n] = t; }
+            return d;
+        }
+
+        public List<string> Running(IEnumerable<string> names)
+        {
+            Calls.Add("query running");
+            var l = new List<string>();
+            foreach (string n in names) if (RunningNames.Contains(n)) l.Add(n);
+            return l;
+        }
+
+        public void Stop(string name, string startType)
+        {
+            Calls.Add("stop " + name + " " + startType);
+            Exists(name);
+            RunningNames.Remove(name);
+            if (FailStop.Contains(name)) throw new InvalidOperationException("access denied");
+            Types[name] = startType;
+        }
+
+        public void Start(string name, string startType)
+        {
+            Calls.Add("start " + name + " " + startType);
+            Exists(name);
+            if (FailStart.Contains(name)) throw new InvalidOperationException("the service did not start");
+            string dep;
+            if (DependsOn.TryGetValue(name, out dep) && Types.ContainsKey(dep) && Types[dep] == "Disabled")
+                throw new InvalidOperationException("a dependency service is disabled");
+            Types[name] = startType;
+            if (!RunningNames.Contains(name)) RunningNames.Add(name);
+        }
+
+        public void SetStartType(string name, string startType)
+        {
+            Calls.Add("type " + name + " " + startType);
+            Exists(name);
+            Types[name] = startType;
+        }
+
+        private void Exists(string name)
+        {
+            if (!Types.ContainsKey(name)) throw new InvalidOperationException("service " + name + " was not found");
+        }
+
+        // Mutating calls only (stop/start/type), for asserting what changed.
+        public List<string> Changes()
+        {
+            var l = new List<string>();
+            foreach (string c in Calls) if (!c.StartsWith("query ")) l.Add(c);
+            return l;
+        }
+    }
+}

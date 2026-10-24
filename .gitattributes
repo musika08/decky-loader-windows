@@ -1,0 +1,4 @@
+# Shared copies must stay byte for byte as synced from Overdrive (shared/SOURCE holds their sha256).
+py_modules/traction/*.py -text
+helper/src/shared/** -text
+shared/SOURCE -text

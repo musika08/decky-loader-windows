@@ -1,0 +1,19 @@
+{
+  "api_version": 1,
+  "name": "Traction",
+  "author": "Musika",
+  "publisher": "musika08",
+  "flags": [
+    "root"
+  ],
+  "publish": {
+    "tags": [
+      "asus",
+      "controller",
+      "touchscreen",
+      "vibration"
+    ],
+    "description": "Controller mode, grip vibration, touchscreen and more for the ROG Ally family (unofficial; based on G-Helper).",
+    "image": ""
+  }
+}
