@@ -265,6 +265,7 @@ function InlinePicker<T>(props: {
     display: 'flex',
     justifyContent: 'space-between',
     alignItems: 'center',
+    gap: '8px',
     width: '100%',
     boxSizing: 'border-box' as const,
     padding: '8px 10px',
@@ -283,8 +284,8 @@ function InlinePicker<T>(props: {
         onCancelButton={cancel}
         onOKActionDescription={open ? 'Close' : 'Choose'}
       >
-        <span>{label}</span>
-        <span style={{ color: disabled ? '#8b929a' : '#ffffff' }}>{options.some((o) => o.data === value) || !props.unknownText
+        <span style={{ whiteSpace: 'nowrap' }}>{label}</span>
+        <span style={{ color: disabled ? '#8b929a' : '#ffffff', whiteSpace: 'nowrap' }}>{options.some((o) => o.data === value) || !props.unknownText
             ? rowValue(options, value, open)
             : props.unknownText + (open ? ' ▴' : ' ▾')}
         </span>
@@ -1108,7 +1109,7 @@ function Content() {
           <>
             <PanelSectionRow>
               <InlinePicker
-                label="Battery performance"
+                label="Battery"
                 options={powerOptions}
                 value={state.power_mode?.value ?? 'other'}
                 unknownText={powerModeLabel('other')}

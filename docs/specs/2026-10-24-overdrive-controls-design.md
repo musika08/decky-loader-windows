@@ -57,7 +57,7 @@ Source: G-Helper at the pinned commit `c09017453d9ed0c52261b67a48d02bd55232e6ac`
 
 ### 3.2 Battery performance (Performance section)
 
-- An inline full-width picker, like FPS limit, labelled "Battery performance".
+- An inline full-width picker, like FPS limit, labelled "Battery" (owner rename 2026-10-24; label, value and arrow on one line).
 - Choices map to Windows' power-mode overlays (G-Helper `PowerNative` GUIDs):
   - Eco = 961cc777-2547-4f9d-8174-7d86181b8a7a (Windows: Best power efficiency);
   - Balanced = 00000000-0000-0000-0000-000000000000;
