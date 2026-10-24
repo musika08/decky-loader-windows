@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import types
 
 import decky  # type: ignore
 
@@ -11,11 +12,12 @@ if _PY_MODULES not in sys.path:
     sys.path.append(_PY_MODULES)
 
 from traction import controls, device  # noqa: E402
-from traction.armoury_record import RECORD_DIR, ArmouryRecord  # noqa: E402
-from traction.armoury_switch import ArmourySwitch  # noqa: E402
+from traction.armoury_record import RECORD_DIR, ArmouryLocked, ArmouryRecord  # noqa: E402
+from traction.armoury_switch import ArmourySwitch, migrate_from_settings  # noqa: E402
 from traction.controller_auto import ControllerAuto  # noqa: E402
 from traction.helper_client import HelperClient  # noqa: E402
-from traction.overdrive_compat import UPDATE_NOTE, old_overdrive, overdrive_holds_armoury_record  # noqa: E402
+from traction.overdrive_compat import (UPDATE_NOTE, find_overdrive, find_overdrive_settings,  # noqa: E402
+                                       old_overdrive, overdrive_holds_armoury_record, read_old_record)
 from traction.reapply import Reapplier  # noqa: E402
 from traction.settings import CONTROLLER_MODES, Settings, migrate_from_overdrive  # noqa: E402
 
@@ -27,6 +29,10 @@ NO_CONTROLLER = "The controller was not found; the choice is saved and applied w
 ARMOURY_RUNNING = "Armoury Crate is running, so these settings may be overwritten."
 NOT_MOVED = ("Overdrive's Armoury Crate record has not moved to the shared record yet. Open Overdrive once, then "
              "try again.")
+MOVE_FAILED = ("Overdrive's Armoury Crate record could not be moved to the shared record yet, try again in a "
+               "moment.")
+OVERDRIVE_POLL = 5.0             # seconds between checks of an old Overdrive's version
+MOVE_WAIT = 2.0                  # how long a move of Overdrive's orphaned record waits for the record lock
 UNREAD = {"controller": {"found": False}, "touchscreen": {"found": False, "enabled": False}}
 
 
@@ -44,9 +50,14 @@ def settings_path() -> str:
 
 def overdrive_settings_path() -> str:
     """Overdrive's settings file: Decky gives each plugin <settings root>\\<plugin folder>, and Overdrive keeps
-    overdrive.json in its folder (Overdrive main.py settings_path)."""
+    overdrive.json in its folder (Overdrive main.py settings_path). The folder is the installed Overdrive's, found
+    by its plugin.json name; with none installed, the first <settings root>\\*\\overdrive.json; "" when there is
+    none."""
     root = os.path.dirname(os.path.normpath(decky.DECKY_PLUGIN_SETTINGS_DIR))
-    return os.path.join(root, "overdrive", "overdrive.json")
+    folder = find_overdrive(plugins_dir())
+    if folder is not None:
+        return os.path.join(root, folder, "overdrive.json")
+    return find_overdrive_settings(root)
 
 
 def plugins_dir() -> str:
@@ -75,6 +86,9 @@ class Plugin:
         self._controls = None            # the last controller/touchscreen reading (shown while a switch runs)
         self._startup = None
         self._late_start = None          # the controller start once an old Overdrive was updated
+        self._watch = None               # re-checks an old Overdrive's version every OVERDRIVE_POLL seconds
+        self._sleep = asyncio.sleep      # the watch's sleep (tests pass a fake)
+        self._move_failed = False        # the last move of Overdrive's orphaned Armoury record failed
 
     def _attach(self, client, settings, reapplier, record=None, old: bool = False, plugins: str = "") -> None:
         self.client, self.settings, self.reapplier = client, settings, reapplier
@@ -145,12 +159,23 @@ class Plugin:
         if self._old:
             decky.logger.info("Traction: an Overdrive older than 0.2.0 is installed; nothing is written to the "
                               "controller and the Armoury Crate switch is left to it")
+            self._watch = asyncio.ensure_future(self._watch_overdrive())
             return
         await self._start_writes()
 
+    async def _watch_overdrive(self) -> None:
+        """While an old Overdrive blocks Traction: check its version every OVERDRIVE_POLL seconds (not only when the
+        panel reads the state), and start what the load held back once it is 0.2.0 or newer."""
+        while self._old:
+            await self._sleep(OVERDRIVE_POLL)
+            self._check_overdrive_updated()
+
     async def _start_writes(self) -> None:
-        """The load-time Armoury check (P8 re-stop, recovery), the reapplier and, when stored, Controller Auto."""
+        """The load-time Armoury check (P8 re-stop, recovery), the reapplier and, when stored, Controller Auto. An
+        orphaned Overdrive record (no Overdrive installed to move it) is moved to the shared record first."""
         if self.armoury is not None:
+            if self._overdrive_record_pending() and not self._overdrive_installed():
+                await self._move_orphaned_record()
             await self.armoury.on_load()
         self.reapplier.start()
         if self.settings.controller_mode == "auto" and self.controller_auto is not None:
@@ -174,7 +199,7 @@ class Plugin:
         loop = asyncio.get_running_loop()
         while self.armoury is not None and self.armoury.busy and loop.time() < self.armoury.until:
             await asyncio.sleep(0.05)
-        for task in (self._startup, self._late_start):
+        for task in (self._startup, self._watch, self._late_start):
             if task is not None and not task.done():
                 task.cancel()
                 try:
@@ -222,8 +247,7 @@ class Plugin:
             replaced = self.armoury.replaced()   # the shared record: either plugin may switch
             if not state["busy"]:   # never queue behind a long service switch
                 await self.armoury.check_installed()
-            warning = " ".join(w for w in (self.armoury.warning,
-                                           NOT_MOVED if self._overdrive_record_pending() else "") if w)
+            warning = " ".join(w for w in (self.armoury.warning, self._record_pending_note()) if w)
             state["armoury"] = {"installed": self.armoury.installed, "replaced": replaced, "warning": warning}
         state["note"] = "" if replaced else ARMOURY_RUNNING
         if not state["busy"]:
@@ -355,8 +379,61 @@ class Plugin:
         if not isinstance(on, bool):
             return _fail("Expected on or off.")
         if self._overdrive_record_pending():
-            return _fail(NOT_MOVED)
+            if self._overdrive_installed():
+                return _fail(NOT_MOVED)        # Overdrive 0.2.0+ moves its own record when it loads
+            # Overdrive is gone but left its record: Traction moves it, then runs the load-time check on it (P8
+            # re-stop or recovery) as a load would have, before the switch.
+            if await self._move_orphaned_record():
+                await self.armoury.on_load()
+            elif self._overdrive_record_pending():
+                return _fail(MOVE_FAILED)
         return await self.armoury.set(on)
+
+    def _overdrive_installed(self) -> bool:
+        return find_overdrive(self._plugins_dir or plugins_dir()) is not None
+
+    def _record_pending_note(self) -> str:
+        if not self._overdrive_record_pending():
+            return ""
+        if self._overdrive_installed():
+            return NOT_MOVED
+        return MOVE_FAILED if self._move_failed else ""
+
+    async def _move_orphaned_record(self) -> bool:
+        """Overdrive is not installed but its overdrive.json (or the .bak when that is unreadable) still holds the
+        old Armoury Crate record and the shared record does not exist: move it there with the shared
+        migrate_from_settings, waiting up to MOVE_WAIT for the record lock without blocking the loop. overdrive.json
+        is only read, never edited. True when the record was moved."""
+        raw = read_old_record(overdrive_settings_path())
+        why = "neither overdrive.json nor overdrive.json.bak could be read"
+        if raw is not None:
+            rec, run = raw.get("armoury_recorded"), raw.get("armoury_running")
+            old = types.SimpleNamespace(armoury_replaced=raw.get("armoury_replaced") is True,
+                                        armoury_recorded=rec if isinstance(rec, dict) else {},
+                                        armoury_running=run if isinstance(run, list) else [])
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + MOVE_WAIT
+            while True:
+                try:
+                    moved = migrate_from_settings(self.armoury.record, old, 0.0)
+                except ArmouryLocked as e:
+                    why = str(e)
+                    if loop.time() < deadline:
+                        await asyncio.sleep(0.05)
+                        continue
+                except OSError as e:
+                    why = str(e)
+                else:
+                    self._move_failed = False
+                    if moved:
+                        decky.logger.info("Traction: Overdrive is not installed; its old Armoury Crate record was "
+                                          "moved to the shared record")
+                    return moved
+                break
+        self._move_failed = True
+        decky.logger.warning(f"Traction: Overdrive's old Armoury Crate record was not moved to the shared record yet: "
+                             f"{why}")
+        return False
 
     def _overdrive_record_pending(self) -> bool:
         """Overdrive's own Armoury Crate record (overdrive.json, before 0.2.0) is not in the shared record yet: the

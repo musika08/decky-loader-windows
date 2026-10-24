@@ -24,6 +24,7 @@ import {
   TOUCH_POLL_MS,
   TOUCH_TIMEOUT_TEXT,
   armouryChecked,
+  armouryDisabled,
   controllerBanner,
   controllerModeDescription,
   touchscreenCheck,
@@ -433,7 +434,7 @@ function Content() {
             // Steam's toggle flips itself on every press, so it is fed what it should show: the target while
             // switching, else the stored state. A failed switch changes the value back and the toggle follows.
             checked={armouryChecked(state.armoury.replaced, busy)}
-            disabled={disabled}
+            disabled={armouryDisabled(disabled, state.blocked)}
             onChange={toggleArmoury}
           />
         </PanelSectionRow>

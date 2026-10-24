@@ -80,14 +80,25 @@ def test_migrate_takes_overdrive_values(tmp_path):
                                    "user_set": False})
     s = traction_settings(tmp_path)
     assert migrate_from_overdrive(od, s) is True
-    assert (s.controller_mode, s.grip_vibration, s.user_set) == ("auto", False, True)
+    # final review T3: the values are taken, but user_set only follows Overdrive's own user_set
+    assert (s.controller_mode, s.grip_vibration, s.user_set) == ("auto", False, False)
     # Overdrive's file is only read, never changed.
     assert json.loads(open(od, encoding="utf-8").read())["controller_mode"] == "auto"
     assert sorted(os.listdir(tmp_path / "overdrive")) == ["overdrive.json"]
     # Only one value present: that one is taken, the other keeps its default.
     s2 = traction_settings(tmp_path)
     assert migrate_from_overdrive(overdrive_file(tmp_path, {"grip_vibration": False}), s2) is True
-    assert (s2.controller_mode, s2.grip_vibration, s2.user_set) == ("gamepad", False, True)
+    assert (s2.controller_mode, s2.grip_vibration, s2.user_set) == ("gamepad", False, False)
+
+
+def test_migrate_user_set_follows_overdrive(tmp_path):
+    for user_set, want in ((True, True), (False, False), (None, False), ("yes", False), (1, False)):
+        data = {"controller_mode": "desktop", "grip_vibration": False}
+        if user_set is not None:
+            data["user_set"] = user_set
+        s = traction_settings(tmp_path)
+        assert migrate_from_overdrive(overdrive_file(tmp_path, data), s) is True, user_set
+        assert (s.controller_mode, s.grip_vibration, s.user_set) == ("desktop", False, want), user_set
 
 
 def test_migrate_missing_unreadable_or_bad_values_keep_defaults(tmp_path):

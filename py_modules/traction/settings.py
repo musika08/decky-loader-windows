@@ -76,7 +76,7 @@ class Settings:
 def migrate_from_overdrive(overdrive_settings_path: str, s: Settings) -> bool:
     """Traction's first load (its own file does not exist, readable or not): take `controller_mode` and
     `grip_vibration` from Overdrive's settings file, each when it holds a valid value, and mark them as the owner's
-    choice (user_set). True when either was taken; the caller saves then. Overdrive's file is only read: a missing,
+    choice (user_set) only when Overdrive's own user_set is true. True when either was taken; the caller saves then. Overdrive's file is only read: a missing,
     unreadable or wrong file changes nothing here (and no copy of it is made), so Traction keeps its defaults."""
     if os.path.lexists(s.path):
         return False
@@ -95,5 +95,7 @@ def migrate_from_overdrive(overdrive_settings_path: str, s: Settings) -> bool:
         s.grip_vibration = raw["grip_vibration"]
         taken = True
     if taken:
-        s.user_set = True
+        # Final review T3: the owner's choice only when Overdrive had it as one (its own user_set); otherwise the
+        # values are kept but an untouched install still only reads.
+        s.user_set = raw.get("user_set") is True
     return taken

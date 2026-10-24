@@ -102,9 +102,10 @@ def controller_found(c):
     c.handlers["controller_info"] = reply(ok({"found": True, "pid": "0x1B4C", "xbox": False}))
 
 
-def install_overdrive(tmp_path, version):
-    folder = tmp_path / "plugins" / "overdrive"
+def install_overdrive(tmp_path, version, folder_name="overdrive"):
+    folder = tmp_path / "plugins" / folder_name
     folder.mkdir(parents=True, exist_ok=True)
+    (folder / "plugin.json").write_text(json.dumps({"api_version": 1, "name": "Overdrive"}), encoding="utf-8")
     (folder / "package.json").write_text(json.dumps({"name": "overdrive", "version": version}), encoding="utf-8")
 
 
@@ -180,16 +181,23 @@ def test_helper_client_runs_traction_helper(tmp_path):
     assert client.restarted_text == "Traction helper restarted, try again"
 
 
-def test_paths_follow_decky(monkeypatch):
-    monkeypatch.undo()     # the real path functions, with a stand-in decky
-    root = os.path.join("C:\\", "homebrew")
+def test_paths_follow_decky(monkeypatch, tmp_path):
+    monkeypatch.undo()     # the real path functions, with a stand-in decky (on a temp folder)
+    root = str(tmp_path / "homebrew")
     monkeypatch.setattr(main.decky, "DECKY_PLUGIN_SETTINGS_DIR", os.path.join(root, "settings", "traction"),
                         raising=False)
     monkeypatch.setattr(main.decky, "DECKY_PLUGIN_DIR", os.path.join(root, "plugins", "traction"), raising=False)
     assert main.settings_path() == os.path.join(root, "settings", "traction", "settings.json")
-    assert main.overdrive_settings_path() == os.path.join(root, "settings", "overdrive", "overdrive.json")
     assert main.plugins_dir() == os.path.join(root, "plugins")
     assert main.record_dir() == r"C:\ProgramData\decky\armoury"
+    # final review T1: Overdrive is the plugin whose plugin.json is named Overdrive, whatever its folder
+    assert main.overdrive_settings_path() == ""                         # not installed, no settings anywhere
+    stray = tmp_path / "homebrew" / "settings" / "old-od"
+    stray.mkdir(parents=True)
+    (stray / "overdrive.json").write_text("{}", encoding="utf-8")
+    assert main.overdrive_settings_path() == str(stray / "overdrive.json")   # not installed: found by scan
+    install_overdrive(tmp_path / "homebrew", "0.2.0", folder_name="overdrive-main")
+    assert main.overdrive_settings_path() == os.path.join(root, "settings", "overdrive-main", "overdrive.json")
 
 
 def test_plugin_json_runs_as_root():
@@ -625,7 +633,8 @@ def test_unload_waits_for_armoury_switch(tmp_path):
 
 def test_startup_takes_overdrive_values_once(monkeypatch, tmp_path):
     ally_main(monkeypatch)
-    overdrive_settings(tmp_path, {"controller_mode": "auto", "grip_vibration": False, "mode": "turbo"})
+    overdrive_settings(tmp_path, {"controller_mode": "auto", "grip_vibration": False, "mode": "turbo",
+                                  "user_set": True})
 
     async def go():
         p = main.Plugin()
@@ -795,10 +804,12 @@ def test_switch_refused_while_overdrives_old_record_is_not_moved(tmp_path, monke
                              {"armoury_replaced": True}, {"armoury_running": ["ArmouryCrateService"]}, OLD_RECORD)):
         base = tmp_path / str(i)
         overdrive_settings(base, old)
+        install_overdrive(base, "0.2.0")        # Overdrive is installed: it moves its own record
 
         async def go():
             # this test's paths live under `base`: point the patched path functions there
             main_paths = {"record_dir": lambda: record_folder(base),
+                          "plugins_dir": lambda: str(base / "plugins"),
                           "overdrive_settings_path": lambda: str(base / "settings" / "overdrive" / "overdrive.json")}
             for k, v in main_paths.items():
                 monkeypatch.setattr(main, k, v)
@@ -815,6 +826,7 @@ def test_switch_refused_while_overdrives_old_record_is_not_moved(tmp_path, monke
 
 def test_switch_works_once_the_shared_record_exists(tmp_path):
     overdrive_settings(tmp_path, OLD_RECORD)
+    install_overdrive(tmp_path, "0.2.0")
 
     async def go():
         p, c, s = plugin_with(tmp_path)
@@ -850,3 +862,152 @@ def test_unreadable_or_clean_overdrive_settings_do_not_block_the_switch(tmp_path
             assert saved_record(base).replaced is True, what
         run(go())
     # no overdrive.json at all: not blocked either (test_switch_on_applies_settings_next_poll)
+
+
+# ---------- final review T2: Overdrive not installed, its old record left in overdrive.json ----------
+
+MOVE_FAILED = ("Overdrive's Armoury Crate record could not be moved to the shared record yet, try again in a "
+               "moment.")
+
+
+def test_orphaned_record_is_moved_at_startup_and_checked(monkeypatch, tmp_path):
+    ally_main(monkeypatch)
+    overdrive_settings(tmp_path, OLD_RECORD)
+    path = tmp_path / "settings" / "overdrive" / "overdrive.json"
+    before = path.read_bytes()
+
+    async def go():
+        p = main.Plugin()
+        await p._main()
+        await wait(p._startup)
+        st = await wait(p.get_state())
+        calls = [cmd for cmd, _ in p.client.calls]
+        await wait(p._unload())
+        return st, calls
+    st, calls = run(go())
+    rec = saved_record(tmp_path)
+    assert rec.replaced is True and rec.recorded["ArmouryCrateService"] == "Automatic"
+    assert rec.running[0] == "ArmouryCrateService"
+    assert calls[:2] == ["armoury_state", "armoury_stop"]          # on_load ran on the moved record (P8)
+    assert st["armoury"]["warning"] == "" and st["armoury"]["replaced"] is True
+    assert path.read_bytes() == before                              # overdrive.json is never edited
+    assert sorted(os.listdir(path.parent)) == ["overdrive.json"]
+
+
+def test_orphaned_record_taken_from_bak_when_overdrive_json_is_unreadable(monkeypatch, tmp_path):
+    ally_main(monkeypatch)
+    folder = tmp_path / "settings" / "overdrive"
+    folder.mkdir(parents=True)
+    (folder / "overdrive.json").write_text("{", encoding="utf-8")
+    (folder / "overdrive.json.bak").write_text(json.dumps(OLD_RECORD), encoding="utf-8")
+
+    async def go():
+        p = main.Plugin()
+        await p._main()
+        await wait(p._startup)
+        await wait(p._unload())
+    run(go())
+    assert saved_record(tmp_path).replaced is True
+    assert (folder / "overdrive.json").read_text(encoding="utf-8") == "{"
+
+
+def test_orphaned_record_move_failure_refuses_the_switch_then_retries(tmp_path, monkeypatch):
+    overdrive_settings(tmp_path, OLD_RECORD)
+
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        real_save = p.armoury.record.save
+
+        def broken_save():
+            raise OSError("access denied")
+        monkeypatch.setattr(p.armoury.record, "save", broken_save)
+        await wait(p._startup_sequence())                          # the move at startup fails
+        await p.reapplier.stop()
+        assert not p.armoury.record.exists()
+        assert all(not cmd.startswith("armoury_") or cmd == "armoury_state" for cmd, _ in c.calls)
+        st = await wait(p.get_state())
+        assert st["armoury"]["warning"] == MOVE_FAILED
+        for on in (True, False):
+            assert (await wait(p.set_armoury_replaced(on))) == {"ok": False, "message": MOVE_FAILED}
+        assert all(not cmd.startswith("armoury_") or cmd == "armoury_state" for cmd, _ in c.calls)
+        # the save works again: the switch moves the record, runs the load check on it, then switches
+        monkeypatch.setattr(p.armoury.record, "save", real_save)
+        c.calls.clear()
+        r = await wait(p.set_armoury_replaced(False), 5)
+        assert r["ok"] is True, r
+        cmds = [cmd for cmd, _ in c.calls if cmd.startswith("armoury_") and cmd != "armoury_state"]
+        assert cmds == ["armoury_stop", "armoury_restore"]          # P8 re-stop on the moved record, then off
+        # the moved start type is what goes back (the P8 re-stop also adds services the fake reports as new)
+        restore = [a for cmd, a in c.calls if cmd == "armoury_restore"][0]
+        assert restore["recorded"]["ArmouryCrateService"] == "Automatic"
+        assert restore["running"][0] == "ArmouryCrateService"
+        assert saved_record(tmp_path).replaced is False
+        assert (await wait(p.get_state()))["armoury"]["warning"] == ""
+    run(go())
+
+
+def test_orphaned_record_with_both_files_unreadable_is_refused(tmp_path):
+    folder = tmp_path / "settings" / "overdrive"
+    folder.mkdir(parents=True)
+    (folder / "overdrive.json").write_text("{", encoding="utf-8")
+    (folder / "overdrive.json.bak").write_text("{", encoding="utf-8")
+
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        assert (await wait(p.set_armoury_replaced(True))) == {"ok": False, "message": MOVE_FAILED}
+        assert not p.armoury.record.exists()
+    run(go())
+
+
+# ---------- final review T5: an old Overdrive is re-checked every 5 s ----------
+
+def test_old_overdrive_is_rechecked_in_the_background(monkeypatch, tmp_path):
+    install_overdrive(tmp_path, "0.1.0")
+    c = FakeClient()
+    controller_found(c)
+    ally_main(monkeypatch, client=c)
+
+    async def go():
+        delays, ticks = [], asyncio.Queue()
+
+        async def fake_sleep(d):
+            delays.append(d)
+            await ticks.get()
+        p = main.Plugin()
+        p._sleep = fake_sleep
+        await p._main()
+        await wait(p._startup)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert delays == [5.0] and p._old is True and p._late_start is None
+        ticks.put_nowait(1)                                       # 5 s on: still old
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert delays == [5.0, 5.0] and p._old is True
+        install_overdrive(tmp_path, "0.2.0")                      # updated; no get_state call at all
+        ticks.put_nowait(1)
+        for _ in range(20):
+            if p._late_start is not None:
+                break
+            await asyncio.sleep(0)
+        assert p._old is False and p._late_start is not None
+        await wait(p._late_start)
+        await wait(p._watch)
+        assert p.reapplier._task is not None
+        await wait(p._unload())
+    run(go())
+
+
+def test_unload_stops_the_overdrive_recheck(monkeypatch, tmp_path):
+    install_overdrive(tmp_path, "0.1.0")
+    ally_main(monkeypatch)
+
+    async def go():
+        p = main.Plugin()
+        await p._main()
+        await wait(p._startup)
+        watch = p._watch
+        assert watch is not None and not watch.done()
+        await wait(p._unload())
+        assert watch.done()
+    run(go())

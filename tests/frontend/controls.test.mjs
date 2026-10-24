@@ -7,6 +7,7 @@ import {
   ARMOURY_LABEL,
   CONTROLLER_OPTIONS,
   armouryChecked,
+  armouryDisabled,
   controllerBanner,
   controllerModeDescription,
   touchscreenCheck,
@@ -48,6 +49,13 @@ test('armoury toggle shows the stored state, or the target while switching', () 
   assert.equal(armouryChecked(true, false), true);
   assert.equal(armouryChecked(false, true), true);
   assert.equal(armouryChecked(true, true), false);
+});
+
+test('armoury toggle is disabled while an old Overdrive blocks Traction (the backend refuses it then)', () => {
+  assert.equal(armouryDisabled(false, ''), false);
+  assert.equal(armouryDisabled(false, undefined), false);
+  assert.equal(armouryDisabled(true, ''), true);
+  assert.equal(armouryDisabled(false, 'Update Overdrive to 0.2.0 or newer'), true);
 });
 
 test('inline picker rules', () => {

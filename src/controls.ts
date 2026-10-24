@@ -49,3 +49,8 @@ export function controllerBanner(
 export function armouryChecked(replaced: boolean, busy: boolean): boolean {
   return busy ? !replaced : replaced;
 }
+
+// The Armoury toggle is also disabled while an old Overdrive blocks Traction: the backend refuses the switch then.
+export function armouryDisabled(disabled: boolean, blocked: string | undefined): boolean {
+  return disabled || !!blocked;
+}

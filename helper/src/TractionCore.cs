@@ -1,3 +1,12 @@
+// G-Helper - https://github.com/seerge/g-helper - app/Ally/AllyControl.cs
+// Copyright seerge and contributors, licensed GPL-3.0. Commit c09017453d9ed0c52261b67a48d02bd55232e6ac.
+// Modified for Traction (ported to C# 5 / .NET Framework 4.8), 2026
+//
+// Ported subset (the controller section below): the controller mode report of ApplyMode ([0x5A,0xD1,0x01,0x01,mode],
+// Gamepad 1, Mouse 3) and the grip vibration reports of SetDeadzones ([0x5A,0xD1,0x06,0x02,s,s], and
+// [0x5A,0xD1,0x1C,0x02,s,s] on the Xbox Ally). The rest of this file (the command protocol and the other commands)
+// is Traction's own.
+
 using System;
 using System.Collections.Generic;
 using System.Web.Script.Serialization;
