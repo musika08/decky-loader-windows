@@ -220,3 +220,8 @@ export function touchscreenCheck(enabled: boolean | undefined, target: boolean, 
   if (enabled === target) return 'done';
   return elapsedMs >= TOUCH_TIMEOUT_MS ? 'timeout' : 'wait';
 }
+
+// ---------- support link ----------
+
+export const SUPPORT_URL = 'https://ko-fi.com/musika';
+export const SUPPORT_LABEL = 'Support Musika on Ko-fi';

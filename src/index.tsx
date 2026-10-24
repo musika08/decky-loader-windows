@@ -5,6 +5,7 @@ import {
   DialogButtonPrimary,
   Field,
   Focusable,
+  Navigation,
   PanelSection,
   PanelSectionRow,
   SliderField,
@@ -22,6 +23,8 @@ import {
   AUTO_TDP_UNSUPPORTED,
   CPU_BOOST_DESCRIPTION,
   POWER_MODE_DESCRIPTION,
+  SUPPORT_LABEL,
+  SUPPORT_URL,
   PowerMode,
   powerModeLabel,
   CURVE_SPEED_MAX,
@@ -1211,6 +1214,13 @@ function Content() {
         </PanelSectionRow>
         <StatusRow status={statuses.reset} />
         <Note text="The battery charge limit is set in Control Center." />
+      </PanelSection>
+      <PanelSection>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => Navigation.NavigateToExternalWeb(SUPPORT_URL)}>
+            {SUPPORT_LABEL}
+          </ButtonItem>
+        </PanelSectionRow>
       </PanelSection>
     </>
   );

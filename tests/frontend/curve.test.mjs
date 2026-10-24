@@ -179,3 +179,10 @@ test('touchscreenCheck waits for the device to match the target, then times out'
   assert.equal(touchscreenCheck(true, false, 15000), 'timeout');
   assert.equal(touchscreenCheck(false, false, 20000), 'done');
 });
+
+import { SUPPORT_URL, SUPPORT_LABEL } from '../../src/curve.ts';
+
+test('support link', () => {
+  assert.equal(SUPPORT_URL, 'https://ko-fi.com/musika');
+  assert.equal(SUPPORT_LABEL, 'Support Musika on Ko-fi');
+});
