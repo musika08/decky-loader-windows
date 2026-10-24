@@ -32,3 +32,17 @@ def test_unreadable_package_json_counts_as_old(tmp_path):
     assert old_overdrive(plugins_with(tmp_path / "a", raw="{")) is True
     assert old_overdrive(plugins_with(tmp_path / "b", raw="[]")) is True
     assert old_overdrive(plugins_with(tmp_path / "c", raw='﻿{"version": "0.2.0"}')) is False   # BOM accepted
+
+
+def test_overdrive_holds_armoury_record(tmp_path):
+    from traction.overdrive_compat import overdrive_holds_armoury_record as holds
+    p = tmp_path / "overdrive.json"
+    assert holds(str(p)) is False                                    # missing
+    for text, want in (("{", False), ("[]", False), ("{}", False),
+                       (json.dumps({"armoury_replaced": True}), True),
+                       (json.dumps({"armoury_recorded": {"LightingService": "Automatic"}}), True),
+                       (json.dumps({"armoury_running": ["LightingService"]}), True),
+                       (json.dumps({"armoury_replaced": False, "armoury_recorded": {}, "armoury_running": []}), False),
+                       (json.dumps({"armoury_replaced": 1, "armoury_recorded": [1], "armoury_running": "x"}), False)):
+        p.write_text(text, encoding="utf-8")
+        assert holds(str(p)) is want, text

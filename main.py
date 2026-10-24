@@ -15,7 +15,7 @@ from traction.armoury_record import RECORD_DIR, ArmouryRecord  # noqa: E402
 from traction.armoury_switch import ArmourySwitch  # noqa: E402
 from traction.controller_auto import ControllerAuto  # noqa: E402
 from traction.helper_client import HelperClient  # noqa: E402
-from traction.overdrive_compat import UPDATE_NOTE, old_overdrive  # noqa: E402
+from traction.overdrive_compat import UPDATE_NOTE, old_overdrive, overdrive_holds_armoury_record  # noqa: E402
 from traction.reapply import Reapplier  # noqa: E402
 from traction.settings import CONTROLLER_MODES, Settings, migrate_from_overdrive  # noqa: E402
 
@@ -25,6 +25,8 @@ NOT_ALLY = "Traction supports the ROG Ally family only"
 BUSY = "Traction is switching Armoury Crate services. Try again when it finishes."
 NO_CONTROLLER = "The controller was not found; the choice is saved and applied when it is back."
 ARMOURY_RUNNING = "Armoury Crate is running, so these settings may be overwritten."
+NOT_MOVED = ("Overdrive's Armoury Crate record has not moved to the shared record yet. Open Overdrive once, then "
+             "try again.")
 UNREAD = {"controller": {"found": False}, "touchscreen": {"found": False, "enabled": False}}
 
 
@@ -220,8 +222,9 @@ class Plugin:
             replaced = self.armoury.replaced()   # the shared record: either plugin may switch
             if not state["busy"]:   # never queue behind a long service switch
                 await self.armoury.check_installed()
-            state["armoury"] = {"installed": self.armoury.installed, "replaced": replaced,
-                                "warning": self.armoury.warning}
+            warning = " ".join(w for w in (self.armoury.warning,
+                                           NOT_MOVED if self._overdrive_record_pending() else "") if w)
+            state["armoury"] = {"installed": self.armoury.installed, "replaced": replaced, "warning": warning}
         state["note"] = "" if replaced else ARMOURY_RUNNING
         if not state["busy"]:
             controller, r = await controls.read_controller(self.client)
@@ -351,7 +354,17 @@ class Plugin:
             return refused
         if not isinstance(on, bool):
             return _fail("Expected on or off.")
+        if self._overdrive_record_pending():
+            return _fail(NOT_MOVED)
         return await self.armoury.set(on)
+
+    def _overdrive_record_pending(self) -> bool:
+        """Overdrive's own Armoury Crate record (overdrive.json, before 0.2.0) is not in the shared record yet: the
+        shared record does not exist and overdrive.json still holds it. A switch now would build the shared record
+        from start types that may already be stopped, and Overdrive's later move would then drop its originals."""
+        if self.armoury is None or self.armoury.record.exists():
+            return False
+        return overdrive_holds_armoury_record(overdrive_settings_path())
 
 
 async def _unload_step(what: str, coro) -> None:

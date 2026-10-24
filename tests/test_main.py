@@ -780,3 +780,73 @@ def test_updating_overdrive_unblocks_at_the_next_state_read(monkeypatch, tmp_pat
         return r
     assert run(go()) == {"ok": True, "message": ""}
     assert ("set_vibration", {"strength": 0}) in c.writes()
+
+
+# ---------- Overdrive's old Armoury record not moved yet (fix round 1) ----------
+
+NOT_MOVED = ("Overdrive's Armoury Crate record has not moved to the shared record yet. Open Overdrive once, then "
+             "try again.")
+OLD_RECORD = {"armoury_replaced": True, "armoury_recorded": {"ArmouryCrateService": "Automatic"},
+              "armoury_running": ["ArmouryCrateService"]}
+
+
+def test_switch_refused_while_overdrives_old_record_is_not_moved(tmp_path, monkeypatch):
+    for i, old in enumerate(({"armoury_recorded": {"ArmouryCrateService": "Automatic"}},
+                             {"armoury_replaced": True}, {"armoury_running": ["ArmouryCrateService"]}, OLD_RECORD)):
+        base = tmp_path / str(i)
+        overdrive_settings(base, old)
+
+        async def go():
+            # this test's paths live under `base`: point the patched path functions there
+            main_paths = {"record_dir": lambda: record_folder(base),
+                          "overdrive_settings_path": lambda: str(base / "settings" / "overdrive" / "overdrive.json")}
+            for k, v in main_paths.items():
+                monkeypatch.setattr(main, k, v)
+            p, c, s = plugin_with(base)
+            st = await wait(p.get_state())
+            assert st["armoury"]["warning"] == NOT_MOVED
+            for on in (True, False):
+                assert (await wait(p.set_armoury_replaced(on))) == {"ok": False, "message": NOT_MOVED}
+            assert all(not cmd.startswith("armoury_") or cmd == "armoury_state" for cmd, _ in c.calls)
+            assert not os.path.exists(os.path.join(record_folder(base), "state.json"))   # no record created
+            assert s.user_set is False and not os.path.exists(s.path)
+        run(go())
+
+
+def test_switch_works_once_the_shared_record_exists(tmp_path):
+    overdrive_settings(tmp_path, OLD_RECORD)
+
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        assert (await wait(p.set_armoury_replaced(True)))["message"] == NOT_MOVED
+        moved = ArmouryRecord(record_folder(tmp_path))          # Overdrive 0.2.0 moved its record
+        moved.replaced, moved.recorded = True, {"ArmouryCrateService": "Automatic"}
+        moved.save()
+        st = await wait(p.get_state())
+        assert st["armoury"]["warning"] == "" and st["armoury"]["replaced"] is True
+        r = await wait(p.set_armoury_replaced(False))
+        assert r["ok"] is True, r
+        assert ("armoury_restore", {"recorded": {"ArmouryCrateService": "Automatic"}, "running": []}) in c.calls
+        assert saved_record(tmp_path).replaced is False
+    run(go())
+
+
+def test_unreadable_or_clean_overdrive_settings_do_not_block_the_switch(tmp_path, monkeypatch):
+    cases = {"unreadable": "{", "not an object": "[]", "empty record": json.dumps(
+        {"armoury_replaced": False, "armoury_recorded": {}, "armoury_running": []}),
+        "wrong types": json.dumps({"armoury_replaced": "yes", "armoury_recorded": ["x"], "armoury_running": {}})}
+    for i, (what, text) in enumerate(cases.items()):
+        base = tmp_path / str(i)
+        folder = base / "settings" / "overdrive"
+        folder.mkdir(parents=True)
+        (folder / "overdrive.json").write_text(text, encoding="utf-8")
+
+        async def go():
+            monkeypatch.setattr(main, "record_dir", lambda: record_folder(base))
+            monkeypatch.setattr(main, "overdrive_settings_path", lambda: str(folder / "overdrive.json"))
+            p, c, s = plugin_with(base)
+            assert (await wait(p.get_state()))["armoury"]["warning"] == "", what
+            assert (await wait(p.set_armoury_replaced(True)))["ok"] is True, what
+            assert saved_record(base).replaced is True, what
+        run(go())
+    # no overdrive.json at all: not blocked either (test_switch_on_applies_settings_next_poll)

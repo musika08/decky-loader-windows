@@ -29,6 +29,20 @@ def overdrive_version(plugins_dir: str):
     return tuple(int(x) for x in m.groups())
 
 
+def overdrive_holds_armoury_record(overdrive_settings_path: str) -> bool:
+    """True when Overdrive's settings file still holds its own (pre-0.2.0) Armoury Crate record: armoury_replaced
+    true, or a non-empty armoury_recorded / armoury_running. A missing, unreadable or wrong file holds none."""
+    try:
+        raw = settings_file._read_json(overdrive_settings_path)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(raw, dict):
+        return False
+    rec, run = raw.get("armoury_recorded"), raw.get("armoury_running")
+    return (raw.get("armoury_replaced") is True or (isinstance(rec, dict) and bool(rec))
+            or (isinstance(run, list) and bool(run)))
+
+
 def old_overdrive(plugins_dir: str) -> bool:
     """True when Overdrive is installed with a version below 0.2.0 (an unparsable version counts as old)."""
     v = overdrive_version(plugins_dir)
