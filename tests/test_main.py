@@ -1346,5 +1346,59 @@ def test_startup_keeps_old_record_when_it_cannot_be_moved(tmp_path, monkeypatch)
         on_disk = json.loads(path.read_text(encoding="utf-8"))
         assert on_disk["armoury_replaced"] is True and on_disk["armoury_recorded"] == recorded
         assert not p.armoury.record.exists()
+        # fix round 1: while the old record is not moved, the panel shows what it says, and the switch is refused
+        st = await p.get_state()
+        assert st["armoury"]["replaced"] is True
+        assert "could not be moved to the record shared with Traction yet (access denied)" in st["warning"]
+        c.calls.clear()
+        r = await p.set_armoury_replaced(True)
+        assert r == {"ok": False, "message": main.NOT_MIGRATED.format(why="access denied")}
+        assert [cmd for cmd, _ in c.calls if cmd.startswith("armoury_")] == []
+        assert not p.armoury.record.exists()
+        # the save works again but another plugin holds the lock: still refused, nothing sent
+        monkeypatch.delattr(p.armoury.record, "save")
+        monkeypatch.setattr(main, "MIGRATE_WAIT", 0.2)
+        with ArmouryRecord(record_folder(tmp_path)).lock():
+            r = await p.set_armoury_replaced(False)
+        assert r["ok"] is False and "held by another plugin" in r["message"] and "nothing was changed" in r["message"]
+        assert [cmd for cmd, _ in c.calls if cmd.startswith("armoury_")] == []
+        # lock free: the retry moves the old record first, then the switch puts back the old start types
+        r = await p.set_armoury_replaced(False)
+        assert r == {"ok": True, "message": ""}
+        assert [(cmd, a) for cmd, a in c.calls if cmd == "armoury_restore"] == [
+            ("armoury_restore", {"recorded": recorded, "running": []})]
+        rec = saved_record(tmp_path)
+        assert (rec.replaced, rec.recorded) == (False, {})
+        assert not any(k.startswith("armoury_") for k in json.loads(path.read_text(encoding="utf-8")))
+        assert "could not be moved" not in (await p.get_state())["warning"]
     run(go())
+
+
+def test_late_move_runs_the_load_check(tmp_path):
+    """The lock was held at load (another plugin switching): the old provisional record waits; once get_state can
+    move it, the load-time recovery runs on it."""
+    async def go():
+        path = tmp_path / "overdrive.json"
+        path.write_text(json.dumps({"armoury_replaced": False, "armoury_recorded": dict(ORIGINAL_TYPES),
+                                    "armoury_running": ["LightingService"]}), encoding="utf-8")
+        p, c, s = plugin_with(tmp_path)
+        main.MIGRATE_WAIT, wait_was = 0.1, main.MIGRATE_WAIT
+        try:
+            with ArmouryRecord(record_folder(tmp_path)).lock():
+                await p._startup_sequence()
+                st = await p.get_state()
+        finally:
+            main.MIGRATE_WAIT = wait_was
+        await p.reapplier.stop()
+        assert [cmd for cmd, _ in c.calls if cmd.startswith("armoury_") and cmd != "armoury_state"] == []
+        assert st["armoury"]["replaced"] is False and "could not be moved" in st["warning"]
+        await p.get_state()                                  # lock free: moved, then the load check runs
+        await asyncio.wait_for(p._late_load, 2)
+        assert ("armoury_restore", {"recorded": ORIGINAL_TYPES, "running": ["LightingService"]}) in c.calls
+        assert saved_record(tmp_path).recorded == {}
+        assert "did not finish, so Armoury Crate was put back" in (await p.get_state())["warning"]
+    run(go())
+
+
+ORIGINAL_TYPES = {"ArmouryCrateService": "Automatic", "LightingService": "Automatic"}
 

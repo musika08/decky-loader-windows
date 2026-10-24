@@ -34,16 +34,17 @@ def clean_record(data: dict):
     return types, clean_running(data.get("running"), types)
 
 
-def migrate_from_settings(record: ArmouryRecord, s) -> bool:
+def migrate_from_settings(record: ArmouryRecord, s, timeout: float = LOCK_TIMEOUT) -> bool:
     """Moves a plugin's own armoury_replaced/recorded/running into the shared record, once: only when the record does
     not exist yet and the settings hold any of them. True when they were moved. Raises ArmouryLocked (another plugin
-    is switching) or OSError (the record could not be saved); the settings are left as they are then."""
+    is switching; `timeout` is how long the lock is waited for, 0 for one try) or OSError (the record could not be
+    saved); the settings are left as they are then."""
     replaced = bool(getattr(s, "armoury_replaced", False))
     recorded = dict(getattr(s, "armoury_recorded", None) or {})
     running = list(getattr(s, "armoury_running", None) or [])
     if not (replaced or recorded or running):
         return False
-    with record.lock():
+    with record.lock(timeout):
         if record.exists():
             return False
         record.replaced = replaced

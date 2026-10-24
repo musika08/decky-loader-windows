@@ -24,6 +24,9 @@ from overdrive.settings import (ALLOWED_FPS, CONTROLLER_MODES, FANS, MODES, PRES
 
 NOT_ALLY = "Overdrive supports the ROG Ally family only"
 BUSY = "Overdrive is switching Armoury Crate services. Try again when it finishes."
+NOT_MIGRATED = ("Overdrive's Armoury Crate record could not be moved to the record shared with Traction yet "
+                "({why}), so nothing was changed. Try again in a moment.")
+MIGRATE_WAIT = 2.0               # how long a switch waits for the shared record's lock to move the old record
 AUTO_TDP_UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer."
 # get_sensors().autoTdp when there is no loop (not an Ally)
 AUTO_TDP_IDLE = {"on": False, "watts": None, "fps": None, "best": None, "paused": "", "supported": False}
@@ -75,6 +78,9 @@ class Plugin:
         self.armoury = None              # the Armoury Crate switch (its record is shared with Traction)
         self._controls = None            # the last read_controls reply (shown while an Armoury switch runs)
         self._startup = None
+        self._late_load = None           # the load-time Armoury check, once a late move of the old record worked
+        self._migrate_error = ""         # why the old Armoury record is not in the shared record yet
+        self._migrate_locked = False     # ... because another plugin held the shared record's lock
         self.cpu_usage = CpuUsage()      # CPU % between two sensor polls (None on the first)
 
     def _attach(self, client, settings, reapplier, record=None) -> None:
@@ -131,18 +137,23 @@ class Plugin:
         decky.logger.info("Controller mode Desktop is not kept across a plugin load: Gamepad")
         self._save()
 
-    def _migrate_armoury(self) -> None:
+    def _migrate_armoury(self, timeout: float = 0.0) -> bool:
         """Overdrive 0.1 kept the Armoury Crate record in overdrive.json: move it to the shared record once (only when
         that does not exist yet), then save the settings without it. Until the move worked the old fields stay in
-        overdrive.json, so a failed move never loses them."""
+        overdrive.json, so a failed move never loses them, and the switch is refused (the shared record would be
+        empty while services may be stopped). True when nothing is left to move."""
         s = self.settings
-        if not s.holds_armoury():
-            return
+        if not s.armoury_pending():
+            return True
         try:
-            moved = migrate_from_settings(self.armoury.record, s)
+            moved = migrate_from_settings(self.armoury.record, s, timeout)
         except (ArmouryLocked, OSError) as e:
-            decky.logger.warning(f"Overdrive: the Armoury Crate record was not moved to the shared record yet: {e}")
-            return
+            if str(e) != self._migrate_error:   # logged once per reason, not at every poll
+                decky.logger.warning(f"Overdrive: the Armoury Crate record was not moved to the shared record yet: {e}")
+            self._migrate_error = str(e) or type(e).__name__
+            self._migrate_locked = isinstance(e, ArmouryLocked)
+            return False
+        self._migrate_error = ""
         if moved:
             decky.logger.info("Overdrive: the Armoury Crate record was moved to the shared record")
         else:
@@ -150,12 +161,32 @@ class Plugin:
                               "overdrive.json was dropped")
         s.armoury_migrated()
         self._save()
+        return True
+
+    async def _migrate_armoury_waiting(self) -> bool:
+        """_migrate_armoury, waiting up to MIGRATE_WAIT for the shared record's lock without blocking the loop."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + MIGRATE_WAIT
+        while True:
+            if self._migrate_armoury(0.0):
+                return True
+            if not self._migrate_locked or loop.time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+
+    def _old_armoury_note(self) -> str:
+        if self.settings is None or not self.settings.armoury_pending():
+            return ""
+        return ("Overdrive's Armoury Crate record could not be moved to the record shared with Traction yet "
+                f"({self._migrate_error}); the Armoury Crate switch waits until it can.")
 
     async def _startup_sequence(self) -> None:
         self._desktop_not_kept_on_load()
         if self.armoury is not None:
-            self._migrate_armoury()
-            await self.armoury.on_load()
+            # The load-time check (P8 re-stop, recovery) runs on the shared record only: while the old record could
+            # not be moved there it waits, and runs once a later move works (get_state, or the switch).
+            if await self._migrate_armoury_waiting():
+                await self.armoury.on_load()
         self.reapplier.start()
         if self.settings.auto_tdp and self.auto_tdp_loop is not None:
             self.auto_tdp_loop.start()   # the reapply just started writes the mode; on_applied resets the loop then
@@ -172,12 +203,13 @@ class Plugin:
         loop = asyncio.get_running_loop()
         while self.armoury is not None and self.armoury.busy and loop.time() < self.armoury.until:
             await asyncio.sleep(0.05)
-        if self._startup is not None and not self._startup.done():
-            self._startup.cancel()
-            try:
-                await self._startup
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (self._startup, self._late_load):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         # Each step runs even when an earlier one failed. Gamepad first, whatever the stored mode, while the helper
         # still runs: Big Picture must never be left with a mouse-only controller.
         if self.controller_auto is not None:
@@ -232,7 +264,13 @@ class Plugin:
         if self.auto_tdp_loop is not None:   # the stored switch; "supported" is False once the driver had no reading
             state["auto_tdp"] = {"on": bool(s.auto_tdp), "supported": bool(self.auto_tdp_loop.status()["supported"])}
         state["busy"] = self._busy()
-        if self.armoury is not None:
+        if self.armoury is not None and s.armoury_pending() and not state["busy"] and self._startup_done():
+            # a quick retry of the move (no waiting); then the load-time check it held back
+            if self._migrate_armoury(0.0):
+                self._late_load = asyncio.ensure_future(self.armoury.on_load())
+        if self.armoury is not None and s.armoury_pending():
+            state["armoury"]["replaced"] = bool(s.armoury_replaced)   # the old record says, until it is moved
+        elif self.armoury is not None:
             state["armoury"]["replaced"] = self.armoury.replaced()   # the shared record: either plugin may switch
             if not state["busy"]:   # never queue behind a long service switch
                 await self.armoury.check_installed()
@@ -249,7 +287,8 @@ class Plugin:
         state["armoury"]["installed"] = bool(self.armoury is not None and self.armoury.installed)
         state["unavailable"] = self.client.unavailable_reason or ""
         armoury_warning = self.armoury.warning if self.armoury is not None else ""
-        state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, armoury_warning) if w)
+        state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, armoury_warning,
+                                                self._old_armoury_note()) if w)
         state["fan_note"] = fan_note(s)
         return state
 
@@ -607,7 +646,14 @@ class Plugin:
             return refused
         if not isinstance(on, bool):
             return _fail("Expected on or off.")
+        # Never switch on an empty shared record while the old one (perhaps with services stopped) is not moved yet:
+        # the start types read now would be the stopped ones, and the original ones would then be dropped.
+        if self.settings.armoury_pending() and not await self._migrate_armoury_waiting():
+            return _fail(NOT_MIGRATED.format(why=self._migrate_error))
         return await self.armoury.set(on)
+
+    def _startup_done(self) -> bool:
+        return self._startup is None or self._startup.done()
 
 
 DEVICE_MODES = ("silent", "balanced", "turbo", "other")

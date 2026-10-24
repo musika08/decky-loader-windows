@@ -205,6 +205,10 @@ class Settings:
         """The old fields hold an Armoury record (anything but the empty one)."""
         return bool(self.armoury_replaced or self.armoury_recorded or self.armoury_running)
 
+    def armoury_pending(self) -> bool:
+        """The old Armoury fields hold a record that is not in the shared record yet."""
+        return self._armoury_kept
+
     def armoury_migrated(self) -> None:
         """The old Armoury fields are in the shared record now (or it already existed): stop writing them."""
         self._armoury_kept = False
