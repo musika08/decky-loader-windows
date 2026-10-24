@@ -46,7 +46,7 @@
 
 ## Install
 
-1. Install Decky Loader for Windows on your ROG Ally. *(Public download coming soon.)*
+1. Install Decky Loader for Windows with the free [Decky Plugin for Windows](https://github.com/musika08/decky-plugin-for-windows) setup app on your ROG Ally.
 2. In Decky, open the **Store**, find **Overdrive** and install it.
 
 Or install the zip from the [latest release](https://github.com/musika08/overdrive/releases/latest) by hand.
