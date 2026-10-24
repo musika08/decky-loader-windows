@@ -12,11 +12,11 @@
     "helper/src/shared/ghelper/AmdAdl2.cs": "65855d7b6ad1bcf17fc0996f5f0361eae67ce8830f25319f31a105bf8e316fb1",
     "helper/src/shared/ghelper/AmdGpuControl.cs": "b4a640a85f72b073c172c1775675716ad438b7883c6cd8d87eda9d86387a03db",
     "py_modules/traction/armoury_record.py": "ad2b134de47a2ac5cdae518750a990b386166c41a3aad9cfc62402c7c6d85969",
-    "py_modules/traction/armoury_switch.py": "6230c6c123766fd81af2f85bba55d99e50d88c18c5f5b941c2c75b89bf56a864",
+    "py_modules/traction/armoury_switch.py": "f4868d8c343d8ff38cfdbe8b505879d2399dad35cabff328c2504927f657e063",
     "py_modules/traction/device.py": "dbc29da891f4503948774fbe1bceb33ec635b4d06d36b807e03a0a4613209f72",
     "py_modules/traction/helper_client.py": "86c02c77cf126a21ac102f66a9721e6d085beef8048ef976327fb6b5c117508e",
     "py_modules/traction/reapply_core.py": "287c57cf57544de69db1b7e70c6c9abb1391e353d9b50eb71adcd19243d3accd",
     "py_modules/traction/settings_file.py": "6f9400a36c4de45b2210976192e58de3da4284b28b587195b50c6dc40be83867"
   },
-  "overdrive_commit": "5a411035ed86ea53f17de1b4ecfcae2e08f95097"
+  "overdrive_commit": "52de1e1bf274ac938ffa45cf8fbda63c53686f09"
 }

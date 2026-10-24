@@ -36,10 +36,10 @@ def clean_record(data: dict):
 
 def migrate_from_settings(record: ArmouryRecord, s, timeout: float = LOCK_TIMEOUT) -> bool:
     """Moves a plugin's own armoury_replaced/recorded/running into the shared record, once: only when the record does
-    not exist yet, or exists but is empty (not replaced, nothing recorded or running), and the settings hold any of
-    them. True when they were moved. Raises ArmouryLocked (another plugin is switching; `timeout` is how long the lock
-    is waited for, 0 for one try) or OSError (the record could not be saved); the settings are left as they are
-    then."""
+    not exist yet and the settings hold any of them. An existing record, empty or not, is never overwritten (an empty
+    one means Armoury Crate was put back since). True when they were moved. Raises ArmouryLocked (another plugin is
+    switching; `timeout` is how long the lock is waited for, 0 for one try) or OSError (the record could not be
+    saved); the settings are left as they are then."""
     replaced = bool(getattr(s, "armoury_replaced", False))
     recorded = dict(getattr(s, "armoury_recorded", None) or {})
     running = list(getattr(s, "armoury_running", None) or [])
@@ -47,9 +47,7 @@ def migrate_from_settings(record: ArmouryRecord, s, timeout: float = LOCK_TIMEOU
         return False
     with record.lock(timeout):
         if record.exists():
-            record.load()
-            if record.replaced or record.recorded or record.running:
-                return False
+            return False
         record.replaced = replaced
         record.recorded = clean_types(recorded)
         record.running = clean_running(running, record.recorded)
