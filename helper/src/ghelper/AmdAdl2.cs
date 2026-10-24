@@ -25,7 +25,7 @@
 using System;
 using System.Runtime.InteropServices;
 
-namespace Overdrive.Helper.GHelper
+namespace Ally.Shared.GHelper
 {
     [Flags]
     public enum ADLAsicFamilyType

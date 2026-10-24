@@ -17,7 +17,7 @@ using System.Text;
 using System.Threading;
 using Microsoft.Win32;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     public sealed class SystemControls : ISystemControls
     {

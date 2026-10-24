@@ -10,7 +10,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     public static class ArmouryServices
     {

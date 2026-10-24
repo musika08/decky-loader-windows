@@ -21,7 +21,7 @@ using System;
 using System.Linq;
 using System.Runtime.InteropServices;
 
-namespace Overdrive.Helper.GHelper
+namespace Ally.Shared.GHelper
 {
     // Reference: https://github.com/GPUOpen-LibrariesAndSDKs/display-library/blob/master/Sample-Managed/Program.cs
     public class AmdGpuControl : IFpsControl

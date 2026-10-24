@@ -1,6 +1,6 @@
 using System;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     // Limits the helper enforces on every request, whatever the caller already checked.
     // The reason strings returned by CheckCurve are copied verbatim by src/curve.ts (ruling P1); change both together.

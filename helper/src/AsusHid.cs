@@ -18,7 +18,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     public sealed class AsusHid : IAsusHid
     {

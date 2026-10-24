@@ -10,6 +10,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using Ally.Shared;
 
 namespace Overdrive.Helper
 {

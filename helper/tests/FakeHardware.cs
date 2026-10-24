@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Ally.Shared;
 
 namespace Overdrive.Helper.Tests
 {

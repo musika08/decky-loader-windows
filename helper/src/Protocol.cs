@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Web.Script.Serialization;
+using Ally.Shared;
 using Overdrive.Helper.GHelper;
 
 namespace Overdrive.Helper
@@ -103,6 +104,7 @@ namespace Overdrive.Helper
         public const int FansToPowerDelayMs = 1000;
 
         private readonly Action<int> sleep;
+        private readonly ArmouryCommands armoury;
 
         public HelperCore(IAcpi acpi, IAdl adl, IServices services, bool ally)
             : this(acpi, adl, services, ally, System.Threading.Thread.Sleep)
@@ -117,6 +119,7 @@ namespace Overdrive.Helper
             this.services = services;
             this.ally = ally;
             this.sleep = sleep ?? System.Threading.Thread.Sleep;
+            this.armoury = new ArmouryCommands(services, this.sleep);
         }
 
         // Never throws: every line gets exactly one single-line reply.
@@ -127,29 +130,28 @@ namespace Overdrive.Helper
             {
                 object parsed;
                 try { parsed = json.DeserializeObject(line); }
-                catch (Exception ex) { return Reply(null, false, "Malformed request: " + ex.Message, null); }
+                catch (Exception ex) { return ProtocolKit.Reply(null, false, "Malformed request: " + ex.Message, null); }
 
                 var req = parsed as Dictionary<string, object>;
-                if (req == null) return Reply(null, false, "Malformed request: expected a JSON object.", null);
+                if (req == null) return ProtocolKit.Reply(null, false, "Malformed request: expected a JSON object.", null);
 
                 object rawId;
                 if (req.TryGetValue("id", out rawId))
                 {
                     int n;
-                    if (!TryInt(rawId, out n)) return Reply(null, false, "Malformed request: id must be an integer.", null);
+                    if (!ProtocolKit.TryInt(rawId, out n)) return ProtocolKit.Reply(null, false, "Malformed request: id must be an integer.", null);
                     id = n;
                 }
-                else return Reply(null, false, "Malformed request: id is missing.", null);
+                else return ProtocolKit.Reply(null, false, "Malformed request: id is missing.", null);
 
                 foreach (string key in req.Keys)
-                    if (Array.IndexOf(TopLevel, key) < 0) return Reply(id, false, "Unknown field '" + key + "'.", null);
+                    if (Array.IndexOf(TopLevel, key) < 0) return ProtocolKit.Reply(id, false, "Unknown field '" + key + "'.", null);
 
                 object rawCmd;
                 req.TryGetValue("cmd", out rawCmd);
                 string cmd = rawCmd as string;
-                string[] allowed;
-                if (cmd == null || !Commands.TryGetValue(cmd, out allowed))
-                    return Reply(id, false, "Refused: unknown command '" + (cmd ?? "") + "'.", null);
+                if (cmd == null || !Commands.ContainsKey(cmd))
+                    return ProtocolKit.Reply(id, false, "Refused: unknown command '" + (cmd ?? "") + "'.", null);
 
                 object rawArgs;
                 Dictionary<string, object> args;
@@ -157,23 +159,22 @@ namespace Overdrive.Helper
                 else
                 {
                     args = rawArgs as Dictionary<string, object>;
-                    if (args == null) return Reply(id, false, "Malformed request: args must be an object.", null);
+                    if (args == null) return ProtocolKit.Reply(id, false, "Malformed request: args must be an object.", null);
                 }
-                foreach (string key in args.Keys)
-                    if (Array.IndexOf(allowed, key) < 0)
-                        return Reply(id, false, "Refused: unknown argument '" + key + "' for " + cmd + ".", null);
+                string argError = ProtocolKit.CheckArgs(Commands, cmd, args);
+                if (argError != null) return ProtocolKit.Reply(id, false, argError, null);
 
                 return Dispatch(id, cmd, args);
             }
             catch (Exception ex)
             {
-                return Reply(id, false, ex.Message, null);
+                return ProtocolKit.Reply(id, false, ex.Message, null);
             }
         }
 
         private string Dispatch(object id, string cmd, Dictionary<string, object> args)
         {
-            if (!ally && Array.IndexOf(ReadCommands, cmd) < 0) return Reply(id, false, NotAllyMessage, null);
+            if (!ally && Array.IndexOf(ReadCommands, cmd) < 0) return ProtocolKit.Reply(id, false, NotAllyMessage, null);
             switch (cmd)
             {
                 case "hello": return Hello(id);
@@ -187,9 +188,9 @@ namespace Overdrive.Helper
                 case "reset_fans": return ResetFans(id, args);
                 case "get_fps_limit": return GetFps(id);
                 case "set_fps_limit": return SetFps(id, args);
-                case "armoury_state": return ArmouryState(id);
-                case "armoury_stop": return ArmouryStop(id);
-                case "armoury_restore": return ArmouryRestore(id, args);
+                case "armoury_state": return armoury.State(id);
+                case "armoury_stop": return armoury.Stop(id);
+                case "armoury_restore": return armoury.Restore(id, args);
                 case "get_cpu_boost": return GetCpuBoost(id);
                 case "set_cpu_boost": return SetCpuBoost(id, args);
                 case "get_power_mode": return GetPowerMode(id);
@@ -203,7 +204,7 @@ namespace Overdrive.Helper
                 case "set_auto_sr": return SetAutoSr(id, args);
                 case "foreground": return Foreground(id);
             }
-            return Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
+            return ProtocolKit.Reply(id, false, "Refused: unknown command '" + cmd + "'.", null);
         }
 
         // ---------- commands ----------
@@ -213,7 +214,7 @@ namespace Overdrive.Helper
             var d = new Dictionary<string, object>();
             d["version"] = Version;
             d["ally"] = ally;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string Status(object id)
@@ -237,7 +238,7 @@ namespace Overdrive.Helper
             d["fpsLimit"] = fps;
             ReadSensors(acpi, adl, d, errors);
             d["errors"] = errors;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string Sensors(object id)
@@ -246,7 +247,7 @@ namespace Overdrive.Helper
             var errors = new List<string>();
             ReadSensors(acpi, adl, d, errors);
             d["errors"] = errors;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // One sample for Auto TDP, read only: the game's frame rate (AMD frame metrics; 0 = no game in front, null =
@@ -275,7 +276,7 @@ namespace Overdrive.Helper
             d["fps"] = fps.HasValue ? (object)fps.Value : null;
             d["gpuPowerW"] = power;
             d["errors"] = errors;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // cpuTempC, fanRpm (CPU fan) and gpuFanRpm (GPU fan), converted as G-Helper does (GHelperSensors; the GPU fan
@@ -429,7 +430,7 @@ namespace Overdrive.Helper
         private string SetMode(object id, Dictionary<string, object> args)
         {
             string mode, err;
-            if (!GetMode(args, true, out mode, out err)) return Reply(id, false, err, null);
+            if (!GetMode(args, true, out mode, out err)) return ProtocolKit.Reply(id, false, err, null);
 
             // Limits are required with "manual" and optional with the other modes: with Armoury Crate stopped the
             // Ally's firmware mode alone changes the fans but not the watts, so the plugin sends each mode's own.
@@ -437,10 +438,10 @@ namespace Overdrive.Helper
             int[] power = null;
             if (mode == "manual" || anyPower)
             {
-                if (!GetPower(args, out power, out err)) return Reply(id, false, err, null);
+                if (!GetPower(args, out power, out err)) return ProtocolKit.Reply(id, false, err, null);
             }
 
-            if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return Reply(id, false, err, null);
+            if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return ProtocolKit.Reply(id, false, err, null);
             lastMode = mode;
             if (power == null) lastPower = null;   // reset_fans puts back only limits sent with this mode
 
@@ -449,21 +450,21 @@ namespace Overdrive.Helper
             if (power != null)
             {
                 WaitForModeLimits();
-                if (!ApplyPower(power, out err)) return Reply(id, false, err, null);
+                if (!ApplyPower(power, out err)) return ProtocolKit.Reply(id, false, err, null);
                 AddPower(d, power);
             }
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetPower(object id, Dictionary<string, object> args)
         {
             int[] power;
             string err;
-            if (!GetPower(args, out power, out err)) return Reply(id, false, err, null);
-            if (!ApplyPower(power, out err)) return Reply(id, false, err, null);
+            if (!GetPower(args, out power, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (!ApplyPower(power, out err)) return ProtocolKit.Reply(id, false, err, null);
             var d = new Dictionary<string, object>();
             AddPower(d, power);
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // fan: "cpu" (default) or "gpu" (G-Helper AsusFan.CPU / AsusFan.GPU).
@@ -471,19 +472,19 @@ namespace Overdrive.Helper
         {
             string mode, err;
             int fan;
-            if (!GetMode(args, false, out mode, out err)) return Reply(id, false, err, null);
-            if (!GetFan(args, out fan, out err)) return Reply(id, false, err, null);
+            if (!GetMode(args, false, out mode, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (!GetFan(args, out fan, out err)) return ProtocolKit.Reply(id, false, err, null);
             if (mode == null) mode = lastMode ?? "balanced";
 
             Dictionary<string, object> curve = SplitCurve(acpi.GetFanCurve(fan, ModeValue(mode)));
-            if (curve == null) return Reply(id, false, "The device did not return a " + FanName(fan) + " fan curve.", null);
+            if (curve == null) return ProtocolKit.Reply(id, false, "The device did not return a " + FanName(fan) + " fan curve.", null);
 
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
             d["fan"] = FanName(fan).ToLowerInvariant();
             d["temps"] = curve["temps"];
             d["speeds"] = curve["speeds"];
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetFans(object id, Dictionary<string, object> args)
@@ -491,22 +492,22 @@ namespace Overdrive.Helper
             int[] temps, speeds;
             int fan;
             string err;
-            if (!GetFan(args, out fan, out err)) return Reply(id, false, err, null);
-            if (!GetIntArray(args, "temps", out temps, out err)) return Reply(id, false, err, null);
-            if (!GetIntArray(args, "speeds", out speeds, out err)) return Reply(id, false, err, null);
+            if (!GetFan(args, out fan, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (!ProtocolKit.GetIntArray(args, "temps", out temps, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (!ProtocolKit.GetIntArray(args, "speeds", out speeds, out err)) return ProtocolKit.Reply(id, false, err, null);
             string reason;
-            if (!Validation.CheckCurve(temps, speeds, out reason)) return Reply(id, false, reason, null);
+            if (!Validation.CheckCurve(temps, speeds, out reason)) return ProtocolKit.Reply(id, false, reason, null);
 
             var curve = new byte[16];
             for (int i = 0; i < 8; i++) { curve[i] = (byte)temps[i]; curve[i + 8] = (byte)speeds[i]; }
             int result = acpi.SetFanCurve(fan, curve);
             if (result != 1)
-                return Reply(id, false, "The device refused the " + FanName(fan) + " fan curve (result " + result + ").", null);
+                return ProtocolKit.Reply(id, false, "The device refused the " + FanName(fan) + " fan curve (result " + result + ").", null);
             var d = new Dictionary<string, object>();
             d["fan"] = FanName(fan).ToLowerInvariant();
             d["temps"] = temps;
             d["speeds"] = speeds;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // G-Helper returns to the firmware fan curve by writing the current performance mode again
@@ -517,74 +518,74 @@ namespace Overdrive.Helper
         private string ResetFans(object id, Dictionary<string, object> args)
         {
             string mode, err;
-            if (!GetMode(args, false, out mode, out err)) return Reply(id, false, err, null);
+            if (!GetMode(args, false, out mode, out err)) return ProtocolKit.Reply(id, false, err, null);
             if (lastMode == null)
-                return Reply(id, false, "Refused: set a performance mode first; reset_fans only resets the current mode's fan curve.", null);
+                return ProtocolKit.Reply(id, false, "Refused: set a performance mode first; reset_fans only resets the current mode's fan curve.", null);
             if (mode != null && mode != lastMode)
-                return Reply(id, false, "Refused: reset_fans only resets the current mode's fan curve (current mode: " + lastMode + ").", null);
+                return ProtocolKit.Reply(id, false, "Refused: reset_fans only resets the current mode's fan curve (current mode: " + lastMode + ").", null);
             mode = lastMode;
-            if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return Reply(id, false, err, null);
+            if (!Set(DeviceIds.PerformanceMode, ModeValue(mode), "the performance mode", out err)) return ProtocolKit.Reply(id, false, err, null);
             lastMode = mode;
             bool reapplied = false;
             if (lastPower != null)
             {
                 WaitForModeLimits();
-                if (!ApplyPower(lastPower, out err)) return Reply(id, false, err, null);
+                if (!ApplyPower(lastPower, out err)) return ProtocolKit.Reply(id, false, err, null);
                 reapplied = true;
             }
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
             d["powerReapplied"] = reapplied;
             d["fans"] = new[] { "cpu", "gpu" };
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string GetFps(object id)
         {
             int f = adl.GetFpsLimit();
-            if (f < 0) return Reply(id, false, FpsUnavailable(), null);
+            if (f < 0) return ProtocolKit.Reply(id, false, FpsUnavailable(), null);
             var d = new Dictionary<string, object>();
             d["fps"] = f;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetFps(object id, Dictionary<string, object> args)
         {
             int fps;
             string err;
-            if (!GetInt(args, "fps", out fps, out err)) return Reply(id, false, err, null);
+            if (!ProtocolKit.GetInt(args, "fps", out fps, out err)) return ProtocolKit.Reply(id, false, err, null);
             if (!Validation.IsAllowedFps(fps))
-                return Reply(id, false, "Refused: FPS limit must be 0 (off) or one of 30, 40, 45, 50, 60, 75, 90, 120.", null);
+                return ProtocolKit.Reply(id, false, "Refused: FPS limit must be 0 (off) or one of 30, 40, 45, 50, 60, 75, 90, 120.", null);
             int result = adl.SetFpsLimit(fps);
-            if (result == -1) return Reply(id, false, FpsUnavailable(), null);
-            if (result != 1) return Reply(id, false, "The graphics driver refused the FPS limit.", null);
+            if (result == -1) return ProtocolKit.Reply(id, false, FpsUnavailable(), null);
+            if (result != 1) return ProtocolKit.Reply(id, false, "The graphics driver refused the FPS limit.", null);
             var d = new Dictionary<string, object>();
             d["fps"] = fps;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string GetCpuBoost(object id)
         {
-            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            if (WinPower == null) return ProtocolKit.Reply(id, false, WinPowerUnavailable, null);
             int[] b = WinPower.GetCpuBoost();
-            if (b == null || b.Length != 2) return Reply(id, false, "Windows would not report the CPU Boost setting.", null);
+            if (b == null || b.Length != 2) return ProtocolKit.Reply(id, false, "Windows would not report the CPU Boost setting.", null);
             var d = new Dictionary<string, object>();
             d["ac"] = b[0];
             d["dc"] = b[1];
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetCpuBoost(object id, Dictionary<string, object> args)
         {
             int value;
             string err;
-            if (!GetInt(args, "value", out value, out err)) return Reply(id, false, err, null);
-            if (value < 0 || value > 6) return Reply(id, false, "Refused: CPU Boost must be a whole number from 0 to 6.", null);
-            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
-            if (!WinPower.SetCpuBoost(value, out err)) return Reply(id, false, err ?? "Windows refused the CPU Boost setting.", null);
+            if (!ProtocolKit.GetInt(args, "value", out value, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (value < 0 || value > 6) return ProtocolKit.Reply(id, false, "Refused: CPU Boost must be a whole number from 0 to 6.", null);
+            if (WinPower == null) return ProtocolKit.Reply(id, false, WinPowerUnavailable, null);
+            if (!WinPower.SetCpuBoost(value, out err)) return ProtocolKit.Reply(id, false, err ?? "Windows refused the CPU Boost setting.", null);
             var d = new Dictionary<string, object>();
             d["value"] = value;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private static string OverlayMode(string guid)
@@ -597,29 +598,29 @@ namespace Overdrive.Helper
 
         private string GetPowerMode(object id)
         {
-            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            if (WinPower == null) return ProtocolKit.Reply(id, false, WinPowerUnavailable, null);
             string overlay = WinPower.GetOverlay();
-            if (overlay == null) return Reply(id, false, "Windows would not report the power mode.", null);
+            if (overlay == null) return ProtocolKit.Reply(id, false, "Windows would not report the power mode.", null);
             var d = new Dictionary<string, object>();
             d["overlay"] = overlay;
             d["mode"] = OverlayMode(overlay);
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetPowerMode(object id, Dictionary<string, object> args)
         {
             object raw;
-            if (!args.TryGetValue("mode", out raw)) return Reply(id, false, "Refused: 'mode' is required.", null);
+            if (!args.TryGetValue("mode", out raw)) return ProtocolKit.Reply(id, false, "Refused: 'mode' is required.", null);
             string mode = raw as string;
             string guid = mode == "eco" ? OverlayEco : mode == "balanced" ? OverlayBalanced : mode == "best" ? OverlayBest : null;
-            if (guid == null) return Reply(id, false, "Refused: power mode must be eco, balanced or best.", null);
-            if (WinPower == null) return Reply(id, false, WinPowerUnavailable, null);
+            if (guid == null) return ProtocolKit.Reply(id, false, "Refused: power mode must be eco, balanced or best.", null);
+            if (WinPower == null) return ProtocolKit.Reply(id, false, WinPowerUnavailable, null);
             string err;
-            if (!WinPower.SetOverlay(guid, out err)) return Reply(id, false, err ?? "Windows refused the power mode.", null);
+            if (!WinPower.SetOverlay(guid, out err)) return ProtocolKit.Reply(id, false, err ?? "Windows refused the power mode.", null);
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
             d["overlay"] = guid;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // ---------- ASUS controller (G-Helper app/Ally/AllyControl.cs ApplyMode and SetDeadzones) ----------
@@ -631,24 +632,24 @@ namespace Overdrive.Helper
 
         private string ControllerInfo(object id)
         {
-            if (Hid == null) return Reply(id, false, ControllerUnavailable, null);
+            if (Hid == null) return ProtocolKit.Reply(id, false, ControllerUnavailable, null);
             HidInfo info = Hid.Find();
             bool found = info != null && info.Found;
             var d = new Dictionary<string, object>();
             d["found"] = found;
             d["pid"] = found ? "0x" + info.Pid.ToString("X4") : null;
             d["xbox"] = IsXbox();
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetControllerMode(object id, Dictionary<string, object> args)
         {
             object raw;
-            if (!args.TryGetValue("mode", out raw)) return Reply(id, false, "Refused: 'mode' is required.", null);
+            if (!args.TryGetValue("mode", out raw)) return ProtocolKit.Reply(id, false, "Refused: 'mode' is required.", null);
             string mode = raw as string;
             // G-Helper ControllerMode: Gamepad = 1, Mouse = 3 (Overdrive's "desktop").
             byte m = mode == "gamepad" ? (byte)1 : mode == "desktop" ? (byte)3 : (byte)0;
-            if (m == 0) return Reply(id, false, "Refused: controller mode must be gamepad or desktop.", null);
+            if (m == 0) return ProtocolKit.Reply(id, false, "Refused: controller mode must be gamepad or desktop.", null);
             var d = new Dictionary<string, object>();
             d["mode"] = mode;
             return WriteController(id, d, new byte[] { AsusHid.INPUT_ID, 0xD1, 0x01, 0x01, m });
@@ -658,8 +659,8 @@ namespace Overdrive.Helper
         {
             int strength;
             string err;
-            if (!GetInt(args, "strength", out strength, out err)) return Reply(id, false, err, null);
-            if (strength < 0 || strength > 100) return Reply(id, false, "Refused: vibration strength must be a whole number from 0 to 100.", null);
+            if (!ProtocolKit.GetInt(args, "strength", out strength, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (strength < 0 || strength > 100) return ProtocolKit.Reply(id, false, "Refused: vibration strength must be a whole number from 0 to 100.", null);
             byte s = (byte)strength;
             var reports = new List<byte[]> { new byte[] { AsusHid.INPUT_ID, 0xD1, 0x06, 0x02, s, s } };
             if (IsXbox()) reports.Add(new byte[] { AsusHid.INPUT_ID, 0xD1, 0x1C, 0x02, s, s });
@@ -672,35 +673,35 @@ namespace Overdrive.Helper
         // failure stops and is reported.
         private string WriteController(object id, Dictionary<string, object> data, params byte[][] reports)
         {
-            if (Hid == null) return Reply(id, false, ControllerUnavailable, null);
+            if (Hid == null) return ProtocolKit.Reply(id, false, ControllerUnavailable, null);
             HidInfo info = Hid.Find();
-            if (info == null || !info.Found) return Reply(id, false, AsusHid.NotFound, null);
+            if (info == null || !info.Found) return ProtocolKit.Reply(id, false, AsusHid.NotFound, null);
             foreach (byte[] r in reports)
                 if (info.FeatureLength < r.Length)
-                    return Reply(id, false, "Refused: the controller's feature report is only " + info.FeatureLength + " bytes.", null);
+                    return ProtocolKit.Reply(id, false, "Refused: the controller's feature report is only " + info.FeatureLength + " bytes.", null);
             foreach (byte[] r in reports)
             {
                 var padded = new byte[info.FeatureLength];
                 Array.Copy(r, padded, r.Length);
                 string err;
-                if (!Hid.SetFeature(padded, out err)) return Reply(id, false, err ?? "The controller refused the report.", null);
+                if (!Hid.SetFeature(padded, out err)) return ProtocolKit.Reply(id, false, err ?? "The controller refused the report.", null);
             }
-            return Reply(id, true, "", data);
+            return ProtocolKit.Reply(id, true, "", data);
         }
 
         // ---------- touchscreen, Auto SR, foreground app (spec sections 3.5, 3.6, 5.1) ----------
 
         private string GetTouchscreen(object id)
         {
-            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (SystemControls == null) return ProtocolKit.Reply(id, false, SystemUnavailable, null);
             TouchInfo t = SystemControls.GetTouchscreen();
-            if (t == null) return Reply(id, false, "The touchscreen state could not be read.", null);
-            if (t.Error != null) return Reply(id, false, t.Error, null);
+            if (t == null) return ProtocolKit.Reply(id, false, "The touchscreen state could not be read.", null);
+            if (t.Error != null) return ProtocolKit.Reply(id, false, t.Error, null);
             var d = new Dictionary<string, object>();
             d["found"] = t.Found;
             d["enabled"] = t.Found && t.Enabled;
             d["instanceId"] = t.Found ? t.InstanceId : null;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         // Starts the change and replies at once; the panel reads the state back on its next polls.
@@ -708,18 +709,18 @@ namespace Overdrive.Helper
         {
             bool enabled;
             string err;
-            if (!GetBool(args, "enabled", out enabled, out err)) return Reply(id, false, err, null);
-            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (!ProtocolKit.GetBool(args, "enabled", out enabled, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (SystemControls == null) return ProtocolKit.Reply(id, false, SystemUnavailable, null);
             if (!SystemControls.StartSetTouchscreen(enabled, out err))
-                return Reply(id, false, err ?? "The touchscreen change could not be started.", null);
+                return ProtocolKit.Reply(id, false, err ?? "The touchscreen change could not be started.", null);
             var d = new Dictionary<string, object>();
             d["enabled"] = enabled;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string GetAutoSr(object id)
         {
-            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (SystemControls == null) return ProtocolKit.Reply(id, false, SystemUnavailable, null);
             bool installed = SystemControls.AutoSrInstalled();
             var d = new Dictionary<string, object>();
             d["installed"] = installed;
@@ -728,226 +729,43 @@ namespace Overdrive.Helper
             {
                 string err;
                 string settings = SystemControls.ReadGpuSettings(out err);
-                if (err != null) return Reply(id, false, err, null);
+                if (err != null) return ProtocolKit.Reply(id, false, err, null);
                 v = AutoSr.Read(settings);
             }
             d["value"] = v.HasValue ? (object)v.Value : null;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string SetAutoSr(object id, Dictionary<string, object> args)
         {
             bool on;
             string err;
-            if (!GetBool(args, "on", out on, out err)) return Reply(id, false, err, null);
-            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
-            if (!SystemControls.AutoSrInstalled()) return Reply(id, false, AutoSrNotInstalled, null);
+            if (!ProtocolKit.GetBool(args, "on", out on, out err)) return ProtocolKit.Reply(id, false, err, null);
+            if (SystemControls == null) return ProtocolKit.Reply(id, false, SystemUnavailable, null);
+            if (!SystemControls.AutoSrInstalled()) return ProtocolKit.Reply(id, false, AutoSrNotInstalled, null);
             string current = SystemControls.ReadGpuSettings(out err);
-            if (err != null) return Reply(id, false, err, null);   // never write over a value that could not be read
+            if (err != null) return ProtocolKit.Reply(id, false, err, null);   // never write over a value that could not be read
             string next = AutoSr.Write(current, on);
             if (!SystemControls.WriteGpuSettings(next, out err))
-                return Reply(id, false, err ?? "The graphics setting could not be written.", null);
+                return ProtocolKit.Reply(id, false, err ?? "The graphics setting could not be written.", null);
             var d = new Dictionary<string, object>();
             d["on"] = on;
-            return Reply(id, true, "", d);
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string Foreground(object id)
         {
-            if (SystemControls == null) return Reply(id, false, SystemUnavailable, null);
+            if (SystemControls == null) return ProtocolKit.Reply(id, false, SystemUnavailable, null);
             string exe = SystemControls.ForegroundExe();
             var d = new Dictionary<string, object>();
             d["exe"] = exe == null ? "" : exe.ToLowerInvariant();
-            return Reply(id, true, "", d);
-        }
-
-        private static bool GetBool(Dictionary<string, object> args, string key, out bool value, out string err)
-        {
-            value = false;
-            err = null;
-            object raw;
-            if (!args.TryGetValue(key, out raw)) { err = "Refused: '" + key + "' is required."; return false; }
-            if (!(raw is bool)) { err = "Refused: '" + key + "' must be true or false."; return false; }
-            value = (bool)raw;
-            return true;
+            return ProtocolKit.Reply(id, true, "", d);
         }
 
         private string FpsUnavailable()
         {
             string why = adl.Unavailable;
             return "AMD frame rate control is unavailable" + (string.IsNullOrEmpty(why) ? "" : ": " + why) + ".";
-        }
-
-        // ---------- Armoury Crate services ----------
-        // Only names in ArmouryServices (G-Helper AsusService.cs services + servicesAC) are ever touched.
-
-        private string ArmouryState(object id)
-        {
-            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
-            List<string> running = services.Running(ArmouryServices.All);
-            bool installed = false;
-            foreach (string m in ArmouryServices.InstalledMarkers) if (types.ContainsKey(m)) installed = true;
-            var d = new Dictionary<string, object>();
-            d["installed"] = installed;
-            d["startTypes"] = Ordered(types);
-            d["running"] = running;
-            return Reply(id, true, "", d);
-        }
-
-        // G-Helper AsusService.StopAsusServices: each running listed service is stopped and set to Manual (servicesAC)
-        // or Disabled (services); services that are not running are left alone. The start types and running set are
-        // read before the first change and returned, so the caller can store them for armoury_restore.
-        // A failure rolls every service touched so far back to the recorded state.
-        private string ArmouryStop(object id)
-        {
-            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
-            List<string> running = services.Running(ArmouryServices.All);
-
-            var steps = new List<ServiceStep>();
-            foreach (string name in ArmouryServices.All)
-                if (running.Contains(name)) steps.Add(new ServiceStep(name, ServiceAction.Stop, ArmouryServices.StopStartType(name)));
-
-            var data = new Dictionary<string, object>();
-            data["startTypes"] = Ordered(types);
-            data["running"] = running;
-            string err;
-            if (!ApplyServiceSteps(steps, types, running, "stop", data, out err)) return Reply(id, false, err, data);
-            return Reply(id, true, "", data);
-        }
-
-        // Puts back exactly the given start types and starts the given running services, in list order. Services that
-        // are no longer installed are skipped (reported in data.skipped). Nothing else is stopped or changed.
-        // A failure rolls every service touched so far back to how it was before this call.
-        private string ArmouryRestore(object id, Dictionary<string, object> args)
-        {
-            object raw;
-            if (!args.TryGetValue("recorded", out raw) || !(raw is Dictionary<string, object>))
-                return Reply(id, false, "Refused: 'recorded' must be an object of service name to start type.", null);
-            var recorded = new Dictionary<string, string>();
-            foreach (KeyValuePair<string, object> kv in (Dictionary<string, object>)raw)
-            {
-                if (!(kv.Value is string)) return Reply(id, false, "Refused: start type for '" + kv.Key + "' must be a string.", null);
-                if (!ArmouryServices.IsListed(kv.Key))
-                    return Reply(id, false, "Refused: '" + kv.Key + "' is not one of the Armoury Crate services Overdrive manages.", null);
-                if (!ArmouryServices.IsStartType((string)kv.Value))
-                    return Reply(id, false, "Refused: start type for '" + kv.Key + "' must be one of "
-                        + string.Join(", ", ArmouryServices.StartTypeNames) + ".", null);
-                recorded[kv.Key] = (string)kv.Value;
-            }
-            if (!args.TryGetValue("running", out raw) || !(raw is object[]))
-                return Reply(id, false, "Refused: 'running' must be a list of service names.", null);
-            var toStart = new List<string>();
-            foreach (object o in (object[])raw)
-            {
-                string name = o as string;
-                if (name == null) return Reply(id, false, "Refused: 'running' must contain only service names.", null);
-                if (!ArmouryServices.IsListed(name))
-                    return Reply(id, false, "Refused: '" + name + "' is not one of the Armoury Crate services Overdrive manages.", null);
-                if (!recorded.ContainsKey(name))
-                    return Reply(id, false, "Refused: running service '" + name + "' has no recorded start type.", null);
-                toStart.Add(name);
-            }
-
-            Dictionary<string, string> types = services.StartTypes(ArmouryServices.All);
-            List<string> running = services.Running(ArmouryServices.All);
-
-            // Two passes, so a service that depends on another listed service never starts while that one is still
-            // Disabled: first every recorded start type (G-Helper list order), then the services that were running,
-            // in the recorded order. A failure rolls back every step so far, as before.
-            var steps = new List<ServiceStep>();
-            var skipped = new List<string>();
-            foreach (string name in ArmouryServices.All)
-            {
-                string type;
-                if (!recorded.TryGetValue(name, out type)) continue;
-                if (!types.ContainsKey(name)) { skipped.Add(name); continue; }
-                steps.Add(new ServiceStep(name, ServiceAction.SetType, type));
-            }
-            foreach (string name in toStart)
-            {
-                if (!types.ContainsKey(name)) continue;
-                steps.Add(new ServiceStep(name, ServiceAction.Start, recorded[name]));
-            }
-
-            var data = new Dictionary<string, object>();
-            data["skipped"] = skipped;
-            string err;
-            if (!ApplyServiceSteps(steps, types, running, "restore", data, out err)) return Reply(id, false, err, data);
-            return Reply(id, true, "", data);
-        }
-
-        private enum ServiceAction { Stop, Start, SetType }
-
-        private class ServiceStep
-        {
-            public readonly string Name;
-            public readonly ServiceAction Action;
-            public readonly string StartType;
-            public ServiceStep(string name, ServiceAction action, string startType) { Name = name; Action = action; StartType = startType; }
-        }
-
-        // Runs the steps in order. On the first failure, every step done so far (the failed one included, as it may
-        // have half-happened) is undone in reverse: back to its start type in `before`, and running only if it was.
-        // Only the listed services this call changed are put back: a dependent service that ServiceController.Stop
-        // stopped alongside one of them is not restarted (same as G-Helper, whose Stop-Service -Force does the same).
-        // Worst case duration: up to 30 s per stop/start (ServiceHardware.Wait), times the services changed, and the
-        // same again for a rollback; dependents add their own stop time.
-        // data gets "failed" and "rolledBack"; err names the service and lists any rollback that also failed.
-        private bool ApplyServiceSteps(List<ServiceStep> steps, Dictionary<string, string> before, List<string> wasRunning,
-            string what, Dictionary<string, object> data, out string err)
-        {
-            err = null;
-            for (int i = 0; i < steps.Count; i++)
-            {
-                ServiceStep st = steps[i];
-                try
-                {
-                    switch (st.Action)
-                    {
-                        case ServiceAction.Stop: services.Stop(st.Name, st.StartType); break;
-                        case ServiceAction.Start: services.Start(st.Name, st.StartType); break;
-                        default: services.SetStartType(st.Name, st.StartType); break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    string verb = st.Action == ServiceAction.Stop ? "stop" : (st.Action == ServiceAction.Start ? "start" : "set the start type of");
-                    var rollbackFailures = new List<string>();
-                    for (int j = i; j >= 0; j--)
-                    {
-                        ServiceStep u = steps[j];
-                        string type;
-                        if (!before.TryGetValue(u.Name, out type)) continue;
-                        try
-                        {
-                            if (wasRunning.Contains(u.Name)) services.Start(u.Name, type);
-                            else if (u.Action == ServiceAction.Start) services.Stop(u.Name, type);
-                            else services.SetStartType(u.Name, type);
-                        }
-                        catch (Exception rex) { rollbackFailures.Add(u.Name + " (" + rex.Message + ")"); }
-                    }
-                    data["failed"] = st.Name;
-                    data["rolledBack"] = rollbackFailures.Count == 0;
-                    err = "Could not " + verb + " " + st.Name + " (" + what + "): " + ex.Message.TrimEnd('.') + "."
-                        + (rollbackFailures.Count == 0
-                            ? " Every service changed so far was put back."
-                            : " Rollback also failed for " + string.Join(", ", rollbackFailures) + ".");
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        // Start types in ArmouryServices order, for stable replies.
-        private static Dictionary<string, object> Ordered(Dictionary<string, string> types)
-        {
-            var d = new Dictionary<string, object>();
-            foreach (string name in ArmouryServices.All)
-            {
-                string t;
-                if (types.TryGetValue(name, out t)) d[name] = t;
-            }
-            return d;
         }
 
         // ---------- hardware helpers ----------
@@ -1041,62 +859,11 @@ namespace Overdrive.Helper
         {
             power = null;
             int spl, sppt, fppt;
-            if (!GetInt(args, "spl", out spl, out err)) return false;
-            if (!GetInt(args, "sppt", out sppt, out err)) return false;
-            if (!GetInt(args, "fppt", out fppt, out err)) return false;
+            if (!ProtocolKit.GetInt(args, "spl", out spl, out err)) return false;
+            if (!ProtocolKit.GetInt(args, "sppt", out sppt, out err)) return false;
+            if (!ProtocolKit.GetInt(args, "fppt", out fppt, out err)) return false;
             power = Validation.ClampPower(spl, sppt, fppt);
             return true;
-        }
-
-        private static bool GetInt(Dictionary<string, object> args, string key, out int value, out string err)
-        {
-            value = 0;
-            err = null;
-            object raw;
-            if (!args.TryGetValue(key, out raw)) { err = "Refused: '" + key + "' is required."; return false; }
-            if (!TryInt(raw, out value)) { err = "Refused: '" + key + "' must be a whole number."; return false; }
-            return true;
-        }
-
-        private static bool GetIntArray(Dictionary<string, object> args, string key, out int[] values, out string err)
-        {
-            values = null;
-            err = null;
-            object raw;
-            if (!args.TryGetValue(key, out raw)) { err = "Refused: '" + key + "' is required."; return false; }
-            var arr = raw as object[];
-            if (arr == null) { err = "Refused: '" + key + "' must be a list of whole numbers."; return false; }
-            values = new int[arr.Length];
-            for (int i = 0; i < arr.Length; i++)
-                if (!TryInt(arr[i], out values[i])) { err = "Refused: '" + key + "' must be a list of whole numbers."; return false; }
-            return true;
-        }
-
-        // JavaScriptSerializer gives int or long for whole numbers, decimal for fractions; anything else is not an int.
-        private static bool TryInt(object raw, out int value)
-        {
-            value = 0;
-            if (raw is int) { value = (int)raw; return true; }
-            if (raw is long)
-            {
-                long l = (long)raw;
-                if (l < int.MinValue || l > int.MaxValue) return false;
-                value = (int)l;
-                return true;
-            }
-            return false;
-        }
-
-        // ---------- reply ----------
-
-        private string Reply(object id, bool ok, string message, object data)
-        {
-            var r = new Dictionary<string, object>();
-            r["id"] = id;
-            r["ok"] = ok;
-            r["message"] = message ?? "";
-            r["data"] = data;
-            return json.Serialize(r);
         }
     }
 }

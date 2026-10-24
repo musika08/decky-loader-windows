@@ -5,7 +5,7 @@ using System.Runtime.InteropServices;
 using System.ServiceProcess;
 using Microsoft.Win32;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     // The real IServices: the Windows service manager, for the Armoury Crate services only.
     // G-Helper (app/Helpers/ProcessHelper.cs StopDisableService/StartEnableService) runs PowerShell

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using System.Web.Script.Serialization;
+using Ally.Shared;
 
 namespace Overdrive.Helper.Tests
 {

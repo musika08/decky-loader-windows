@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Web.Script.Serialization;
+using Ally.Shared;
 
 namespace Overdrive.Helper
 {

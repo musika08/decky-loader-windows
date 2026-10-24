@@ -1,7 +1,7 @@
 using System;
-using Overdrive.Helper.GHelper;
+using Ally.Shared.GHelper;
 
-namespace Overdrive.Helper
+namespace Ally.Shared
 {
     // The FPS-limit part of the ported G-Helper AmdGpuControl, as a seam so AdlHardware can be tested without ADL.
     public interface IFpsControl : IDisposable
