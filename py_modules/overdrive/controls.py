@@ -1,31 +1,14 @@
-"""CPU Boost, Windows power mode, touchscreen, Auto SR and the ASUS controller (mode + grip vibration).
+"""CPU Boost, Windows power mode and Auto SR.
 
 Thin layer over the helper's commands. Every function returns {"ok", "message", ...}; a helper refusal or a missing
 feature is reported, never raised.
-
-get_touchscreen spawns PowerShell in the helper and can take up to 5 s, so read_controls keeps the last touchscreen
-status for TOUCH_TTL seconds and a state poll never waits on it more than once per that time. set_touchscreen returns
-at once (the change lands later): it drops the cache, so the next read asks the real device, and for TOUCH_SETTLE
-seconds every read asks again until the device shows the requested state (the panel polls that long).
-A failed read changes nothing: the last good status is reported (not found when there is none yet) and the cache time
-is not refreshed, so the next read asks again; a failure never hides the toggle or passes for the requested state.
 """
-import time
 from typing import Optional
 
 from .helper_client import RESTARTED
-from .settings import CONTROLLER_MODES, Settings
+from .settings import Settings
 
-TOUCH_TTL = 30.0
-TOUCH_SETTLE = 15.0             # seconds after set_touchscreen in which reads skip the cache until the change shows
 POWER_MODES = ("eco", "balanced", "best")
-
-clock = time.monotonic          # tests replace it
-_touch = {"at": None, "value": None, "want": None, "until": None}
-
-
-def reset_cache() -> None:
-    _touch.update(at=None, value=None, want=None, until=None)
 
 
 def transport_failure(reply: dict) -> bool:
@@ -50,22 +33,6 @@ def _msg(reply: dict, fallback: str) -> str:
     return str(reply.get("message") or fallback)
 
 
-async def _touchscreen_status(client) -> dict:
-    now = clock()
-    settling = _touch["want"] is not None and now < _touch["until"]
-    if not settling:
-        _touch["want"] = _touch["until"] = None
-    cached = _touch["at"] is not None and now - _touch["at"] < TOUCH_TTL
-    if cached and not (settling and _touch["value"]["enabled"] != _touch["want"]):
-        return _touch["value"]
-    d = _data(await client.call("get_touchscreen", {}, timeout=15.0))
-    if d is None:   # a failed read: keep the last good status and its time (asked again at the next read)
-        return _touch["value"] or {"found": False, "enabled": False}
-    value = {"found": bool(d.get("found")), "enabled": bool(d.get("enabled"))}
-    _touch["at"], _touch["value"] = clock(), value
-    return value
-
-
 async def read_controls(client) -> dict:
     """The state get_state shows for the new controls. A command the helper cannot serve marks its feature
     unsupported (or not found); nothing here raises."""
@@ -80,21 +47,13 @@ async def read_controls(client) -> dict:
         mode = d.get("mode")
         power = {"value": mode if mode in POWER_MODES else "other", "supported": True}
 
-    controller = {"found": False}
-    d = _data(await client.call("controller_info", {}))
-    if d is not None:
-        controller = {"found": bool(d.get("found"))}
-
-    touch = await _touchscreen_status(client)
-
     sr = {"installed": False, "on": None}
     d = _data(await client.call("get_auto_sr", {}))
     if d is not None and d.get("installed"):
         v = d.get("value")
         sr = {"installed": True, "on": True if v == 1028 else False if v == 1024 else None}
 
-    return {"ok": True, "message": "", "cpu_boost": boost, "power_mode": power, "controller": controller,
-            "touchscreen": {"found": touch["found"], "enabled": touch["enabled"]}, "auto_sr": sr}
+    return {"ok": True, "message": "", "cpu_boost": boost, "power_mode": power, "auto_sr": sr}
 
 
 async def set_cpu_boost(client, settings: Settings, on: bool) -> dict:
@@ -130,37 +89,8 @@ async def set_power_mode(client, value: str) -> dict:
     return _result(True, "", value=value)
 
 
-async def set_touchscreen(client, enabled: bool) -> dict:
-    r = await client.call("set_touchscreen", {"enabled": bool(enabled)})
-    if not r.get("ok"):
-        return _result(False, _msg(r, "The touchscreen was not changed."))
-    # The change lands a little later: show only what the device reports (C4). Until it shows the requested state
-    # (or TOUCH_SETTLE passes), every read asks the device again.
-    # The last good status is kept (cache time dropped): a failed read meanwhile reports it, never the target.
-    _touch.update(at=None, want=bool(enabled), until=clock() + TOUCH_SETTLE)
-    return _result(True, "", enabled=bool(enabled))
-
-
 async def set_auto_sr(client, on: bool) -> dict:
     r = await client.call("set_auto_sr", {"on": bool(on)})
     if not r.get("ok"):
         return _result(False, _msg(r, "Auto SR was not changed."))
     return _result(True, "", on=bool(on))
-
-
-async def apply_controller(client, settings: Settings, mode: Optional[str] = None) -> dict:
-    """Writes the controller mode ("auto" starts in Gamepad) and the
-    grip vibration. Both are tried; every failure is reported."""
-    mode = mode or settings.controller_mode
-    if mode not in CONTROLLER_MODES:
-        return _result(False, "Unknown controller mode.")
-    problems = []
-    r = await client.call("set_controller_mode", {"mode": "desktop" if mode == "desktop" else "gamepad"})
-    if not r.get("ok"):
-        problems.append(_msg(r, "The controller mode was not applied."))
-        if transport_failure(r):   # the helper is gone: the vibration write would only fail the same way
-            return _result(False, " ".join(problems), mode=mode)
-    r = await client.call("set_vibration", {"strength": 100 if settings.grip_vibration else 0})
-    if not r.get("ok"):
-        problems.append(_msg(r, "The grip vibration was not applied."))
-    return _result(not problems, " ".join(problems), mode=mode)

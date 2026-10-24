@@ -1,6 +1,6 @@
 {
   "name": "overdrive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Decky plugin: performance mode, power limits, FPS limit and fan curves for the ROG Ally family.",
   "type": "module",
   "private": true,

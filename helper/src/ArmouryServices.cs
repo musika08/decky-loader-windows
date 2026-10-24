@@ -67,7 +67,7 @@ namespace Ally.Shared
         {
             if (Array.IndexOf(ServicesAC, name) >= 0) return "Manual";
             if (Array.IndexOf(Services, name) >= 0) return "Disabled";
-            throw new ArgumentException("Refused: '" + name + "' is not one of the Armoury Crate services Overdrive manages.");
+            throw new ArgumentException("Refused: '" + name + "' is not one of the Armoury Crate services this plugin manages.");
         }
 
         private static string[] Concat(string[] a, string[] b)

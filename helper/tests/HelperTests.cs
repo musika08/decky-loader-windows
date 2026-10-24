@@ -78,9 +78,7 @@ namespace Overdrive.Helper.Tests
             {
                 Core = new HelperCore(Acpi, Adl, Services, ally, ms => Sleeps.Add(ms));
                 Core.WinPower = Power;
-                Core.Hid = new AsusHid(Bus);
                 Core.SystemControls = Sys;
-                Core.ProductName = "ROG Ally X RC72LA_RC72LA";
             }
 
             public Dictionary<string, object> Send(string line)
@@ -1081,58 +1079,6 @@ namespace Overdrive.Helper.Tests
             }
         }
 
-        public static void Controller_ModeBytes()
-        {
-            var rig = new Rig();
-            var r = rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}");
-            True(Ok(r), "gamepad: " + Msg(r));
-            Equal("gamepad", ((Dictionary<string, object>)r["data"])["mode"], "echoed mode");
-            WritesAre(rig.Bus, "gamepad", Padded(64, 0x5A, 0xD1, 0x01, 0x01, 0x01));
-
-            rig.Bus.Writes.Clear();
-            r = rig.Send("{\"id\":2,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}");
-            True(Ok(r), "desktop: " + Msg(r));
-            Equal("desktop", ((Dictionary<string, object>)r["data"])["mode"], "echoed mode");
-            WritesAre(rig.Bus, "desktop", Padded(64, 0x5A, 0xD1, 0x01, 0x01, 0x03));
-
-            // The padding follows the collection's own feature report length.
-            var rig48 = new Rig();
-            rig48.Bus = new FakeHidBus(48);
-            rig48.Core.Hid = new AsusHid(rig48.Bus);
-            True(Ok(rig48.Send("{\"id\":3,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}")), "48-byte collection");
-            WritesAre(rig48.Bus, "desktop on 48", Padded(48, 0x5A, 0xD1, 0x01, 0x01, 0x03));
-
-            rig.Bus.Writes.Clear();
-            rig.Bus.Fail = true;
-            r = rig.Send("{\"id\":4,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}");
-            True(!Ok(r) && Msg(r).Contains("feature write failed"), "write error passed on: " + Msg(r));
-        }
-
-        public static void Controller_VibrationBytes()
-        {
-            var rig = new Rig();
-            var r = rig.Send("{\"id\":1,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
-            True(Ok(r), "on: " + Msg(r));
-            Equal(100, ((Dictionary<string, object>)r["data"])["strength"], "echoed strength");
-            WritesAre(rig.Bus, "non-Xbox on", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 100, 100));
-
-            rig.Bus.Writes.Clear();
-            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":0}}")), "off");
-            WritesAre(rig.Bus, "non-Xbox off", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 0, 0));
-
-            var x = new Rig();
-            x.Core.ProductName = XboxProduct;
-            True(Ok(x.Send("{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":55}}")), "Xbox");
-            WritesAre(x.Bus, "Xbox", Padded(64, 0x5A, 0xD1, 0x06, 0x02, 55, 55), Padded(64, 0x5A, 0xD1, 0x1C, 0x02, 55, 55));
-
-            // A failed first write stops there and is reported.
-            x.Bus.Writes.Clear();
-            x.Bus.Fail = true;
-            r = x.Send("{\"id\":4,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
-            True(!Ok(r) && Msg(r).Contains("feature write failed"), "write error passed on: " + Msg(r));
-            Equal(1, x.Bus.Writes.Count, "no second write after a failure");
-        }
-
         public static void ControllerHid_OnlyMatchingCollection()
         {
             SeqEqual(new[] { "1A30", "1854", "1869", "1866", "19B6", "1822", "1837", "1854", "184A", "183D", "8502", "1807",
@@ -1147,27 +1093,6 @@ namespace Overdrive.Helper.Tests
             True(info.Found, "found");
             Equal(0x1B4C, info.Pid, "pid");
             Equal(64, info.FeatureLength, "feature length");
-
-            // Every command writes to the one matching collection only.
-            var rig = new Rig();
-            rig.Core.ProductName = XboxProduct;
-            rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"desktop\"}}");
-            rig.Send("{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}");
-            Equal(3, rig.Bus.Writes.Count, "three writes");
-            foreach (var w in rig.Bus.Writes) Equal(FakeHidBus.MatchPath, w.Key, "written path");
-
-            // controller_info: found, PID as hex, Xbox from the product name. It writes nothing.
-            var r = rig.Send("{\"id\":3,\"cmd\":\"controller_info\"}");
-            True(Ok(r), "info: " + Msg(r));
-            var d = (Dictionary<string, object>)r["data"];
-            Equal(true, d["found"], "found");
-            Equal("0x1B4C", d["pid"], "pid");
-            Equal(true, d["xbox"], "xbox");
-            Equal(3, rig.Bus.Writes.Count, "info wrote nothing");
-            var plain = new Rig();
-            Equal(false, ((Dictionary<string, object>)plain.Send("{\"id\":4,\"cmd\":\"controller_info\"}")["data"])["xbox"], "non-Xbox");
-            plain.Core.ProductName = null;
-            Equal(false, ((Dictionary<string, object>)plain.Send("{\"id\":5,\"cmd\":\"controller_info\"}")["data"])["xbox"], "unknown product");
 
             // AsusHid itself refuses a report that is not a padded 0x5A report, before anything is sent.
             string err;
@@ -1191,50 +1116,22 @@ namespace Overdrive.Helper.Tests
                 "SP_DEVICE_INTERFACE_DATA, HIDD_ATTRIBUTES, HIDP_CAPS, detail cbSize");
         }
 
-        public static void Controller_NotFoundRefused()
+        public static void MovedCommands_Refused()
         {
             var rig = new Rig();
-            rig.Bus.Devices.RemoveAll(c => c.Path == FakeHidBus.MatchPath);
             foreach (string line in new[] {
                 "{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}",
-                "{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}" })
+                "{\"id\":2,\"cmd\":\"set_vibration\",\"args\":{\"strength\":100}}",
+                "{\"id\":3,\"cmd\":\"controller_info\"}",
+                "{\"id\":4,\"cmd\":\"get_touchscreen\"}",
+                "{\"id\":5,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":false}}" })
             {
                 var r = rig.Send(line);
-                Equal("Controller not found", Msg(r), "refused: " + line);
-                True(!Ok(r), "not ok");
+                True(!Ok(r) && Msg(r).Contains("unknown command"), "refused as unknown: " + line + " -> " + Msg(r));
             }
-            var info = rig.Send("{\"id\":3,\"cmd\":\"controller_info\"}");
-            True(Ok(info), "info still answers");
-            var d = (Dictionary<string, object>)info["data"];
-            Equal(false, d["found"], "found");
-            True(d["pid"] == null, "no pid");
             Equal(0, rig.Bus.Writes.Count, "nothing written");
-
-            // No HID layer at all (Hid left null): refused as not available.
-            var core = new HelperCore(new FakeAcpi(), new FakeAdl(), new FakeServices(), true, ms => { });
-            foreach (string line in new[] {
-                "{\"id\":1,\"cmd\":\"controller_info\"}",
-                "{\"id\":2,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":\"gamepad\"}}",
-                "{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":0}}" })
-            {
-                var r = (Dictionary<string, object>)Json.DeserializeObject(core.HandleLine(line));
-                True(!Ok(r) && Msg(r) == HelperCore.ControllerUnavailable, "not available: " + Msg(r));
-            }
-        }
-
-        public static void Controller_InvalidArgsRefused()
-        {
-            var rig = new Rig();
-            foreach (string m in new[] { "\"Gamepad\"", "\"mouse\"", "\"auto\"", "\"\"", "1", "3", "null", "true" })
-                True(!Ok(rig.Send("{\"id\":1,\"cmd\":\"set_controller_mode\",\"args\":{\"mode\":" + m + "}}")), "mode " + m + " refused");
-            True(!Ok(rig.Send("{\"id\":2,\"cmd\":\"set_controller_mode\"}")), "mode required");
-            foreach (string v in new[] { "-1", "101", "255", "\"50\"", "1.5", "null", "true" })
-                True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_vibration\",\"args\":{\"strength\":" + v + "}}")), "strength " + v + " refused");
-            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_vibration\"}")), "strength required");
-            True(!Ok(rig.Send("{\"id\":5,\"cmd\":\"set_vibration\",\"args\":{\"strength\":50,\"x\":1}}")), "unknown arg refused");
-            True(!Ok(rig.Send("{\"id\":6,\"cmd\":\"controller_info\",\"args\":{\"x\":1}}")), "info takes no args");
-            Equal(0, rig.Bus.Lists, "refusals never reached the HID layer");
-            Equal(0, rig.Bus.Writes.Count, "nothing written");
+            Equal(0, rig.Sys.TouchReads, "no touchscreen read");
+            Equal(0, rig.Sys.TouchSets.Count, "no touchscreen set");
         }
 
         // ---------- touchscreen, Auto SR, foreground (Task 3) ----------
@@ -1268,43 +1165,6 @@ namespace Overdrive.Helper.Tests
             Equal("A=1;DXGIEffects=1024;", AutoSr.Write("A=1", false), "no trailing semicolon");
         }
 
-        public static void Touchscreen_SetReturnsAtOnce()
-        {
-            var rig = new Rig();
-            var r = rig.Send("{\"id\":1,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":false}}");
-            True(Ok(r), "set accepted: " + Msg(r));
-            Equal(false, ((Dictionary<string, object>)r["data"])["enabled"], "echo");
-            SeqEqual(new[] { "False" }, rig.Sys.TouchSets.ConvertAll(b => b.ToString()), "started once, disabling");
-            Equal(0, rig.Sys.TouchReads, "set never waits on a read");
-            // a second change while the first runs is refused
-            var r2 = rig.Send("{\"id\":2,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":true}}");
-            True(!Ok(r2) && Msg(r2).Contains("already running"), "busy refused: " + Msg(r2));
-            Equal(1, rig.Sys.TouchSets.Count, "second not started");
-            // arguments are checked
-            True(!Ok(rig.Send("{\"id\":3,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":1}}")), "enabled must be a boolean");
-            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_touchscreen\"}")), "enabled required");
-            rig.Sys.TouchBusy = false;
-            rig.Sys.TouchStartFails = true;
-            var r3 = rig.Send("{\"id\":5,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":true}}");
-            True(!Ok(r3) && Msg(r3) == "Could not start PowerShell.", "start failure reported: " + Msg(r3));
-        }
-
-        public static void Touchscreen_GetReportsState()
-        {
-            var rig = new Rig();
-            var r = rig.Send("{\"id\":1,\"cmd\":\"get_touchscreen\"}");
-            True(Ok(r), Msg(r));
-            var d = (Dictionary<string, object>)r["data"];
-            Equal(true, d["found"], "found");
-            Equal(true, d["enabled"], "enabled");
-            Equal(@"HID\NVTK0603&COL01\5&1234&0&0000", d["instanceId"], "instance id");
-            rig.Sys.Touch = new TouchInfo { Found = true, Enabled = false, InstanceId = "x" };
-            Equal(false, ((Dictionary<string, object>)rig.Send("{\"id\":2,\"cmd\":\"get_touchscreen\"}")["data"])["enabled"], "disabled");
-            rig.Sys.Touch = new TouchInfo { Error = "PowerShell did not answer in 5 seconds." };
-            var e = rig.Send("{\"id\":3,\"cmd\":\"get_touchscreen\"}");
-            True(!Ok(e) && Msg(e) == "PowerShell did not answer in 5 seconds.", "read timeout reported: " + Msg(e));
-        }
-
         public static void Touchscreen_PickDevice_PresentOnlyFixedText()
         {
             string cmd = SystemControls.PickDevice;
@@ -1312,23 +1172,11 @@ namespace Overdrive.Helper.Tests
             True(cmd.IndexOf("{0}") < 0 && cmd.IndexOf('"') < 0, "fixed text, no placeholder for client input");
         }
 
-        public static void Touchscreen_NotFound()
-        {
-            var rig = new Rig();
-            rig.Sys.Touch = new TouchInfo { Found = false };
-            var r = rig.Send("{\"id\":1,\"cmd\":\"get_touchscreen\"}");
-            True(Ok(r), "not found is a normal answer: " + Msg(r));
-            var d = (Dictionary<string, object>)r["data"];
-            Equal(false, d["found"], "found");
-            Equal(false, d["enabled"], "enabled");
-            Equal(null, d["instanceId"], "no instance id");
-        }
-
         public static void System_NotAvailableWithoutSystemControls()
         {
             var rig = new Rig();
             rig.Core.SystemControls = null;
-            foreach (string c in new[] { "get_touchscreen", "get_auto_sr", "foreground" })
+            foreach (string c in new[] { "get_auto_sr", "foreground" })
             {
                 var r = rig.Send("{\"id\":1,\"cmd\":\"" + c + "\"}");
                 True(!Ok(r) && Msg(r) == HelperCore.SystemUnavailable, c + ": " + Msg(r));
@@ -1404,17 +1252,14 @@ namespace Overdrive.Helper.Tests
             var rig = new Rig(false);
             rig.Sys.Foreground = "game.exe";
             True(Ok(rig.Send("{\"id\":1,\"cmd\":\"foreground\"}")), "read");
-            True(Ok(rig.Send("{\"id\":2,\"cmd\":\"get_touchscreen\"}")), "read");
             True(Ok(rig.Send("{\"id\":3,\"cmd\":\"get_auto_sr\"}")), "read");
-            True(!Ok(rig.Send("{\"id\":4,\"cmd\":\"set_touchscreen\",\"args\":{\"enabled\":false}}")), "write refused");
             True(!Ok(rig.Send("{\"id\":5,\"cmd\":\"set_auto_sr\",\"args\":{\"on\":false}}")), "write refused");
-            Equal(0, rig.Sys.TouchSets.Count, "no touch change");
             Equal(0, rig.Sys.GpuWrites.Count, "no registry write");
         }
 
         public static void NotAlly_RefusesAllButReadAllowList()
         {
-            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode", "get_touchscreen", "get_auto_sr", "foreground" },
+            SeqEqual(new[] { "hello", "status", "sensors", "frame_sample", "get_fans", "get_fps_limit", "armoury_state", "get_cpu_boost", "get_power_mode", "get_auto_sr", "foreground" },
                 new List<string>(HelperCore.ReadCommands), "read allow-list");
             var rig = new Rig(false);
             int n = 0, refused = 0;
@@ -1425,7 +1270,7 @@ namespace Overdrive.Helper.Tests
                 if (read) True(Msg(r) != HelperCore.NotAllyMessage, cmd + " is a read and must not be refused as non-Ally");
                 else { True(!Ok(r) && Msg(r) == HelperCore.NotAllyMessage, cmd + " refused: " + Msg(r)); refused++; }
             }
-            Equal(14, refused, "every non-read command refused");
+            Equal(10, refused, "every non-read command refused");
             Equal(0, rig.Power.Writes().Count, "no power write");
             Equal(0, rig.Bus.Writes.Count, "no HID write");
             foreach (string c in rig.Acpi.Calls) True(c.StartsWith("get"), "only reads reached ACPI: " + c);

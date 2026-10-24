@@ -38,9 +38,7 @@ namespace Overdrive.Helper
             {
                 var core = new HelperCore(acpi, adl, new ServiceHardware(), IsAlly());
                 core.WinPower = new WinPower();
-                core.Hid = new AsusHid();
                 core.SystemControls = new SystemControls();
-                core.ProductName = ReadProductName();
                 Run(input, output, core);
             }
             return 0;

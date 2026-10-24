@@ -910,8 +910,7 @@ def test_unload_without_auto_tdp_writes_nothing_more(tmp_path):
         await wait(p.reapplier.apply_all())
         before = list(c.writes())
         await wait(p._unload())
-        # only the controller's Gamepad (written at every unload), no mode write
-        assert c.writes() == before + [("set_controller_mode", {"mode": "gamepad"})] and c.stopped
+        assert c.writes() == before and c.stopped      # no mode write
     run(go())
 
 
@@ -952,17 +951,7 @@ def test_unload_restores_after_a_halted_loop(tmp_path):
 
 # ---------- new controls (task 6) ----------
 
-from overdrive import controls  # noqa: E402
-
-NEW_SETTERS = (("set_cpu_boost", True), ("set_power_mode", "eco"), ("set_controller_mode", "desktop"),
-               ("set_grip_vibration", False), ("set_touchscreen", False), ("set_auto_sr", True))
-
-
-@pytest.fixture(autouse=True)
-def _fresh_controls_cache():
-    controls.reset_cache()
-    yield
-    controls.reset_cache()
+NEW_SETTERS = (("set_cpu_boost", True), ("set_power_mode", "eco"), ("set_auto_sr", True))
 
 
 def reply(r):
@@ -971,23 +960,17 @@ def reply(r):
     return h
 
 
-def controller_found(c):
-    c.handlers["controller_info"] = reply(ok({"found": True, "pid": "0x1B4C", "xbox": False}))
-
-
 def test_new_setters_refused_while_busy(tmp_path):
     async def go():
         bare = main.Plugin()
         for name, arg in NEW_SETTERS:
             assert (await getattr(bare, name)(arg)) == {"ok": False, "message": main.NOT_ALLY}, name
         p, c, s = plugin_with(tmp_path)
-        controller_found(c)
         p.armoury._busy = True
         for name, arg in NEW_SETTERS:
             assert (await wait(getattr(p, name)(arg))) == {"ok": False, "message": main.BUSY}, name
         p.armoury._busy = False
         assert c.writes() == []
-        assert (s.controller_mode, s.grip_vibration) == ("gamepad", True)
         assert not (tmp_path / "overdrive.json").exists()
     run(go())
 
@@ -999,108 +982,15 @@ def test_new_setters_write_and_reply(tmp_path):
         assert (await wait(p.set_cpu_boost(True)))["ok"] is True
         assert p.reapplier.generation == gen + 1                     # a user change, under the shared lock
         assert (await wait(p.set_power_mode("best")))["ok"] is True
-        assert (await wait(p.set_touchscreen(False)))["ok"] is True
         assert (await wait(p.set_auto_sr(True)))["ok"] is True
         assert c.writes() == [("set_cpu_boost", {"value": 2}), ("set_power_mode", {"mode": "best"}),
-                              ("set_touchscreen", {"enabled": False}), ("set_auto_sr", {"on": True})]
+                              ("set_auto_sr", {"on": True})]
         assert (await p.set_power_mode("fast"))["ok"] is False
-        for name in ("set_cpu_boost", "set_touchscreen", "set_auto_sr", "set_grip_vibration"):
+        for name in ("set_cpu_boost", "set_auto_sr"):
             assert (await getattr(p, name)("yes"))["ok"] is False, name
-        assert len(c.writes()) == 4
+        assert len(c.writes()) == 3
         c.handlers["set_auto_sr"] = reply(fail("Auto SR is not installed."))
         assert (await wait(p.set_auto_sr(False))) == {"ok": False, "message": "Auto SR is not installed."}
-    run(go())
-
-
-def test_set_controller_mode_auto_starts_loop(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path)
-        controller_found(c)
-        ca = p.controller_auto
-        assert (await p.set_controller_mode("mouse"))["ok"] is False
-        r = await wait(p.set_controller_mode("auto"))
-        assert r["ok"] is True, r
-        assert ("set_controller_mode", {"mode": "gamepad"}) in c.writes()   # Auto starts in Gamepad
-        assert ca._on is True
-        saved = Settings.load(s.path)
-        assert (saved.controller_mode, saved.user_set) == ("auto", True)   # reapplied after sleep
-        c.calls.clear()
-        r = await wait(p.set_controller_mode("desktop"))
-        assert r["ok"] is True, r
-        assert ca._on is False and ca._task is None
-        assert c.writes()[-2:] == [("set_controller_mode", {"mode": "desktop"}), ("set_vibration", {"strength": 100})]
-        assert Settings.load(s.path).controller_mode == "desktop"
-        # a refused write saves nothing
-        c.handlers["set_controller_mode"] = reply(fail("The controller refused the mode."))
-        r = await wait(p.set_controller_mode("gamepad"))
-        assert r["ok"] is False and "refused" in r["message"]
-        assert Settings.load(s.path).controller_mode == "desktop" and s.controller_mode == "desktop"
-    run(go())
-
-
-def test_set_controller_mode_away_from_auto_stops_loop_outside_the_lock(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path, controller_mode="auto", user_set=True)
-        controller_found(c)
-        ca = p.controller_auto
-        ca.start()
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def slow(args):
-            entered.set()
-            await release.wait()
-            return ok(dict(args))
-        c.handlers["set_controller_mode"] = slow
-        writing = asyncio.ensure_future(ca._write("desktop"))         # a loop write holds the reapplier's lock
-        await wait(entered.wait())
-        assert p.reapplier.lock.locked()
-        release.set()
-        r = await wait(p.set_controller_mode("gamepad"))             # stop() before user_change: no deadlock
-        assert r["ok"] is True, r
-        await wait(writing)
-        assert ca._on is False
-        assert c.writes()[-2] == ("set_controller_mode", {"mode": "gamepad"})
-    run(go())
-
-
-def test_concurrent_auto_and_desktop_leave_no_loop_running(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path)
-        controller_found(c)
-        ca = p.controller_auto
-        # Both calls pass the "stop a running loop" check, then wait for the lock: Auto first, Desktop second.
-        async with p.reapplier.lock:
-            a = asyncio.ensure_future(p.set_controller_mode("auto"))
-            b = asyncio.ensure_future(p.set_controller_mode("desktop"))
-            for _ in range(5):
-                await asyncio.sleep(0)
-        ra, rb = await wait(a), await wait(b)
-        assert ra["ok"] and rb["ok"], (ra, rb)
-        assert s.controller_mode == "desktop" and Settings.load(s.path).controller_mode == "desktop"
-        assert ca.running is False and ca._task is None          # the loop Auto started was stopped
-        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
-        assert modes[-1] == "desktop"                             # the stored choice is what the device has
-    run(go())
-
-
-def test_concurrent_auto_desktop_gamepad_ends_in_the_last_choice(tmp_path):
-    async def go():
-        # C9: the stray-loop stop decides its write under the lock, so the later Gamepad choice is what stays.
-        p, c, s = plugin_with(tmp_path)
-        controller_found(c)
-        ca = p.controller_auto
-        async with p.reapplier.lock:
-            calls = [asyncio.ensure_future(p.set_controller_mode(m)) for m in ("auto", "desktop", "gamepad")]
-            for _ in range(5):
-                await asyncio.sleep(0)
-        for t in calls:
-            r = await wait(t)
-            assert r["ok"], r
-        assert s.controller_mode == "gamepad" and Settings.load(s.path).controller_mode == "gamepad"
-        assert ca.running is False
-        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
-        assert modes[-1] == "gamepad", modes
-        assert modes.count("desktop") == 1, modes                # Desktop only from the Desktop choice itself
     run(go())
 
 
@@ -1123,110 +1013,18 @@ def test_get_state_skips_controls_when_the_helper_does_not_answer(tmp_path):
     run(go())
 
 
-def test_controller_choices_saved_when_controller_missing(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path)                               # controller_info: found False
-        r = await wait(p.set_controller_mode("desktop"))
-        assert r["ok"] is True and "not found" in r["message"]
-        r = await wait(p.set_grip_vibration(False))
-        assert r["ok"] is True and "not found" in r["message"]
-        assert c.writes() == []
-        saved = Settings.load(s.path)
-        assert (saved.controller_mode, saved.grip_vibration) == ("desktop", False)
-    run(go())
-
-
-def test_set_grip_vibration_saves_and_applies(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path)
-        controller_found(c)
-        r = await wait(p.set_grip_vibration(False))
-        assert r == {"ok": True, "message": ""}
-        assert c.writes() == [("set_vibration", {"strength": 0})]
-        saved = Settings.load(s.path)
-        assert (saved.grip_vibration, saved.user_set) == (False, True)
-        c.handlers["set_vibration"] = reply(fail("The controller refused the vibration."))
-        r = await wait(p.set_grip_vibration(True))
-        assert r["ok"] is False
-        assert s.grip_vibration is False and Settings.load(s.path).grip_vibration is False
-    run(go())
-
-
-def test_startup_starts_controller_auto_when_mode_is_auto(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path, controller_mode="auto", user_set=True)
-        p._startup = asyncio.ensure_future(p._startup_sequence())
-        await wait(p._startup)
-        assert p.controller_auto._on is True
-        await wait(p._unload())
-        assert p.controller_auto._on is False
-
-        p2, c2, s2 = plugin_with(tmp_path, controller_mode="desktop")
-        p2._startup = asyncio.ensure_future(p2._startup_sequence())
-        await wait(p2._startup)
-        assert p2.controller_auto._on is False
-        await wait(p2._unload())
-    run(go())
-
-
-def test_load_turns_stored_desktop_into_gamepad(tmp_path):
-    async def go():
-        # C7: Desktop does not survive a plugin load (Decky restart, boot).
-        p, c, s = plugin_with(tmp_path, controller_mode="desktop", user_set=True)
-        controller_found(c)
-        p._startup = asyncio.ensure_future(p._startup_sequence())
-        await wait(p._startup)
-        assert s.controller_mode == "gamepad"                 # changed before the first reapply
-        assert Settings.load(s.path).controller_mode == "gamepad"   # and saved: the panel shows Gamepad
-        await wait(p.reapplier.apply_all())
-        modes = [a["mode"] for cmd, a in c.writes() if cmd == "set_controller_mode"]
-        assert modes and set(modes) == {"gamepad"}
-        assert p.controller_auto.running is False
-        # Within the session a chosen Desktop is reapplied (resume, AC change) as before.
-        assert (await wait(p.set_controller_mode("desktop")))["ok"] is True
-        n = len(c.writes())
-        assert await wait(p.reapplier.apply_all()) is True
-        modes = [a["mode"] for cmd, a in c.writes()[n:] if cmd == "set_controller_mode"]
-        assert modes == ["desktop"]
-        await wait(p._unload())
-        # "auto" and "gamepad" are left as stored
-        for mode in ("auto", "gamepad"):
-            p2, c2, s2 = plugin_with(tmp_path, controller_mode=mode, user_set=True)
-            p2._startup = asyncio.ensure_future(p2._startup_sequence())
-            await wait(p2._startup)
-            assert s2.controller_mode == mode
-            await wait(p2._unload())
-    run(go())
-
-
-def test_unload_writes_gamepad_first(tmp_path):
-    async def go():
-        p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True, controller_mode="auto")
-        controller_found(c)
-        p._startup = asyncio.ensure_future(p._startup_sequence())
-        await wait(p._startup)
-        await wait(p.reapplier.apply_all())
-        before = len(c.writes())
-        await wait(p._unload())
-        after = c.writes()[before:]
-        assert after[0] == ("set_controller_mode", {"mode": "gamepad"})
-        assert after[1] == ("set_mode", {"mode": "silent", "spl": 13, "sppt": 13, "fppt": 13})   # then Auto TDP
-        assert c.stopped and p.reapplier._task is None
-    run(go())
-
-
 def test_unload_goes_on_when_a_step_fails(tmp_path):
     async def go():
         p, c, s = plugin_with(tmp_path, mode="silent", auto_tdp=True, user_set=True)
         p._startup = asyncio.ensure_future(p._startup_sequence())
         await wait(p._startup)
 
-        async def boom(_args):
-            raise RuntimeError("controller gone")
-        c.handlers["set_controller_mode"] = boom
+        async def boom():
+            raise RuntimeError("reapplier gone")
+        p.reapplier.stop = boom       # a failing step does not keep the later ones from running
         await wait(p._unload())
         assert c.writes()[-1] == ("set_mode", {"mode": "silent", "spl": 13, "sppt": 13, "fppt": 13})
-        assert c.stopped and p.reapplier._task is None
+        assert c.stopped
         assert p.auto_tdp_loop.status()["on"] is False
     run(go())
 
@@ -1238,29 +1036,23 @@ def test_state_reports_new_controls(tmp_path, monkeypatch):
         st = await main.Plugin().get_state()
         assert st["cpu_boost"] == {"on": False, "supported": False}
         assert st["power_mode"] == {"value": "other", "supported": False}
-        assert st["controller"] == {"mode": "gamepad", "found": False}
-        assert st["grip_vibration"] is True
-        assert st["touchscreen"] == {"found": False, "enabled": False}
+        for gone in ("controller", "touchscreen", "grip_vibration"):
+            assert gone not in st, gone
         assert st["auto_sr"] == {"installed": False, "on": None}
 
-        p, c, s = plugin_with(tmp_path, controller_mode="auto", grip_vibration=False)
-        controller_found(c)
+        p, c, s = plugin_with(tmp_path)
         c.handlers["get_cpu_boost"] = reply(ok({"ac": 2, "dc": 2}))
         c.handlers["get_power_mode"] = reply(ok({"overlay": "x", "mode": "eco"}))
-        c.handlers["get_touchscreen"] = reply(ok({"found": True, "enabled": True, "instanceId": "x"}))
         c.handlers["get_auto_sr"] = reply(ok({"installed": True, "value": 1028}))
         st = await wait(p.get_state())
         assert st["cpu_boost"] == {"on": True, "supported": True}
         assert st["power_mode"] == {"value": "eco", "supported": True}
-        assert st["controller"] == {"mode": "auto", "found": True}
-        assert st["grip_vibration"] is False
-        assert st["touchscreen"] == {"found": True, "enabled": True}
         assert st["auto_sr"] == {"installed": True, "on": True}
         # while an Armoury switch runs nothing is asked: the last reading is shown
         p.armoury._busy = True
         n = len(c.calls)
         st2 = await wait(p.get_state())
-        assert len(c.calls) == n and st2["cpu_boost"] == st["cpu_boost"] and st2["controller"]["found"] is True
+        assert len(c.calls) == n and st2["cpu_boost"] == st["cpu_boost"]
     run(go())
 
 
@@ -1402,3 +1194,18 @@ def test_late_move_runs_the_load_check(tmp_path):
 
 ORIGINAL_TYPES = {"ArmouryCrateService": "Automatic", "LightingService": "Automatic"}
 
+
+
+def test_moved_commands_are_gone(tmp_path):
+    p, c, s = plugin_with(tmp_path)
+    for name in ("set_controller_mode", "set_grip_vibration", "set_touchscreen"):
+        assert not hasattr(p, name), name
+    assert not hasattr(p, "controller_auto")
+
+
+def test_state_has_no_controller_keys(tmp_path):
+    async def go():
+        p, c, s = plugin_with(tmp_path)
+        return await wait(p.get_state()), await main.Plugin().get_state()
+    for st in run(go()):
+        assert "controller" not in st and "touchscreen" not in st

@@ -1,4 +1,4 @@
-"""Overdrive's reapply: what is put back on the device (mode, fans, FPS limit, controller) and the fan curve rules.
+"""Overdrive's reapply: what is put back on the device (mode, fans, FPS limit) and the fan curve rules.
 
 The loop itself (polling for resume and AC changes, the shared lock and generation, retries) is ReapplierCore in
 reapply_core.py, which Traction shares.
@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Callable, Optional
 
-from .controls import apply_controller, transport_failure
+from .controls import transport_failure
 from .reapply_core import (POLL, RESUME_GAP, TRANSPORT_RETRIES, Dropped, ReapplierCore, _StepClient,  # noqa: F401
                            ac_online_win32)
 from .settings import CURVE_MODES, FANS, MODE_POWER, Settings, curve_mode, preset_curve
@@ -102,10 +102,12 @@ def mode_write(mode: str, manual_power=None) -> dict:
 
 
 class Reapplier(ReapplierCore):
-    """Overdrive's reapply: the performance mode, both fans, the FPS limit and the controller, in that order. The
+    """Overdrive's reapply: the performance mode, both fans, and the FPS limit, in that order. The
     loop, the lock and the triggers are ReapplierCore's (reapply_core.py, shared with Traction)."""
 
     SKIP_MESSAGE = "Reapply skipped: no Overdrive settings chosen yet"
+    DEFER_MESSAGE = "Reapply deferred while Armoury Crate services are being switched"
+    LOGGER_NAME = "overdrive"
 
     def __init__(self, client, settings: Settings, clock=time, power_source: Optional[Callable] = None,
                  poll: float = POLL, logger: Optional[logging.Logger] = None, record=None):
@@ -178,14 +180,4 @@ class Reapplier(ReapplierCore):
             transport |= transport_failure(r)
             if not r.get("ok"):
                 problems.append(r.get("message") or "The FPS limit was not applied.")
-        # The controller forgets its mode and vibration on sleep; no controller found means nothing to write.
-        info = await self._step(gen, "controller_info", {})
-        transport |= transport_failure(info)
-        data = info.get("data") if info.get("ok") else None
-        if isinstance(data, dict) and data.get("found"):
-            step_client = _StepClient(self, gen)
-            r = await apply_controller(step_client, s)
-            transport |= step_client.transport
-            if not r.get("ok"):
-                problems.append(r.get("message") or "The controller settings were not applied.")
         return problems, transport, mode_ok

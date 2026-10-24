@@ -1,0 +1,17 @@
+helper/src/ProtocolKit.cs
+helper/src/ArmouryCommands.cs
+helper/src/AsusHid.cs
+helper/src/ArmouryServices.cs
+helper/src/ServiceHardware.cs
+helper/src/SystemControls.cs
+helper/src/Validation.cs
+helper/src/AdlHardware.cs
+helper/src/SharedHardware.cs
+helper/src/ghelper/AmdAdl2.cs
+helper/src/ghelper/AmdGpuControl.cs
+py_modules/overdrive/helper_client.py
+py_modules/overdrive/device.py
+py_modules/overdrive/reapply_core.py
+py_modules/overdrive/settings_file.py
+py_modules/overdrive/armoury_record.py
+py_modules/overdrive/armoury_switch.py

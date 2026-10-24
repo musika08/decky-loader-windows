@@ -64,7 +64,7 @@ namespace Ally.Shared
             {
                 if (!(kv.Value is string)) return ProtocolKit.Reply(id, false, "Refused: start type for '" + kv.Key + "' must be a string.", null);
                 if (!ArmouryServices.IsListed(kv.Key))
-                    return ProtocolKit.Reply(id, false, "Refused: '" + kv.Key + "' is not one of the Armoury Crate services Overdrive manages.", null);
+                    return ProtocolKit.Reply(id, false, "Refused: '" + kv.Key + "' is not one of the Armoury Crate services this plugin manages.", null);
                 if (!ArmouryServices.IsStartType((string)kv.Value))
                     return ProtocolKit.Reply(id, false, "Refused: start type for '" + kv.Key + "' must be one of "
                         + string.Join(", ", ArmouryServices.StartTypeNames) + ".", null);
@@ -78,7 +78,7 @@ namespace Ally.Shared
                 string name = o as string;
                 if (name == null) return ProtocolKit.Reply(id, false, "Refused: 'running' must contain only service names.", null);
                 if (!ArmouryServices.IsListed(name))
-                    return ProtocolKit.Reply(id, false, "Refused: '" + name + "' is not one of the Armoury Crate services Overdrive manages.", null);
+                    return ProtocolKit.Reply(id, false, "Refused: '" + name + "' is not one of the Armoury Crate services this plugin manages.", null);
                 if (!recorded.ContainsKey(name))
                     return ProtocolKit.Reply(id, false, "Refused: running service '" + name + "' has no recorded start type.", null);
                 toStart.Add(name);

@@ -110,7 +110,7 @@ namespace Ally.Shared
         private static void Check(string name, string startType)
         {
             if (!ArmouryServices.IsListed(name))
-                throw new ArgumentException("Refused: '" + name + "' is not one of the Armoury Crate services Overdrive manages.");
+                throw new ArgumentException("Refused: '" + name + "' is not one of the Armoury Crate services this plugin manages.");
             if (!ArmouryServices.IsStartType(startType))
                 throw new ArgumentException("Refused: start type '" + startType + "' is not one of " + string.Join(", ", ArmouryServices.StartTypeNames) + ".");
         }

@@ -19,18 +19,10 @@ import {
   CURVE_POINTS,
   AUTO_SR_DESCRIPTION,
   AUTO_SR_UNSET,
-  TOUCH_POLL_MS,
-  TOUCH_TIMEOUT_TEXT,
-  touchscreenCheck,
   AUTO_TDP_UNSUPPORTED,
-  CONTROLLER_NOT_FOUND,
   CPU_BOOST_DESCRIPTION,
-  ControllerMode,
-  GRIP_VIBRATION_DESCRIPTION,
   POWER_MODE_DESCRIPTION,
   PowerMode,
-  TOUCHSCREEN_DESCRIPTION,
-  controllerModeDescription,
   powerModeLabel,
   CURVE_SPEED_MAX,
   CURVE_TEMP_MAX,
@@ -114,9 +106,6 @@ type State = {
   auto_tdp?: { on: boolean; supported: boolean };
   cpu_boost?: { on: boolean; supported: boolean };
   power_mode?: { value: PowerMode; supported: boolean };
-  controller?: { mode: ControllerMode; found: boolean };
-  grip_vibration?: boolean;
-  touchscreen?: { found: boolean; enabled: boolean };
   auto_sr?: { installed: boolean; on: boolean | null }; // on null = "Set in Windows"
   user_set?: boolean;
   power_set?: boolean;
@@ -149,9 +138,6 @@ const resetDefaults = callable<[], Result>('reset_defaults');
 const setAutoTdp = callable<[boolean], Result>('set_auto_tdp');
 const setCpuBoost = callable<[boolean], Result>('set_cpu_boost');
 const setPowerMode = callable<[PowerMode], Result>('set_power_mode');
-const setControllerMode = callable<[ControllerMode], Result>('set_controller_mode');
-const setGripVibration = callable<[boolean], Result>('set_grip_vibration');
-const setTouchscreen = callable<[boolean], Result>('set_touchscreen');
 const setAutoSr = callable<[boolean], Result>('set_auto_sr');
 const setArmouryReplaced = callable<[boolean], Result>('set_armoury_replaced');
 
@@ -923,39 +909,6 @@ function Content() {
     if (mounted.current) setToggleTarget((t) => ({ ...t, [key]: undefined }));
   };
 
-  // The helper answers at once; the device changes a little later. Keep the toggle on its target and re-read the state
-  // every 1.5 s (up to 15 s) until the device agrees. Stops when the panel unmounts.
-  const toggleTouchscreen = async () => {
-    const on = !state.touchscreen?.enabled;
-    setToggleTarget((t) => ({ ...t, touch: on }));
-    setWorking(true);
-    const r = await safeCall(() => setTouchscreen(on));
-    if (r.ok) {
-      const start = Date.now();
-      let verdict: 'done' | 'wait' | 'timeout' = 'wait';
-      while (mounted.current && verdict === 'wait') {
-        await new Promise((res) => setTimeout(res, TOUCH_POLL_MS));
-        if (!mounted.current) return;
-        try {
-          const st = await getState();
-          if (!mounted.current) return;
-          setState(st);
-          verdict = touchscreenCheck(st.touchscreen?.enabled, on, Date.now() - start);
-        } catch {
-          verdict = touchscreenCheck(undefined, on, Date.now() - start);
-        }
-      }
-      if (!mounted.current) return;
-      setStatus('touch', verdict === 'done' ? r : { ok: false, message: TOUCH_TIMEOUT_TEXT });
-    } else {
-      await refresh();
-      if (!mounted.current) return;
-      setStatus('touch', r);
-    }
-    setToggleTarget((t) => ({ ...t, touch: undefined }));
-    setWorking(false);
-  };
-
   const toggleArmoury = () => {
     if (armouryPending) return;
     // The target is always the opposite of the stored value, whatever the toggle reported.
@@ -980,13 +933,6 @@ function Content() {
     { data: 'balanced', label: powerModeLabel('balanced') },
     { data: 'best', label: powerModeLabel('best') },
   ];
-  const controllerOptions: { data: ControllerMode; label: string }[] = [
-    { data: 'gamepad', label: 'Gamepad' },
-    { data: 'desktop', label: 'Desktop' },
-    { data: 'auto', label: 'Auto' },
-  ];
-  const controllerFound = !!state.controller?.found;
-  const touch = state.touchscreen;
   const autoSr = state.auto_sr;
   const fpsOptions = FPS_STEPS.map((f) => ({ data: f, label: f === 0 ? 'Off' : `${f} FPS` }));
 
@@ -1245,50 +1191,6 @@ function Content() {
           </>
         )}
         <StatusRow status={statuses.curve} />
-      </PanelSection>
-
-      <PanelSection title="Controller & screen">
-        {controllerFound ? (
-          <>
-            <PanelSectionRow>
-              <InlinePicker
-                label="Controller mode"
-                options={controllerOptions}
-                value={state.controller?.mode ?? 'gamepad'}
-                disabled={disabled}
-                onChange={(v) => run('controller', () => setControllerMode(v))}
-              />
-            </PanelSectionRow>
-            <Note text={controllerModeDescription(state.controller?.mode)} />
-            <StatusRow status={statuses.controller} />
-            <PanelSectionRow>
-              <ToggleField
-                label="Grip vibration"
-                description={GRIP_VIBRATION_DESCRIPTION}
-                checked={toggleTarget.grip ?? !!state.grip_vibration}
-                disabled={disabled}
-                onChange={() => toggleSetting('grip', !!state.grip_vibration, setGripVibration)}
-              />
-            </PanelSectionRow>
-            <StatusRow status={statuses.grip} />
-          </>
-        ) : (
-          <Note text={CONTROLLER_NOT_FOUND} />
-        )}
-        {touch?.found && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Touchscreen"
-                description={TOUCHSCREEN_DESCRIPTION}
-                checked={toggleTarget.touch ?? touch.enabled}
-                disabled={disabled}
-                onChange={toggleTouchscreen}
-              />
-            </PanelSectionRow>
-            <StatusRow status={statuses.touch} />
-          </>
-        )}
       </PanelSection>
 
       <PanelSection title="Reset">

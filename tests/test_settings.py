@@ -214,7 +214,7 @@ def _full_settings():
             "fan_curve_gpu": {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]},
             "default_curve_gpu": {"balanced": dict(GPU_LOW)}, "armoury_replaced": True,
             "armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"], "auto_tdp": True,
-            "controller_mode": "auto", "grip_vibration": False, "cpu_boost_on_value": 4, "user_set": True}
+            "cpu_boost_on_value": 4, "user_set": True}
 
 
 def test_bom_prefixed_file_loads_every_field(tmp_path):
@@ -452,28 +452,28 @@ def test_recommended_plan_for_both_fans_needs_no_device_curve(tmp_path):
 def test_settings_new_fields_defaults_and_bad_values(tmp_path):
     p = tmp_path / "overdrive.json"
     s = Settings.load(str(p))
-    assert (s.controller_mode, s.grip_vibration, s.cpu_boost_on_value) == ("gamepad", True, 2)
-    for mode in ("gamepad", "desktop", "auto"):
-        p.write_text(json.dumps({"controller_mode": mode}), encoding="utf-8")
-        assert Settings.load(str(p)).controller_mode == mode
-    for bad in ("Desktop", "mouse", 1, None, ["auto"]):
-        p.write_text(json.dumps({"controller_mode": bad}), encoding="utf-8")
-        assert Settings.load(str(p)).controller_mode == "gamepad"
-    for bad in ("no", 0, 1, None):
-        p.write_text(json.dumps({"grip_vibration": bad}), encoding="utf-8")
-        assert Settings.load(str(p)).grip_vibration is True
-    p.write_text(json.dumps({"grip_vibration": False}), encoding="utf-8")
-    assert Settings.load(str(p)).grip_vibration is False
+    assert s.cpu_boost_on_value == 2
     for good in range(1, 7):
         p.write_text(json.dumps({"cpu_boost_on_value": good}), encoding="utf-8")
         assert Settings.load(str(p)).cpu_boost_on_value == good
     for bad in (0, 7, -1, "3", 3.0, True, None):
         p.write_text(json.dumps({"cpu_boost_on_value": bad}), encoding="utf-8")
         assert Settings.load(str(p)).cpu_boost_on_value == 2
-    s.controller_mode, s.grip_vibration, s.cpu_boost_on_value = "auto", False, 5
+    s.cpu_boost_on_value = 5
     s.save()
-    again = Settings.load(str(p))
-    assert (again.controller_mode, again.grip_vibration, again.cpu_boost_on_value) == ("auto", False, 5)
+    assert Settings.load(str(p)).cpu_boost_on_value == 5
+
+
+def test_settings_from_0_1_0_with_controller_keys_still_load(tmp_path):
+    # Overdrive 0.1.0 wrote controller_mode and grip_vibration; they moved to Traction. The keys are ignored.
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"mode": "turbo", "fps": 60, "controller_mode": "auto", "grip_vibration": False,
+                             "cpu_boost_on_value": 4, "user_set": True}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert (s.mode, s.fps, s.cpu_boost_on_value, s.user_set) == ("turbo", 60, 4, True)
+    assert not hasattr(s, "controller_mode") and not hasattr(s, "grip_vibration")
+    s.save()
+    assert "controller_mode" not in json.loads(p.read_text(encoding="utf-8"))
 
 
 # ---------- the move to the shared Armoury Crate record ----------

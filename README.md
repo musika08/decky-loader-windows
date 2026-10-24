@@ -16,6 +16,8 @@ The panel checks that the PC is an ROG Ally (BIOS `SystemProductName` contains `
 
 The battery charge limit is not part of Overdrive: it lives in the "Control Center" plugin.
 
+Since 0.2.0 the controller mode, grip vibration and touchscreen switch are no longer in Overdrive: they moved to the Traction plugin (controller, screen and touch). A settings file written by 0.1.0 still loads; its controller and vibration entries are ignored.
+
 ## Build
 
 ```
@@ -47,5 +49,5 @@ None of the tests touch hardware, services or the registry:
 ```
 powershell -NoProfile -ExecutionPolicy Bypass -File helper\build.ps1 -Tests
 python -m pytest -q tests
-node --test tests/frontend/curve.test.mjs
+node --test tests/frontend/*.test.mjs
 ```

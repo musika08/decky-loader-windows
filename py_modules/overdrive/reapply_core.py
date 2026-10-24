@@ -68,6 +68,8 @@ class _StepClient:
 
 class ReapplierCore:
     SKIP_MESSAGE = "Reapply skipped: no settings chosen yet"
+    DEFER_MESSAGE = "Reapply deferred while Armoury Crate services are being switched"
+    LOGGER_NAME = "reapply"   # the logger used when none is given; a plugin overrides it
 
     def __init__(self, client, clock=time, power_source: Optional[Callable] = None, logger: Optional[logging.Logger] = None,
                  poll: float = POLL, record=None):
@@ -77,7 +79,7 @@ class ReapplierCore:
         self.clock = clock
         self.power_source = power_source or ac_online_win32
         self.poll = poll
-        self.log = logger or logging.getLogger("overdrive")
+        self.log = logger or logging.getLogger(self.LOGGER_NAME)
         self.generation = 0
         self.lock = asyncio.Lock()
         self.rerun = False
@@ -133,7 +135,7 @@ class ReapplierCore:
         self.rerun = True
         if not self._deferring:
             self._deferring = True
-            self.log.info("Reapply deferred while Armoury Crate services are being switched")
+            self.log.info(self.DEFER_MESSAGE)
 
     async def _step(self, gen: int, cmd: str, args: dict) -> dict:
         async with self.lock:
