@@ -1008,6 +1008,48 @@ function Content() {
         ))}
       </PanelSection>
 
+      <PanelSection title="Quick toggles">
+        {(state.armoury.installed || state.armoury.replaced) && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Use Overdrive instead of Armoury Crate"
+              description="Stops the Armoury Crate services so they do not undo these settings. Turning it off restores them."
+              // Steam's toggle flips itself on every press, so it is fed what it should show: the target while
+              // switching, else the stored state. A failed switch changes the value back and the toggle follows.
+              checked={busy ? !state.armoury.replaced : state.armoury.replaced}
+              disabled={working || busy || !!unavailable}
+              onChange={toggleArmoury}
+            />
+          </PanelSectionRow>
+        )}
+        <StatusRow status={statuses.armoury} />
+        <PanelSectionRow>
+          <ToggleField
+            label="CPU Boost"
+            description={CPU_BOOST_DESCRIPTION}
+            checked={toggleTarget.cpuboost ?? !!state.cpu_boost?.on}
+            disabled={disabled || state.cpu_boost?.supported === false}
+            onChange={() => toggleSetting('cpuboost', !!state.cpu_boost?.on, setCpuBoost)}
+          />
+        </PanelSectionRow>
+        <StatusRow status={statuses.cpuboost} />
+        {autoSr?.installed && (
+          <>
+            <PanelSectionRow>
+              <ToggleField
+                label="Auto SR"
+                description={AUTO_SR_DESCRIPTION}
+                checked={toggleTarget.autosr ?? autoSr.on === true}
+                disabled={disabled}
+                onChange={() => toggleSetting('autosr', autoSr.on === true, setAutoSr)}
+              />
+            </PanelSectionRow>
+            {autoSr.on === null && <Note text={AUTO_SR_UNSET} />}
+            <StatusRow status={statuses.autosr} />
+          </>
+        )}
+      </PanelSection>
+
       <PanelSection title="Performance">
         <PanelSectionRow>
           <Field label="Mode" childrenLayout="below" padding="compact">
@@ -1062,6 +1104,22 @@ function Content() {
             <StatusRow status={statuses.power} />
           </>
         )}
+        {state.power_mode?.supported !== false && (
+          <>
+            <PanelSectionRow>
+              <InlinePicker
+                label="Battery performance"
+                options={powerOptions}
+                value={state.power_mode?.value ?? 'other'}
+                unknownText={powerModeLabel('other')}
+                disabled={disabled}
+                onChange={(v) => run('powermode', () => setPowerMode(v))}
+              />
+            </PanelSectionRow>
+            <Note text={POWER_MODE_DESCRIPTION} />
+            <StatusRow status={statuses.powermode} />
+          </>
+        )}
         <PanelSectionRow>
           <InlinePicker
             label="FPS limit"
@@ -1085,91 +1143,6 @@ function Content() {
         {!state.auto_tdp?.supported && <Note text={AUTO_TDP_UNSUPPORTED} />}
         {state.auto_tdp?.on && autoLine && <Note text={autoLine} />}
         <StatusRow status={statuses.autotdp} />
-        <PanelSectionRow>
-          <ToggleField
-            label="CPU Boost"
-            description={CPU_BOOST_DESCRIPTION}
-            checked={toggleTarget.cpuboost ?? !!state.cpu_boost?.on}
-            disabled={disabled || state.cpu_boost?.supported === false}
-            onChange={() => toggleSetting('cpuboost', !!state.cpu_boost?.on, setCpuBoost)}
-          />
-        </PanelSectionRow>
-        <StatusRow status={statuses.cpuboost} />
-        {state.power_mode?.supported !== false && (
-          <>
-            <PanelSectionRow>
-              <InlinePicker
-                label="Battery performance"
-                options={powerOptions}
-                value={state.power_mode?.value ?? 'other'}
-                unknownText={powerModeLabel('other')}
-                disabled={disabled}
-                onChange={(v) => run('powermode', () => setPowerMode(v))}
-              />
-            </PanelSectionRow>
-            <Note text={POWER_MODE_DESCRIPTION} />
-            <StatusRow status={statuses.powermode} />
-          </>
-        )}
-      </PanelSection>
-
-      <PanelSection title="Controller & screen">
-        {controllerFound ? (
-          <>
-            <PanelSectionRow>
-              <InlinePicker
-                label="Controller mode"
-                options={controllerOptions}
-                value={state.controller?.mode ?? 'gamepad'}
-                disabled={disabled}
-                onChange={(v) => run('controller', () => setControllerMode(v))}
-              />
-            </PanelSectionRow>
-            <Note text={controllerModeDescription(state.controller?.mode)} />
-            <StatusRow status={statuses.controller} />
-            <PanelSectionRow>
-              <ToggleField
-                label="Grip vibration"
-                description={GRIP_VIBRATION_DESCRIPTION}
-                checked={toggleTarget.grip ?? !!state.grip_vibration}
-                disabled={disabled}
-                onChange={() => toggleSetting('grip', !!state.grip_vibration, setGripVibration)}
-              />
-            </PanelSectionRow>
-            <StatusRow status={statuses.grip} />
-          </>
-        ) : (
-          <Note text={CONTROLLER_NOT_FOUND} />
-        )}
-        {touch?.found && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Touchscreen"
-                description={TOUCHSCREEN_DESCRIPTION}
-                checked={toggleTarget.touch ?? touch.enabled}
-                disabled={disabled}
-                onChange={toggleTouchscreen}
-              />
-            </PanelSectionRow>
-            <StatusRow status={statuses.touch} />
-          </>
-        )}
-        {autoSr?.installed && (
-          <>
-            <PanelSectionRow>
-              <ToggleField
-                label="Auto SR"
-                description={AUTO_SR_DESCRIPTION}
-                checked={toggleTarget.autosr ?? autoSr.on === true}
-                disabled={disabled}
-                onChange={() => toggleSetting('autosr', autoSr.on === true, setAutoSr)}
-              />
-            </PanelSectionRow>
-            {autoSr.on === null && <Note text={AUTO_SR_UNSET} />}
-            <StatusRow status={statuses.autosr} />
-          </>
-        )}
       </PanelSection>
 
       <PanelSection title="Fans">
@@ -1273,21 +1246,51 @@ function Content() {
         <StatusRow status={statuses.curve} />
       </PanelSection>
 
-      <PanelSection title="Armoury Crate">
-        {(state.armoury.installed || state.armoury.replaced) && (
-          <PanelSectionRow>
-            <ToggleField
-              label="Use Overdrive instead of Armoury Crate"
-              description="Stops the Armoury Crate services so they do not undo these settings. Turning it off restores them."
-              // Steam's toggle flips itself on every press, so it is fed what it should show: the target while
-              // switching, else the stored state. A failed switch changes the value back and the toggle follows.
-              checked={busy ? !state.armoury.replaced : state.armoury.replaced}
-              disabled={working || busy || !!unavailable}
-              onChange={toggleArmoury}
-            />
-          </PanelSectionRow>
+      <PanelSection title="Controller & screen">
+        {controllerFound ? (
+          <>
+            <PanelSectionRow>
+              <InlinePicker
+                label="Controller mode"
+                options={controllerOptions}
+                value={state.controller?.mode ?? 'gamepad'}
+                disabled={disabled}
+                onChange={(v) => run('controller', () => setControllerMode(v))}
+              />
+            </PanelSectionRow>
+            <Note text={controllerModeDescription(state.controller?.mode)} />
+            <StatusRow status={statuses.controller} />
+            <PanelSectionRow>
+              <ToggleField
+                label="Grip vibration"
+                description={GRIP_VIBRATION_DESCRIPTION}
+                checked={toggleTarget.grip ?? !!state.grip_vibration}
+                disabled={disabled}
+                onChange={() => toggleSetting('grip', !!state.grip_vibration, setGripVibration)}
+              />
+            </PanelSectionRow>
+            <StatusRow status={statuses.grip} />
+          </>
+        ) : (
+          <Note text={CONTROLLER_NOT_FOUND} />
         )}
-        <StatusRow status={statuses.armoury} />
+        {touch?.found && (
+          <>
+            <PanelSectionRow>
+              <ToggleField
+                label="Touchscreen"
+                description={TOUCHSCREEN_DESCRIPTION}
+                checked={toggleTarget.touch ?? touch.enabled}
+                disabled={disabled}
+                onChange={toggleTouchscreen}
+              />
+            </PanelSectionRow>
+            <StatusRow status={statuses.touch} />
+          </>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Reset">
         <PanelSectionRow>
           <ButtonItem
             layout="below"
