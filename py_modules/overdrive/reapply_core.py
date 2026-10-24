@@ -10,6 +10,10 @@ always lands last. A dropped reapply is redone (with the then-current settings) 
 while an armoury_* call is in flight (client.busy). The resume baseline is taken again after each reapply, so a slow
 reapply is never mistaken for sleep.
 
+With a shared Armoury Crate record (`record`, an armoury_record.ArmouryRecord), every poll also looks at it (a stat,
+read again only when it changed): when it flips from not replaced to replaced (this plugin or the other one stopped
+Armoury Crate), the settings are reapplied ("Armoury switched").
+
 A plugin subclasses ReapplierCore and supplies `_apply_steps` (the device writes, each through `_step`) and, if it
 needs to, `_should_apply`, `_before_apply`, `_is_transport_failure` and extra reasons in `_triggers`.
 """
@@ -66,8 +70,10 @@ class ReapplierCore:
     SKIP_MESSAGE = "Reapply skipped: no settings chosen yet"
 
     def __init__(self, client, clock=time, power_source: Optional[Callable] = None, logger: Optional[logging.Logger] = None,
-                 poll: float = POLL):
+                 poll: float = POLL, record=None):
         self.client = client
+        self.record = record       # the shared Armoury Crate record (armoury_record.ArmouryRecord), or None
+        self._replaced: Optional[bool] = None   # record.replaced at the last poll
         self.clock = clock
         self.power_source = power_source or ac_online_win32
         self.poll = poll
@@ -196,6 +202,18 @@ class ReapplierCore:
         ac = self.power_source()
         if ac is not None:
             self._ac = ac
+        self._replaced = self._record_replaced()
+
+    def _record_replaced(self) -> Optional[bool]:
+        """record.replaced now (read again only when the file changed), None without a record or when unreadable."""
+        if self.record is None:
+            return None
+        try:
+            self.record.refresh()
+        except Exception as e:
+            self.log.warning(f"Could not read the Armoury Crate record: {e}")
+            return self._replaced
+        return bool(self.record.replaced)
 
     def _triggers(self) -> "list[str]":
         """The reasons to reapply now (resume, AC change). A subclass extends it: `reasons = super()._triggers()`,
@@ -212,6 +230,12 @@ class ReapplierCore:
             if self._ac is not None and ac != self._ac:
                 reasons.append("AC on" if ac else "AC off")
             self._ac = ac
+        replaced = self._record_replaced()
+        if replaced and self._replaced is False:
+            reasons.append("Armoury switched")
+            self.rerun = True   # kept when the reapply is deferred or dropped
+        if replaced is not None:
+            self._replaced = replaced
         return reasons
 
     async def tick(self) -> bool:

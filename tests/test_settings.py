@@ -50,7 +50,8 @@ def test_settings_roundtrip(tmp_path):
     assert again.to_dict() == s.to_dict()
     with open(p, encoding="utf-8") as f:
         on_disk = json.load(f)
-    assert on_disk["armoury_replaced"] is True
+    # the Armoury Crate record is in the record shared with Traction now: a fresh file never holds it
+    assert not any(k.startswith("armoury_") for k in on_disk)
     assert on_disk["fan_curve_gpu"] == s.fan_curve_gpu and on_disk["default_curve_gpu"]["turbo"] == GPU_LOW
     with open(p + ".bak", encoding="utf-8") as f:
         assert json.load(f) == on_disk   # the .bak carries the GPU fields too
@@ -305,9 +306,11 @@ def test_unreadable_link_is_not_copied(tmp_path, monkeypatch):
 
 def test_armoury_record_recovered_from_bak(tmp_path):
     p = tmp_path / "overdrive.json"
+    # an Overdrive 0.1 file, the record not moved to the shared one yet (switch off: provisional)
+    p.write_text(json.dumps({"armoury_recorded": dict(RECORD), "armoury_running": ["ArmouryCrateSEService"]}),
+                 encoding="utf-8")
     s = Settings.load(str(p))
     s.mode, s.fps = "turbo", 60
-    s.armoury_recorded, s.armoury_running = dict(RECORD), ["ArmouryCrateSEService"]   # switch off: provisional
     s.save()
     p.write_bytes(b"\xff\xfe garbage")
     again = Settings.load(str(p), now=NOW)
@@ -372,8 +375,8 @@ def test_custom_preset_kept_with_only_a_gpu_curve(tmp_path):
 def test_unreadable_file_keeps_gpu_defaults_out_of_recovery(tmp_path):
     """Recovery only takes the Armoury record from the .bak; the GPU fields start fresh like the CPU ones."""
     p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"armoury_recorded": dict(RECORD)}), encoding="utf-8")   # not moved yet
     s = Settings.load(str(p))
-    s.armoury_recorded = dict(RECORD)
     s.fan_curve_gpu = {"temps": [35, 45, 55, 65, 75, 85, 95, 105], "speeds": [5, 15, 25, 35, 45, 55, 65, 75]}
     s.default_curve_gpu = {"balanced": GPU_LOW}
     s.save()
@@ -471,3 +474,34 @@ def test_settings_new_fields_defaults_and_bad_values(tmp_path):
     s.save()
     again = Settings.load(str(p))
     assert (again.controller_mode, again.grip_vibration, again.cpu_boost_on_value) == ("auto", False, 5)
+
+
+# ---------- the move to the shared Armoury Crate record ----------
+
+def test_old_armoury_fields_are_kept_until_moved(tmp_path):
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"mode": "turbo", "armoury_replaced": True, "armoury_recorded": dict(RECORD),
+                             "armoury_running": ["ArmouryCrateSEService"]}), encoding="utf-8")
+    s = Settings.load(str(p))
+    assert s.holds_armoury()
+    s.fps = 60
+    s.save()                                    # not moved yet: written back unchanged
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert (on_disk["armoury_replaced"], on_disk["armoury_recorded"]) == (True, RECORD)
+    s.armoury_migrated()
+    s.save()
+    on_disk = json.loads(p.read_text(encoding="utf-8"))
+    assert not any(k.startswith("armoury_") for k in on_disk) and on_disk["fps"] == 60
+    again = Settings.load(str(p))
+    assert not again.holds_armoury() and again.to_dict() == s.to_dict()
+
+
+def test_empty_old_armoury_fields_are_dropped(tmp_path):
+    p = tmp_path / "overdrive.json"
+    p.write_text(json.dumps({"armoury_replaced": False, "armoury_recorded": {}, "armoury_running": []}),
+                 encoding="utf-8")
+    s = Settings.load(str(p))
+    assert not s.holds_armoury()
+    s.save()
+    assert not any(k.startswith("armoury_") for k in json.loads(p.read_text(encoding="utf-8")))
+

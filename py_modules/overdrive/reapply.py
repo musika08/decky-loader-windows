@@ -108,8 +108,8 @@ class Reapplier(ReapplierCore):
     SKIP_MESSAGE = "Reapply skipped: no Overdrive settings chosen yet"
 
     def __init__(self, client, settings: Settings, clock=time, power_source: Optional[Callable] = None,
-                 poll: float = POLL, logger: Optional[logging.Logger] = None):
-        super().__init__(client, clock=clock, power_source=power_source, logger=logger, poll=poll)
+                 poll: float = POLL, logger: Optional[logging.Logger] = None, record=None):
+        super().__init__(client, clock=clock, power_source=power_source, logger=logger, poll=poll, record=record)
         self.settings = settings
         self.fan_note = ""
 

@@ -5,9 +5,12 @@ Every field is checked on load on its own: a missing, wrong-typed or unknown val
 
 The file handling (BOM-tolerant read, atomic save with a .bak, the copy kept of an unreadable file) is in
 settings_file.py. A file that exists but cannot be read or parsed is never overwritten silently: a copy is kept as
-overdrive.json.unreadable-<UTC time> first, and the Armoury Crate record (which services to put back) is
-recovered from the newest readable overdrive.json.bak or earlier unreadable copy, so a fallback to defaults can
-never leave stopped services with no record to restore them from.
+overdrive.json.unreadable-<UTC time> first.
+
+The Armoury Crate record lives in the record shared with Traction (armoury_record.py). Files from before that still
+hold armoury_replaced/recorded/running: they are read (recovered from the newest readable overdrive.json.bak or earlier
+unreadable copy when the file is unusable) so main.py can move them into the shared record, and they are written back
+unchanged until main.py says they were moved (armoury_migrated), so a failed move never loses them.
 The curve rules mirror helper\\src\\Validation.cs (CheckCurve, MinSpeedAt) exactly, messages included.
 """
 import math
@@ -15,6 +18,7 @@ import os
 from typing import Optional
 
 from . import settings_file
+from .armoury_record import ARMOURY_SERVICES, START_TYPES  # noqa: F401  (the shared list; re-exported)
 from .settings_file import UNREADABLE_TAG
 
 MODES = ("silent", "balanced", "turbo", "manual")
@@ -34,16 +38,7 @@ QUIET_DELTA, COOL_DELTA = -10, 15
 # minimum (75 -> 6, 80 -> 12, 90 -> 24 %, all met). src/curve.ts RECOMMENDED_CURVE mirrors it.
 RECOMMENDED_CURVE = {"temps": [40, 50, 60, 65, 70, 75, 80, 90], "speeds": [10, 15, 25, 35, 45, 55, 70, 90]}
 
-# helper\src\ArmouryServices.cs (G-Helper AsusService.cs services + servicesAC). The helper refuses a restore that
-# names anything else, so a hand-edited name is dropped here instead of blocking the switch.
-ARMOURY_SERVICES = (
-    "ArmouryCrateControlInterface", "ArmouryCrateProArtService", "AsHidService", "ASUSOptimization",
-    "AsusAppService", "ASUSLinkNear", "ASUSLinkRemote", "ASUSSoftwareManager", "ASUSLiveUpdateAgent", "ASUSSwitch",
-    "ASUSSystemAnalysis", "ASUSSystemDiagnosis", "ASUSXGMobileService", "AsusCertService",
-    "ArmouryCrateSEService", "ArmouryCrateService", "LightingService",
-)
-START_TYPES = ("Automatic", "AutomaticDelayedStart", "Manual", "Disabled")
-# The record a fallback must never lose. With the switch off, a non-empty record is the provisional one.
+# The pre-shared-record fields: read for the move into the shared record, written only until it is done.
 ARMOURY_FIELDS = ("armoury_replaced", "armoury_recorded", "armoury_running")
 
 
@@ -166,10 +161,10 @@ class Settings:
         self._reset_note = ""               # why the file was reset (shown in get_state)
         self._recovered_note = ""           # where the Armoury record came back from
         self._unreadable_pending = False    # the unreadable file is still on disk with no copy kept yet
+        self._armoury_kept = False          # the file held an Armoury record not moved to the shared one yet
 
     FIELDS = ("mode", "spl", "sppt", "fppt", "fps", "fan_preset", "fan_curve", "default_curve",
-              "fan_curve_gpu", "default_curve_gpu",
-              "armoury_replaced", "armoury_recorded", "armoury_running", "auto_tdp",
+              "fan_curve_gpu", "default_curve_gpu", "auto_tdp",
               "controller_mode", "grip_vibration", "cpu_boost_on_value", "user_set")
 
     # Per-fan attribute names: (custom curve, default curves by mode).
@@ -197,15 +192,22 @@ class Settings:
         raw, note, pending = settings_file.read_or_keep(path, s._log, now)
         if raw is not None:
             s._take(raw)
-            return s
-        if not note and not pending:   # no file: the defaults
-            return s
-        # It exists but is unusable: a copy was kept (or tried) before anything can overwrite it; get the Armoury
-        # record back.
-        s._reset_note = note
-        s._unreadable_pending = pending
-        s._recover_armoury()
+        elif note or pending:
+            # It exists but is unusable: a copy was kept (or tried) before anything can overwrite it; get the Armoury
+            # record back.
+            s._reset_note = note
+            s._unreadable_pending = pending
+            s._recover_armoury()
+        s._armoury_kept = s.holds_armoury()
         return s
+
+    def holds_armoury(self) -> bool:
+        """The old fields hold an Armoury record (anything but the empty one)."""
+        return bool(self.armoury_replaced or self.armoury_recorded or self.armoury_running)
+
+    def armoury_migrated(self) -> None:
+        """The old Armoury fields are in the shared record now (or it already existed): stop writing them."""
+        self._armoury_kept = False
 
     @property
     def warning(self) -> str:
@@ -303,7 +305,10 @@ class Settings:
             self.user_set = raw["user_set"]
 
     def to_dict(self) -> dict:
-        return {k: getattr(self, k) for k in self.FIELDS}
+        d = {k: getattr(self, k) for k in self.FIELDS}
+        if self._armoury_kept:   # not moved to the shared record yet: never dropped
+            d.update({k: getattr(self, k) for k in ARMOURY_FIELDS})
+        return d
 
     def save(self) -> None:
         """Atomic: written next to the target, then renamed over it; then the same for <name>.bak.

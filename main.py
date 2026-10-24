@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import os
 import sys
 
@@ -12,22 +11,22 @@ if _PY_MODULES not in sys.path:
     sys.path.append(_PY_MODULES)
 
 from overdrive import controls, device  # noqa: E402
+from overdrive.armoury_record import RECORD_DIR, ArmouryLocked, ArmouryRecord  # noqa: E402
+from overdrive.armoury_switch import ArmourySwitch, migrate_from_settings  # noqa: E402
 from overdrive.auto_tdp_loop import AutoTdpLoop  # noqa: E402
 from overdrive.controller_auto import ControllerAuto  # noqa: E402
 from overdrive.helper_client import HelperClient  # noqa: E402
 from overdrive.reapply import (Reapplier, fan_args, fan_note, fan_plan, mode_args, mode_write,  # noqa: E402
                                rewrite_fans)
 from overdrive.cpu_usage import CpuUsage  # noqa: E402
-from overdrive.settings import (ALLOWED_FPS, ARMOURY_SERVICES, CONTROLLER_MODES, FANS, MODES, PRESETS,  # noqa: E402
-                                START_TYPES, Settings, check_curve, clamp_power, curve_mode, preset_curve)
+from overdrive.settings import (ALLOWED_FPS, CONTROLLER_MODES, FANS, MODES, PRESETS, Settings,  # noqa: E402
+                                check_curve, clamp_power, curve_mode, preset_curve)
 
 NOT_ALLY = "Overdrive supports the ROG Ally family only"
 BUSY = "Overdrive is switching Armoury Crate services. Try again when it finishes."
 AUTO_TDP_UNSUPPORTED = "Auto TDP needs the AMD driver's frame-rate reading, which this driver does not offer."
 # get_sensors().autoTdp when there is no loop (not an Ally)
 AUTO_TDP_IDLE = {"on": False, "watts": None, "fps": None, "best": None, "paused": "", "supported": False}
-ARMOURY_MIN_TIMEOUT = 300.0      # ruling P8: armoury_* calls get at least 5 minutes
-ARMOURY_PER_SERVICE = 60.0       # each service may wait 30 s, doubled when a rollback runs
 NO_CONTROLLER = "The controller was not found; the choice is saved and applied when it is back."
 # get_state's new controls when nothing was read (not an Ally, or nothing read yet while an Armoury switch runs)
 CONTROLS_UNREAD = {"cpu_boost": {"on": False, "supported": False}, "power_mode": {"value": "other", "supported": False},
@@ -37,6 +36,11 @@ CONTROLS_UNREAD = {"cpu_boost": {"on": False, "supported": False}, "power_mode":
 
 def settings_path() -> str:
     return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "overdrive.json")
+
+
+def record_dir() -> str:
+    """The Armoury Crate record shared with Traction."""
+    return RECORD_DIR
 
 
 def _fail(message: str) -> dict:
@@ -68,17 +72,16 @@ class Plugin:
         self.reapplier = None
         self.auto_tdp_loop = None
         self.controller_auto = None
+        self.armoury = None              # the Armoury Crate switch (its record is shared with Traction)
         self._controls = None            # the last read_controls reply (shown while an Armoury switch runs)
         self._startup = None
-        self._armoury_lock = asyncio.Lock()
-        self._armoury_installed = None
-        self._armoury_warning = ""
         self.cpu_usage = CpuUsage()      # CPU % between two sensor polls (None on the first)
-        self._armoury_busy = False       # an Armoury switch or the load-time re-stop is running
-        self._armoury_until = 0.0        # loop time by which that operation's helper call gives up
 
-    def _attach(self, client, settings, reapplier) -> None:
+    def _attach(self, client, settings, reapplier, record=None) -> None:
         self.client, self.settings, self.reapplier = client, settings, reapplier
+        if client is not None and record is not None:
+            self.armoury = ArmourySwitch(client, record, "Overdrive", logger=decky.logger,
+                                         on_replaced=self._armoury_replaced)
         if reapplier is not None:
             reapplier.busy_check = self._busy
             if client is not None:
@@ -89,7 +92,7 @@ class Plugin:
                 self.controller_auto = ControllerAuto(client, reapplier, self.auto_tdp_loop, logger=decky.logger)
 
     def _busy(self) -> bool:
-        return self._armoury_busy or bool(getattr(self.client, "busy", False))
+        return bool(self.armoury is not None and self.armoury.busy) or bool(getattr(self.client, "busy", False))
 
     def _refuse_write(self):
         """A reply refusing a write now (not an Ally, or Armoury services are being switched), else None.
@@ -109,7 +112,10 @@ class Plugin:
         settings = Settings.load(settings_path(), logger=decky.logger)   # an unreadable file is kept, never lost
         runtime_dir = getattr(decky, "DECKY_PLUGIN_RUNTIME_DIR", "") or None
         client = HelperClient(plugin_dir=PLUGIN_DIR, runtime_dir=runtime_dir, logger=decky.logger)
-        self._attach(client, settings, Reapplier(client, settings, logger=decky.logger))
+        # Two views of one record file: the switch's (changed only under its locks) and the reapplier's (read only).
+        folder = record_dir()
+        reapplier = Reapplier(client, settings, logger=decky.logger, record=ArmouryRecord(folder, decky.logger))
+        self._attach(client, settings, reapplier, ArmouryRecord(folder, decky.logger))
         client.start()
         self._startup = asyncio.ensure_future(self._startup_sequence())
         decky.logger.info("Overdrive started")
@@ -125,12 +131,31 @@ class Plugin:
         decky.logger.info("Controller mode Desktop is not kept across a plugin load: Gamepad")
         self._save()
 
+    def _migrate_armoury(self) -> None:
+        """Overdrive 0.1 kept the Armoury Crate record in overdrive.json: move it to the shared record once (only when
+        that does not exist yet), then save the settings without it. Until the move worked the old fields stay in
+        overdrive.json, so a failed move never loses them."""
+        s = self.settings
+        if not s.holds_armoury():
+            return
+        try:
+            moved = migrate_from_settings(self.armoury.record, s)
+        except (ArmouryLocked, OSError) as e:
+            decky.logger.warning(f"Overdrive: the Armoury Crate record was not moved to the shared record yet: {e}")
+            return
+        if moved:
+            decky.logger.info("Overdrive: the Armoury Crate record was moved to the shared record")
+        else:
+            decky.logger.info("Overdrive: the shared Armoury Crate record already exists; the old record in "
+                              "overdrive.json was dropped")
+        s.armoury_migrated()
+        self._save()
+
     async def _startup_sequence(self) -> None:
         self._desktop_not_kept_on_load()
-        if self.settings.armoury_replaced:
-            await self._restop_on_load()
-        elif self.settings.armoury_recorded:
-            await self._recover_on_load()
+        if self.armoury is not None:
+            self._migrate_armoury()
+            await self.armoury.on_load()
         self.reapplier.start()
         if self.settings.auto_tdp and self.auto_tdp_loop is not None:
             self.auto_tdp_loop.start()   # the reapply just started writes the mode; on_applied resets the loop then
@@ -142,9 +167,10 @@ class Plugin:
         # bounded by its own call timeout. Decky does not wait that long: it kills the plugin process 5 s after
         # asking it to stop (decky-loader plugin/plugin.py kill_if_still_running), and the helper runs in the
         # plugin's job object with KILL_ON_JOB_CLOSE (localplatform/winprocess.py _create_job), so it dies too.
-        # A switch cut short that way is put right at the next load (_recover_on_load, or the P8 re-stop).
+        # A switch cut short that way is put right at the next load (ArmourySwitch.on_load: recovery or the P8
+        # re-stop).
         loop = asyncio.get_running_loop()
-        while self._armoury_busy and loop.time() < self._armoury_until:
+        while self.armoury is not None and self.armoury.busy and loop.time() < self.armoury.until:
             await asyncio.sleep(0.05)
         if self._startup is not None and not self._startup.done():
             self._startup.cancel()
@@ -192,7 +218,7 @@ class Plugin:
             "support": support, "mode": s.mode, "spl": s.spl, "sppt": s.sppt, "fppt": s.fppt, "fps": s.fps,
             "fan_preset": s.fan_preset, "fan_curve": self._effective_curve(s, "cpu"),
             "fan_curve_gpu": self._effective_curve(s, "gpu"),
-            "armoury": {"installed": False, "replaced": s.armoury_replaced},
+            "armoury": {"installed": False, "replaced": False},
             "unavailable": "", "warning": "", "fan_note": "", "busy": False, "user_set": s.user_set,
             # The owner's own limits exist only once Manual was chosen; otherwise the firmware's limits apply.
             "power_set": bool(s.user_set and s.mode == "manual"),
@@ -206,10 +232,10 @@ class Plugin:
         if self.auto_tdp_loop is not None:   # the stored switch; "supported" is False once the driver had no reading
             state["auto_tdp"] = {"on": bool(s.auto_tdp), "supported": bool(self.auto_tdp_loop.status()["supported"])}
         state["busy"] = self._busy()
-        if self._armoury_installed is None and not state["busy"]:   # never queue behind a long service switch
-            r = await self.client.call("armoury_state")
-            if r.get("ok") and isinstance(r.get("data"), dict):
-                self._armoury_installed = bool(r["data"].get("installed"))
+        if self.armoury is not None:
+            state["armoury"]["replaced"] = self.armoury.replaced()   # the shared record: either plugin may switch
+            if not state["busy"]:   # never queue behind a long service switch
+                await self.armoury.check_installed()
         if not state["busy"]:
             r = await self.client.call("status")   # reads only; shown, never written back
             if r.get("ok"):
@@ -220,9 +246,10 @@ class Plugin:
             # is shown and the controls are read again at the next poll.
         if self._controls is not None:   # while busy, the last reading: a call would queue behind the switch
             _merge_controls(state, self._controls, s)
-        state["armoury"]["installed"] = bool(self._armoury_installed)
+        state["armoury"]["installed"] = bool(self.armoury is not None and self.armoury.installed)
         state["unavailable"] = self.client.unavailable_reason or ""
-        state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, self._armoury_warning) if w)
+        armoury_warning = self.armoury.warning if self.armoury is not None else ""
+        state["warning"] = " ".join(w for w in (s.warning, self.reapplier.warning, armoury_warning) if w)
         state["fan_note"] = fan_note(s)
         return state
 
@@ -563,108 +590,16 @@ class Plugin:
             return {"ok": True, "message": " ".join(m for m in (note, self._save()) if m)}
 
     # ---------- Armoury Crate ----------
-    # The record (start types + running services before Overdrive stopped anything) is what armoury_restore puts
-    # back, so it must exist on disk before the first service is touched and must never be replaced by types read
-    # after a stop. A record with the switch off is provisional (a switch-on that never got its reply); switching
-    # off with one still restores it, and the next switch-on keeps it.
+    # The switch, the record and its rules are ArmourySwitch's (armoury_switch.py, shared with Traction).
 
-    @contextlib.asynccontextmanager
-    async def _armoury_op(self):
-        async with self._armoury_lock:
-            yield
-
-    async def _armoury_timeout(self, extra_running: int):
-        """(timeout, armoury_state data or None, failure message). armoury_state is an ordinary read (normal timeout,
-        not busy). Timeout = max(5 min, 60 s per listed service running now + 60 s); all listed services count when
-        the state is unknown."""
-        r = await self.client.call("armoury_state")
-        d = r.get("data") if r.get("ok") and isinstance(r.get("data"), dict) else None
-        if d is not None:
-            self._armoury_installed = bool(d.get("installed"))
-            n = len(d.get("running") or [])
-        else:
-            n = len(ARMOURY_SERVICES)
-        n = max(n, extra_running)
-        message = "" if d is not None else str(r.get("message") or "no answer")
-        return max(ARMOURY_MIN_TIMEOUT, ARMOURY_PER_SERVICE * n + 60.0), d, message
-
-    async def _armoury_call(self, cmd: str, args, timeout: float) -> dict:
-        """armoury_stop / armoury_restore: busy (P12) for exactly as long as the call runs."""
-        self._armoury_until = asyncio.get_running_loop().time() + timeout + 5.0
-        self._armoury_busy = True
-        try:
-            return await self.client.call(cmd, args, timeout)
-        finally:
-            self._armoury_busy = False
-
-    def _merge_new_services(self, data) -> bool:
-        """Adds services that are missing from a non-empty record (installed later), never changing an entry."""
+    def _armoury_replaced(self) -> None:
+        """Armoury Crate was stopped: Overdrive's settings are applied from now on ("then apply our stored
+        settings", at the next poll)."""
         s = self.settings
-        if not s.armoury_recorded or not isinstance(data, dict):
-            return False
-        types, running = _clean_record(data)
-        added = False
-        for name, typ in types.items():
-            if name not in s.armoury_recorded:
-                s.armoury_recorded[name] = typ
-                if name in running and name not in s.armoury_running:
-                    s.armoury_running.append(name)
-                added = True
-        return added
-
-    async def _restop_on_load(self) -> None:
-        # Ruling P8: stopped-but-Automatic services may have come back after a reboot, so stop them again while the
-        # switch is on. Only the first switch-on records the start types; this run never overwrites them.
-        async with self._armoury_op():
-            timeout, state, why = await self._armoury_timeout(0)
-            if state is None:
-                # Never stop blind (an unknown state means the all-services timeout on a possibly hung helper).
-                self._armoury_warning = ("Armoury Crate services could not be checked at load, so they were not "
-                                         f"stopped again: {why}")
-                decky.logger.warning(self._armoury_warning)
-                return
-            if self._merge_new_services(state):
-                self._save()
-            r = await self._armoury_call("armoury_stop", None, timeout)
-            if r.get("ok"):
-                self._armoury_warning = ""
-            else:
-                self._armoury_warning = "Armoury Crate services could not be stopped again: " + str(r.get("message"))
-                decky.logger.warning(self._armoury_warning)
-
-    async def _recover_on_load(self) -> None:
-        """A record with the switch off at load: a switch-on (or its save-failure restore) was cut short, typically
-        by Decky killing the plugin 5 s into an unload. Some services may be stopped and Disabled/Manual, so put the
-        recorded state back now (busy while it runs) and tell the owner how it went."""
-        s = self.settings
-        async with self._armoury_op():
-            timeout, state, why = await self._armoury_timeout(len(s.armoury_running))
-            if state is None:
-                self._armoury_warning = ("A previous Armoury Crate switch did not finish, and the services could not "
-                                         f"be checked at load ({why}). Turn the switch on and off again to put "
-                                         "them back.")
-                decky.logger.warning(self._armoury_warning)
-                return
-            decky.logger.info("Overdrive: a previous Armoury Crate switch did not finish; putting the services back")
-            r = await self._armoury_call("armoury_restore",
-                                         {"recorded": dict(s.armoury_recorded), "running": list(s.armoury_running)},
-                                         timeout)
-            if not r.get("ok"):
-                self._armoury_warning = ("A previous Armoury Crate switch did not finish, and putting the services "
-                                         f"back failed: {r.get('message')} Turn the switch on and off again to "
-                                         "retry.")
-                decky.logger.warning(self._armoury_warning)
-                return
-            s.armoury_recorded, s.armoury_running = {}, []
-            msg = "A previous Armoury Crate switch did not finish, so Armoury Crate was put back."
-            skipped = (r.get("data") or {}).get("skipped") if isinstance(r.get("data"), dict) else None
-            if skipped:
-                msg += " Not installed any more, skipped: " + ", ".join(map(str, skipped)) + "."
-            saved = self._save()
-            if saved:
-                msg += " The cleared record could not be saved, so this runs again at the next load."
-            self._armoury_warning = msg
-            decky.logger.info(f"Overdrive: {msg}")
+        if not s.user_set:
+            s.user_set = True
+            self._save()
+        self.reapplier.rerun = True
 
     async def set_armoury_replaced(self, on) -> dict:
         refused = self._refuse_write()
@@ -672,78 +607,7 @@ class Plugin:
             return refused
         if not isinstance(on, bool):
             return _fail("Expected on or off.")
-        async with self._armoury_op():
-            return await (self._armoury_on() if on else self._armoury_off())
-
-    async def _armoury_on(self) -> dict:
-        s = self.settings
-        if s.armoury_replaced:
-            return {"ok": True, "message": ""}
-        timeout, state, why = await self._armoury_timeout(0)
-        if state is None:
-            return _fail(f"Could not read the Armoury Crate services ({why}), so nothing was changed.")
-        provisional = not s.armoury_recorded
-        if provisional:
-            types, running = _clean_record(state)
-            s.armoury_recorded, s.armoury_running = types, running
-            try:
-                s.save()   # on disk before anything is stopped
-            except OSError as e:
-                s.armoury_recorded, s.armoury_running = {}, []
-                return _fail(f"Could not save Overdrive's settings ({e}), so nothing was changed.")
-        elif self._merge_new_services(state):
-            self._save()
-
-        r = await self._armoury_call("armoury_stop", None, timeout)
-        if not r.get("ok"):
-            d = r.get("data") if isinstance(r.get("data"), dict) else {}
-            if provisional and d.get("rolledBack") is True:
-                # The helper put every service back, so the provisional record is no longer needed.
-                s.armoury_recorded, s.armoury_running = {}, []
-                self._save()
-            return _fail(str(r.get("message")))
-
-        s.armoury_replaced, s.user_set = True, True
-        try:
-            s.save()   # the switch reports success only once this is on disk
-        except OSError as e:
-            s.armoury_replaced = False
-            back = await self._armoury_call("armoury_restore",
-                                            {"recorded": dict(s.armoury_recorded),
-                                             "running": list(s.armoury_running)}, timeout)
-            tail = ("Armoury Crate was put back." if back.get("ok")
-                    else "Putting Armoury Crate back also failed: " + str(back.get("message")))
-            return _fail(f"Could not save Overdrive's settings ({e}). {tail}")
-        self._armoury_warning = ""
-        self.reapplier.rerun = True   # "then apply our stored settings", at the next poll
-        return {"ok": True, "message": ""}
-
-    async def _armoury_off(self) -> dict:
-        s = self.settings
-        if not s.armoury_recorded:
-            if not s.armoury_replaced:
-                return {"ok": True, "message": ""}
-            s.armoury_replaced = False
-            msg = self._save()
-            return {"ok": True, "message": ("No recorded Armoury Crate state was found, so the services were left as "
-                                            "they are. " + msg).strip()}
-        timeout, _, _ = await self._armoury_timeout(len(s.armoury_running))
-        r = await self._armoury_call("armoury_restore",
-                                     {"recorded": dict(s.armoury_recorded), "running": list(s.armoury_running)},
-                                     timeout)
-        if not r.get("ok"):
-            return _fail(str(r.get("message")))
-        s.armoury_replaced, s.armoury_recorded, s.armoury_running = False, {}, []
-        self._armoury_warning = ""
-        msgs = []
-        skipped = (r.get("data") or {}).get("skipped") if isinstance(r.get("data"), dict) else None
-        if skipped:
-            msgs.append("Not installed any more, skipped: " + ", ".join(map(str, skipped)) + ".")
-        try:
-            s.save()
-        except OSError as e:
-            return _fail(f"Armoury Crate was restored, but the setting could not be saved ({e}).")
-        return {"ok": True, "message": " ".join(msgs)}
+        return await self.armoury.set(on)
 
 
 DEVICE_MODES = ("silent", "balanced", "turbo", "other")
@@ -776,13 +640,3 @@ def _device_readback(data) -> dict:
         out[key] = v if v is not None and v > 0 else None
     return out
 
-
-def _clean_record(data: dict):
-    """Start types and running list from an armoury_state/armoury_stop reply, limited to listed services."""
-    types = {k: v for k, v in (data.get("startTypes") or {}).items()
-             if k in ARMOURY_SERVICES and v in START_TYPES}
-    running = []
-    for n in data.get("running") or []:
-        if isinstance(n, str) and n in types and n not in running:
-            running.append(n)
-    return types, running
