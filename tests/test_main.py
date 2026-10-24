@@ -1122,6 +1122,28 @@ def test_startup_moves_old_record_to_shared_one(tmp_path):
     run(go())
 
 
+def test_startup_logs_old_record_it_drops(tmp_path, caplog):
+    """Final review O1: the shared record already holds a record, so the old one in overdrive.json is dropped; its
+    values go to the log at WARNING so they can be recovered."""
+    async def go():
+        path = tmp_path / "overdrive.json"
+        recorded = {"ArmouryCrateService": "Automatic"}
+        path.write_text(json.dumps({"armoury_replaced": True, "armoury_recorded": recorded,
+                                    "armoury_running": ["ArmouryCrateService"]}), encoding="utf-8")
+        p, c, s = plugin_with(tmp_path, armoury_recorded={"LightingService": "Manual"})
+        with caplog.at_level("WARNING"):
+            assert p._migrate_armoury() is True
+        warnings = [r for r in caplog.records if r.levelname == "WARNING" and "dropped" in r.getMessage()]
+        assert len(warnings) == 1
+        text = warnings[0].getMessage()
+        assert "armoury_replaced=True" in text
+        assert "armoury_recorded={'ArmouryCrateService': 'Automatic'}" in text
+        assert "armoury_running=['ArmouryCrateService']" in text
+        assert saved_record(tmp_path).recorded == {"LightingService": "Manual"}
+        assert not any(k.startswith("armoury_") for k in json.loads(path.read_text(encoding="utf-8")))
+    run(go())
+
+
 def test_startup_keeps_old_record_when_it_cannot_be_moved(tmp_path, monkeypatch):
     async def go():
         path = tmp_path / "overdrive.json"

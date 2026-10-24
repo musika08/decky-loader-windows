@@ -169,13 +169,15 @@ def test_armoury_on_save_failure_restores_and_reports(tmp_path, monkeypatch):
         monkeypatch.setattr(rec, "save", save_then_fail)
         r = await sw.set(True)
         assert r["ok"] is False and "disk full" in r["message"]
-        assert r["message"].startswith("Could not save Overdrive's settings (disk full). Armoury Crate was put back.")
+        assert r["message"].startswith("Could not save the shared Armoury Crate record (disk full). Armoury Crate was "
+                                        "put back.")
         assert ("armoury_restore", {"recorded": ORIGINAL, "running": ["ArmouryCrateSEService"]}) in c.calls
         assert rec.replaced is False and sw.applied == []
     run(go())
 
 
-def test_owner_names_the_plugin_in_messages(tmp_path, monkeypatch):
+def test_failed_record_save_names_the_shared_record(tmp_path, monkeypatch, caplog):
+    """Final review O2: a failed save of the shared record never says it was a plugin's own settings."""
     async def go():
         sw, c, rec = make(tmp_path)
         sw.owner = "Traction"
@@ -184,7 +186,13 @@ def test_owner_names_the_plugin_in_messages(tmp_path, monkeypatch):
             raise OSError("disk full")
         monkeypatch.setattr(rec, "save", broken_save)
         r = await sw.set(True)
-        assert r == {"ok": False, "message": "Could not save Traction's settings (disk full), so nothing was changed."}
+        assert r == {"ok": False, "message": "Could not save the shared Armoury Crate record (disk full), so nothing "
+                                             "was changed."}
+        # the logged form (a merge of new services that could not be saved)
+        with caplog.at_level(logging.ERROR):
+            assert sw._save() == "Applied, but the setting could not be saved (disk full)."
+        assert "Could not save the shared Armoury Crate record: disk full" in caplog.text
+        assert "settings" not in caplog.text
     run(go())
 
 
@@ -507,12 +515,40 @@ def test_migrate_once(tmp_path):
     assert migrate_from_settings(rec, s) is True
     assert on_disk(tmp_path) == {"replaced": True, "recorded": {"ArmouryCrateService": "Automatic"},
                                  "running": ["ArmouryCrateService"]}
-    # the record is switched off afterwards (say by Traction); a second move must not undo that
+    # the record changes afterwards (say Traction switched it with other types); a second move must not undo that
     other = saved(tmp_path)
-    other.replaced, other.recorded, other.running = False, {}, []
+    other.replaced, other.recorded, other.running = False, {"LightingService": "Manual"}, []
     other.save()
     assert migrate_from_settings(ArmouryRecord(str(tmp_path / "armoury")), s) is False
-    assert on_disk(tmp_path) == {"replaced": False, "recorded": {}, "running": []}
+    assert on_disk(tmp_path) == {"replaced": False, "recorded": {"LightingService": "Manual"}, "running": []}
+
+
+def test_migrate_takes_old_record_over_an_empty_shared_one(tmp_path):
+    """Final review O1: an existing but empty shared record (nothing switched, nothing recorded) takes the old record
+    instead of dropping it."""
+    rec = ArmouryRecord(str(tmp_path / "armoury"))
+    rec.save()                                              # exists, empty
+    s = Settings.load(str(tmp_path / "overdrive.json"))
+    s.armoury_replaced = True
+    s.armoury_recorded = {"ArmouryCrateService": "Automatic"}
+    s.armoury_running = ["ArmouryCrateService"]
+    assert migrate_from_settings(ArmouryRecord(str(tmp_path / "armoury")), s) is True
+    assert on_disk(tmp_path) == {"replaced": True, "recorded": {"ArmouryCrateService": "Automatic"},
+                                 "running": ["ArmouryCrateService"]}
+
+
+def test_migrate_leaves_a_non_empty_shared_record(tmp_path):
+    for fields in ({"replaced": True}, {"recorded": {"LightingService": "Manual"}}):
+        folder = tmp_path / ("a" if "replaced" in fields else "b")
+        rec = ArmouryRecord(str(folder))
+        for k, v in fields.items():
+            setattr(rec, k, v)
+        rec.save()
+        before = (folder / "state.json").read_bytes()
+        s = Settings.load(str(tmp_path / "overdrive.json"))
+        s.armoury_recorded = {"ArmouryCrateService": "Automatic"}
+        assert migrate_from_settings(ArmouryRecord(str(folder)), s) is False
+        assert (folder / "state.json").read_bytes() == before
 
 
 def test_migrate_nothing_to_move(tmp_path):

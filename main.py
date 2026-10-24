@@ -128,6 +128,8 @@ class Plugin:
         s = self.settings
         if not s.armoury_pending():
             return True
+        dropped = (f"armoury_replaced={s.armoury_replaced!r}, armoury_recorded={dict(s.armoury_recorded)!r}, "
+                   f"armoury_running={list(s.armoury_running)!r}")
         try:
             moved = migrate_from_settings(self.armoury.record, s, timeout)
         except (ArmouryLocked, OSError) as e:
@@ -140,8 +142,9 @@ class Plugin:
         if moved:
             decky.logger.info("Overdrive: the Armoury Crate record was moved to the shared record")
         else:
-            decky.logger.info("Overdrive: the shared Armoury Crate record already exists; the old record in "
-                              "overdrive.json was dropped")
+            # The values go to the log so the originals can be recovered by hand if the shared record was wrong.
+            decky.logger.warning("Overdrive: the shared Armoury Crate record already holds a record; the old record "
+                                 f"in overdrive.json was dropped: {dropped}")
         s.armoury_migrated()
         self._save()
         return True

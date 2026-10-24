@@ -36,9 +36,10 @@ def clean_record(data: dict):
 
 def migrate_from_settings(record: ArmouryRecord, s, timeout: float = LOCK_TIMEOUT) -> bool:
     """Moves a plugin's own armoury_replaced/recorded/running into the shared record, once: only when the record does
-    not exist yet and the settings hold any of them. True when they were moved. Raises ArmouryLocked (another plugin
-    is switching; `timeout` is how long the lock is waited for, 0 for one try) or OSError (the record could not be
-    saved); the settings are left as they are then."""
+    not exist yet, or exists but is empty (not replaced, nothing recorded or running), and the settings hold any of
+    them. True when they were moved. Raises ArmouryLocked (another plugin is switching; `timeout` is how long the lock
+    is waited for, 0 for one try) or OSError (the record could not be saved); the settings are left as they are
+    then."""
     replaced = bool(getattr(s, "armoury_replaced", False))
     recorded = dict(getattr(s, "armoury_recorded", None) or {})
     running = list(getattr(s, "armoury_running", None) or [])
@@ -46,7 +47,9 @@ def migrate_from_settings(record: ArmouryRecord, s, timeout: float = LOCK_TIMEOU
         return False
     with record.lock(timeout):
         if record.exists():
-            return False
+            record.load()
+            if record.replaced or record.recorded or record.running:
+                return False
         record.replaced = replaced
         record.recorded = clean_types(recorded)
         record.running = clean_running(running, record.recorded)
@@ -156,7 +159,7 @@ class ArmourySwitch:
             self.record.save()
             return ""
         except OSError as e:
-            self.log.error(f"Could not save {self.owner}'s settings: {e}")
+            self.log.error(f"Could not save the shared Armoury Crate record: {e}")
             return f"Applied, but the setting could not be saved ({e})."
 
     def _restore_args(self) -> dict:
@@ -283,7 +286,7 @@ class ArmourySwitch:
                 rec.save()   # on disk before anything is stopped
             except OSError as e:
                 rec.recorded, rec.running = {}, []
-                return _fail(f"Could not save {self.owner}'s settings ({e}), so nothing was changed.")
+                return _fail(f"Could not save the shared Armoury Crate record ({e}), so nothing was changed.")
         elif self._merge_new_services(state):
             self._save()
 
@@ -304,7 +307,7 @@ class ArmourySwitch:
             back = await self._call("armoury_restore", self._restore_args(), timeout)
             tail = ("Armoury Crate was put back." if back.get("ok")
                     else "Putting Armoury Crate back also failed: " + str(back.get("message")))
-            return _fail(f"Could not save {self.owner}'s settings ({e}). {tail}")
+            return _fail(f"Could not save the shared Armoury Crate record ({e}). {tail}")
         self._warning = ""
         if self.on_replaced is not None:   # "then apply our stored settings"
             try:
