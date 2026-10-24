@@ -6,7 +6,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $edge = 'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe'
 # panels.html frames src\panel-*.png: real captures of Decky's Quick Access tab taken from Steam (CDP
 # Page.captureScreenshot of the QuickAccess view while it is on screen), cropped to the panel's width.
-$pages = @{ 'banner' = '1280,400'; 'how-it-works' = '1280,560' }
+$pages = @{ 'banner' = '1280,400'; 'how-it-works' = '1280,560'; 'panel' = '1280,720' }
 foreach ($name in $pages.Keys) {
     $src = Join-Path $root ".github\assets\src\$name.html"
     $out = Join-Path $root ".github\assets\$name.png"

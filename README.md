@@ -34,6 +34,10 @@
   </tr>
 </table>
 
+<p align="center">
+  <img src=".github/assets/panel.png" alt="Decky's tab in Steam Big Picture on a ROG Xbox Ally X, with Clarity, Traction, Overdrive, Control Center, CSS Loader, SteamGridDB, vibrantDeck and Animation Changer" width="100%">
+</p>
+
 > [!IMPORTANT]
 > **This is an unofficial port.** It is not made or supported by the [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) team. Please report Windows problems [here](https://github.com/musika08/decky-loader-windows/issues), not to them. On a Steam Deck, use the [official Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader).
 

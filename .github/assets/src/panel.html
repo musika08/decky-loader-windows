@@ -1,0 +1,52 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 720px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden; box-sizing: border-box;
+    display: grid; grid-template-columns: 1fr 520px; gap: 40px; padding: 0 70px 0 76px;
+    background:
+      radial-gradient(760px 420px at 100% 0%, rgba(34, 211, 238, 0.20), transparent 62%),
+      radial-gradient(760px 460px at 0% 100%, rgba(59, 130, 246, 0.20), transparent 62%),
+      linear-gradient(150deg, #060b12 0%, #0a1422 55%, #0b1d33 100%);
+    box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.14);
+  }
+  .text { align-self: center; color: #dbe7f6; }
+  .eyebrow { font-size: 13px; letter-spacing: 0.3em; text-transform: uppercase; color: #67e8f9; font-weight: 600; margin-bottom: 14px; }
+  h2 { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 44px; line-height: 1.05; font-weight: 650;
+    letter-spacing: -0.03em; color: #fff; margin: 0 0 18px; }
+  p { font-size: 18px; color: #a9bbd3; margin: 0 0 26px; line-height: 1.5; }
+  ul { margin: 0; padding: 0; list-style: none; }
+  li { font-size: 16.5px; color: #c9d8ec; padding: 7px 0 7px 22px; position: relative; }
+  li::before { content: ''; position: absolute; left: 0; top: 16px; width: 8px; height: 8px; border-radius: 50%; background: #67e8f9; }
+  li b { color: #fff; font-weight: 600; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; margin: 0 2px; vertical-align: 1px; }
+  .frame {
+    margin-top: 56px; border-radius: 18px 18px 0 0; overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(125, 211, 252, 0.22);
+    -webkit-mask-image: linear-gradient(180deg, #000 86%, transparent 100%);
+  }
+  .frame img { display: block; width: 100%; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="text">
+    <div class="eyebrow">Real capture, ROG Xbox Ally X</div>
+    <h2>Your plugins,<br>right in Steam</h2>
+    <p>Decky's tab in Steam Big Picture's Quick Access menu, running on Windows.</p>
+    <ul>
+      <li><b>Windows plugins</b> such as Overdrive, Traction, Control Center and Clarity</li>
+      <li><b>Steam Deck favourites</b> such as CSS Loader, SteamGridDB and Animation Changer</li>
+      <li><b>Plugin store and settings</b> one tap away, at the top</li>
+      <li><span class="dot"></span> marks a plugin with an update waiting</li>
+    </ul>
+  </div>
+  <div class="frame"><img src="decky-panel.png" alt=""></div>
+</div>
+</body>
+</html>
