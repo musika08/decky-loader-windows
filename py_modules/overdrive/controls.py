@@ -5,19 +5,16 @@ feature is reported, never raised.
 """
 from typing import Optional
 
-from .helper_client import RESTARTED
+from .helper_client import is_transport_failure
 from .settings import Settings
 
 POWER_MODES = ("eco", "balanced", "best")
 
 
 def transport_failure(reply: dict) -> bool:
-    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal."""
-    if reply.get("ok"):
-        return False
-    msg = str(reply.get("message") or "")
-    return (msg == RESTARTED or msg.startswith("Overdrive helper did not answer")
-            or msg.startswith("Overdrive helper is not running"))
+    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal. Works
+    for any owner's name (helper_client builds the messages from it)."""
+    return is_transport_failure(reply)
 
 
 def _result(ok: bool, message: str = "", **extra) -> dict:

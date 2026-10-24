@@ -20,8 +20,20 @@ import time
 from collections import deque
 from typing import Awaitable, Callable, Optional
 
-RESTARTED = "Overdrive helper restarted, try again"
-STOPPING = "Overdrive is stopping."
+DEFAULT_NAME = "Overdrive"
+# The texts are built from the owner's name (HelperClient(name=...)); these are Overdrive's.
+RESTARTED = DEFAULT_NAME + " helper restarted, try again"
+STOPPING = DEFAULT_NAME + " is stopping."
+# What every owner's transport-failure messages contain, whatever the name.
+TRANSPORT_MARKERS = (" helper restarted, try again", " helper did not answer", " helper is not running")
+
+
+def is_transport_failure(reply: dict) -> bool:
+    """A reply that failed on the way (helper restarted, did not answer, not running), not a device refusal."""
+    if reply.get("ok"):
+        return False
+    msg = str(reply.get("message") or "")
+    return any(marker in msg for marker in TRANSPORT_MARKERS)
 CREATE_NO_WINDOW = 0x08000000
 BACKOFF = (1, 2, 4)
 MAX_STARTS = 5
@@ -50,13 +62,16 @@ def is_armoury(cmd: str) -> bool:
 class HelperClient:
     def __init__(self, start_process: Optional[StartProcess] = None, *, plugin_dir: Optional[str] = None,
                  runtime_dir: Optional[str] = None, sleep=asyncio.sleep, clock=time.monotonic,
-                 logger: Optional[logging.Logger] = None, default_timeout: float = 10.0):
+                 logger: Optional[logging.Logger] = None, default_timeout: float = 10.0, name: str = DEFAULT_NAME):
+        self.name = name                   # fills every message and the default logger name
+        self.restarted_text = f"{name} helper restarted, try again"
+        self.stopping_text = f"{name} is stopping."
         self._start_process = start_process or self._spawn
         self._plugin_dir = plugin_dir or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         self._runtime_dir = runtime_dir
         self._sleep = sleep
         self._clock = clock
-        self._log = logger or logging.getLogger("overdrive")
+        self._log = logger or logging.getLogger(name.lower())
         self._proc = None
         self._reader: Optional[asyncio.Task] = None
         self._starter: Optional[asyncio.Task] = None
@@ -110,7 +125,7 @@ class HelperClient:
             while self._starts and now - self._starts[0] >= WINDOW:
                 self._starts.popleft()
             if len(self._starts) >= MAX_STARTS:
-                self.unavailable_reason = (f"Overdrive helper stopped {MAX_STARTS} times in 10 minutes. "
+                self.unavailable_reason = (f"{self.name} helper stopped {MAX_STARTS} times in 10 minutes. "
                                            f"Last error: {self.last_error or 'unknown'}")
                 self._log.error(self.unavailable_reason)
                 return
@@ -132,7 +147,7 @@ class HelperClient:
             self._proc = proc
             self._timeouts = 0
             self._reader = asyncio.ensure_future(self._read_loop(proc))
-            self._log.info("Overdrive helper started")
+            self._log.info(f"{self.name} helper started")
             return
 
     async def stop(self) -> None:
@@ -152,7 +167,7 @@ class HelperClient:
             except (asyncio.CancelledError, Exception):
                 pass
         proc, self._proc = self._proc, None
-        self._fail_pending(STOPPING)
+        self._fail_pending(self.stopping_text)
         if proc is not None:
             await self._end(proc)
         if self._reader is not None and not self._reader.done():
@@ -184,7 +199,7 @@ class HelperClient:
         if proc is None or self._armoury_inflight > 0:
             return
         self._kill_reason = reason
-        self._log.warning(f"Overdrive helper killed: {reason}")
+        self._log.warning(f"{self.name} helper killed: {reason}")
         try:
             proc.kill()
         except Exception:
@@ -201,7 +216,7 @@ class HelperClient:
                 try:
                     msg = json.loads(line)
                 except ValueError:
-                    self._log.warning("Overdrive helper wrote a line that is not JSON")
+                    self._log.warning(f"{self.name} helper wrote a line that is not JSON")
                     continue
                 if not isinstance(msg, dict):
                     continue
@@ -231,8 +246,8 @@ class HelperClient:
             self.last_error = "the helper stopped responding and was killed"
         else:
             self.last_error = f"the helper exited with code {code}"
-        self._log.warning(f"Overdrive: {self.last_error}")
-        self._fail_pending(RESTARTED)
+        self._log.warning(f"{self.name}: {self.last_error}")
+        self._fail_pending(self.restarted_text)
         if not self._stopping:
             self._starter = asyncio.ensure_future(self._start_loop(restart=True))
 
@@ -249,7 +264,7 @@ class HelperClient:
         if timeout is None:
             timeout = self.default_timeout
         if self._stopping:
-            return failure(STOPPING)
+            return failure(self.stopping_text)
         if self.unavailable_reason:
             return failure(self.unavailable_reason)
         loop = asyncio.get_running_loop()
@@ -278,7 +293,7 @@ class HelperClient:
         proc = self._proc
         if proc is None:
             return failure(self.unavailable_reason or
-                           f"Overdrive helper is not running ({self.last_error or 'starting'}).")
+                           f"{self.name} helper is not running ({self.last_error or 'starting'}).")
 
         rid = self._next_id
         self._next_id += 1
@@ -309,8 +324,8 @@ class HelperClient:
                 if self._timeouts >= TIMEOUTS_BEFORE_KILL:
                     self._timeouts = 0
                     self._kill(f"it did not answer {TIMEOUTS_BEFORE_KILL} requests in a row")
-            return failure(f"Overdrive helper did not answer in {timeout:g} s.")
+            return failure(f"{self.name} helper did not answer in {timeout:g} s.")
         except (ConnectionError, OSError, AttributeError, RuntimeError):
-            return failure(RESTARTED)
+            return failure(self.restarted_text)
         finally:
             self._pending.pop(rid, None)

@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 
-from overdrive.helper_client import RESTARTED, HelperClient
+from overdrive.helper_client import RESTARTED, STOPPING, HelperClient
 
 FAKE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_helper.py")
 
@@ -390,3 +390,41 @@ def test_foreground_timeouts_never_kill():
         finally:
             await c.stop()
     asyncio.run(run())
+
+
+def test_messages_use_the_owner_name():
+    from overdrive.controls import transport_failure
+
+    async def run():
+        # default: Overdrive's exact wording and logger
+        d = HelperClient(start_process=spawner())
+        assert d.name == "Overdrive" and d._log.name == "overdrive"
+        assert d.restarted_text == RESTARTED == "Overdrive helper restarted, try again"
+        assert d.stopping_text == STOPPING == "Overdrive is stopping."
+
+        c = HelperClient(start_process=spawner("--exit-on", "armoury_stop", "--hang-on", "sensors"), name="Traction")
+        try:
+            assert c._log.name == "traction"
+            assert (await c.call("hello"))["ok"] is True
+            r = await c.call("sensors", timeout=0.3)
+            assert r["message"] == "Traction helper did not answer in 0.3 s." and transport_failure(r)
+            r = await asyncio.wait_for(c.call("armoury_stop", timeout=300), 10)
+            assert r["message"] == "Traction helper restarted, try again" and transport_failure(r)
+        finally:
+            await c.stop()
+        r = await c.call("hello")
+        assert r["message"] == "Traction is stopping."
+        assert not transport_failure(r)       # stopping is not a transport hiccup, as before
+
+        async def broken():
+            raise FileNotFoundError("gone")
+        n = HelperClient(start_process=broken, sleep=Sleeps(), name="Traction")
+        try:
+            r = await n.call("hello", timeout=5)
+            assert n.unavailable_reason.startswith("Traction helper stopped 5 times in 10 minutes.")
+        finally:
+            await n.stop()
+        assert transport_failure({"ok": False, "message": "Traction helper is not running (starting)."})
+    asyncio.run(run())
+    assert not transport_failure({"ok": True, "message": "Traction helper did not answer"})
+    assert not transport_failure({"ok": False, "message": "The device refused the write."})
