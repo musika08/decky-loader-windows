@@ -238,5 +238,10 @@ def get_plugin_session(url: str, **kwargs: Any) -> ClientSession:
     return ClientSession(trust_env=not is_loopback_url(url), **kwargs)
 
 def get_session(**kwargs: Any) -> ClientSession:
-    '''A ClientSession for internet requests that honours the system proxy settings (HTTP(S)_PROXY / NO_PROXY; on Windows also the Internet Options proxy).'''
+    '''A ClientSession for internet requests that honours the system proxy settings (HTTP(S)_PROXY / NO_PROXY; on Windows also the Internet Options proxy).
+
+    Header limits are raised to 64 KiB: GitHub release downloads (store plugins hosted as release assets) answer with a
+    Content-Security-Policy header longer than aiohttp's 8190-byte default, which otherwise fails the download.'''
+    kwargs.setdefault("max_field_size", 65536)
+    kwargs.setdefault("max_line_size", 65536)
     return ClientSession(trust_env=True, **kwargs)

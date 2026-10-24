@@ -276,7 +276,7 @@ def test_plugin_requests_skip_the_proxy_only_for_loopback(url: str, trust_env: b
 def test_store_and_updater_sessions_still_trust_env():
     with patch.object(helpers, "ClientSession") as session:
         helpers.get_session()
-    session.assert_called_once_with(trust_env=True)
+    session.assert_called_once_with(trust_env=True, max_field_size=65536, max_line_size=65536)
 
 
 def test_windows_flag_matches_platform():
