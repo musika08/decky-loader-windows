@@ -348,6 +348,8 @@
         "tier_b": "Mostly works",
         "tier_c": "Partial on Windows",
         "tier_d": "Linux only",
+        "made_for_windows": "Made for Windows",
+        "made_for_windows_desc": "Built for Windows handhelds; from the Windows plugin store.",
         "untested": "Untested on Windows",
         "untested_desc": "This plugin has not been checked on Windows yet."
     }

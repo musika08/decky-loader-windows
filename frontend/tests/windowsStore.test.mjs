@@ -41,3 +41,20 @@ test('version lists merge, ours wins a name clash', () => {
   assert.deepEqual(mergeVersionLists(null, { A: ['1', 'h'] }), { A: ['1', 'h'] });
   assert.deepEqual(mergeVersionLists(['bad'], null), {});
 });
+
+import { isWindowsStorePlugin, rememberWindowsStorePlugins } from '../src/windowsStore.ts';
+
+test('plugins from the Windows store are recognised by id range or remembered name', () => {
+  rememberWindowsStorePlugins([]);
+  // Store ids 900000-999999 are the Windows store's (decky-windows-store README).
+  assert.equal(isWindowsStorePlugin('Overdrive', 900001), true);
+  assert.equal(isWindowsStorePlugin('CSS Loader', 7), false);
+  // Name only (the install dialog has no id): known once the Windows store list was merged.
+  assert.equal(isWindowsStorePlugin('Clarity'), false);
+  mergePluginLists(official, [...ours, { id: 900003, name: 'Clarity', versions: [], author: 'Musika', description: '', tags: [], image_url: '' }]);
+  assert.equal(isWindowsStorePlugin('Clarity'), true);
+  assert.equal(isWindowsStorePlugin('clarity'), true);
+  assert.equal(isWindowsStorePlugin('CSS Loader'), false);
+  // An official plugin's id outside the range is not claimed even if its name was ours once.
+  assert.equal(isWindowsStorePlugin('Overdrive', 2), false);
+});
