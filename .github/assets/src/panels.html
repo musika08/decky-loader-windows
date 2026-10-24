@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 1060px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden; box-sizing: border-box;
+    padding: 46px 64px 0;
+    background:
+      radial-gradient(760px 420px at 100% 0%, rgba(239, 68, 68, 0.20), transparent 62%),
+      radial-gradient(760px 460px at 0% 100%, rgba(244, 63, 94, 0.18), transparent 62%),
+      linear-gradient(150deg, #070b14 0%, #0b1324 55%, #0d1a33 100%);
+    box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.14);
+  }
+  .head { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 34px; font-weight: 650;
+    letter-spacing: -0.02em; color: #fff; margin: 0 0 6px; }
+  .sub { font-size: 18px; color: #a9a3b4; margin: 0 0 34px; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 52px; }
+  .label { font-size: 13px; letter-spacing: 0.26em; text-transform: uppercase; color: #fca5a5; font-weight: 600;
+    margin: 0 0 14px 4px; }
+  .frame {
+    border-radius: 18px 18px 0 0; overflow: hidden; height: 840px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(252, 165, 165, 0.22);
+    -webkit-mask-image: linear-gradient(180deg, #000 82%, transparent 100%);
+  }
+  .frame img { display: block; width: 100%; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">Right in Steam's Quick Access menu</div>
+  <div class="sub">Real captures from a ROG Xbox Ally X running Decky Loader for Windows.</div>
+  <div class="cols">
+    <div><div class="label">Live readout and quick toggles</div><div class="frame"><img src="panel-top.png" alt=""></div></div>
+    <div><div class="label">Fan curves and reset</div><div class="frame"><img src="panel-bottom.png" alt=""></div></div>
+  </div>
+</div>
+</body>
+</html>

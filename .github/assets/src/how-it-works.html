@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 560px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Text', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden; box-sizing: border-box;
+    padding: 52px 60px;
+    background:
+      radial-gradient(800px 360px at 100% 0%, rgba(239, 68, 68, 0.16), transparent 60%),
+      radial-gradient(700px 360px at 0% 100%, rgba(244, 63, 94, 0.14), transparent 62%),
+      linear-gradient(135deg, #070b14 0%, #0b1324 50%, #0d1a33 100%);
+    box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.14);
+    color: #e7dfe6;
+  }
+  .title { font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; font-size: 34px; font-weight: 650;
+    letter-spacing: -0.02em; color: #fff; margin: 0 0 6px; }
+  .sub { font-size: 18px; color: #a9a3b4; margin: 0 0 40px; }
+  .row { display: grid; grid-template-columns: 1fr 56px 1fr 56px 1fr; align-items: stretch; }
+  .step {
+    position: relative; border-radius: 20px; padding: 26px 26px 24px;
+    background: linear-gradient(180deg, rgba(252, 165, 165, 0.08), rgba(252, 165, 165, 0.03));
+    box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.16);
+  }
+  .num {
+    width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center;
+    font-weight: 700; font-size: 16px; color: #1f0a0d;
+    background: linear-gradient(135deg, #fecaca, #f87171);
+    margin-bottom: 18px;
+  }
+  .step h3 { margin: 0 0 10px; font-size: 22px; font-weight: 650; color: #fff; letter-spacing: -0.01em; }
+  .step p { margin: 0; font-size: 16px; line-height: 1.5; color: #b9b1c2; }
+  .step ul { margin: 12px 0 0; padding: 0; list-style: none; }
+  .step li { font-size: 15px; color: #ddd3dc; padding: 5px 0 5px 18px; position: relative; }
+  .step li::before { content: ''; position: absolute; left: 0; top: 13px; width: 7px; height: 7px; border-radius: 50%;
+    background: #f87171; }
+  .arrow { display: grid; place-items: center; }
+  .foot { margin-top: 30px; display: flex; gap: 12px; align-items: center; font-size: 15px; color: #a9a3b4; }
+  .pill { padding: 6px 12px; border-radius: 999px; font-weight: 600; color: #f3e3e6; white-space: nowrap;
+    background: rgba(252, 165, 165, 0.08); box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.22); }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="title">How Overdrive works</div>
+  <div class="sub">It talks to the Ally's firmware and the AMD driver directly, in place of Armoury Crate while you want it to.</div>
+  <div class="row">
+    <div class="step">
+      <div class="num">1</div>
+      <h3>Pick a mode</h3>
+      <p>Silent, Balanced and Turbo each send their own watts, or set Manual limits yourself.</p>
+      <ul><li>Silent 13 W, Balanced 17 W, Turbo 35 W</li><li>Manual: three limits from 5 to 50 W</li></ul>
+    </div>
+    <div class="arrow"><svg width="40" height="20" viewBox="0 0 40 20"><path d="M2 10 H34 M26 3 L35 10 L26 17" stroke="#f87171" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div class="step">
+      <div class="num">2</div>
+      <h3>Auto TDP</h3>
+      <p>Watches the frame rate and trims the watts while the game keeps its pace:</p>
+      <ul><li>Holds your FPS limit at the lowest watts</li><li>FPS limit off: drops only watts that add no frames</li><li>Never above the mode's own watts</li></ul>
+    </div>
+    <div class="arrow"><svg width="40" height="20" viewBox="0 0 40 20"><path d="M2 10 H34 M26 3 L35 10 L26 17" stroke="#f87171" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div class="step">
+      <div class="num">3</div>
+      <h3>Fans your way</h3>
+      <p>A preset or your own 8-point curve, for the CPU and the GPU fan:</p>
+      <ul><li>Armoury default, Recommended, Quiet, Cool</li><li>Drag points or use the D-pad</li><li>Never below a safe minimum</li></ul>
+    </div>
+  </div>
+  <div class="foot"><span class="pill">Safe by design</span> Armoury Crate's services are recorded first and restored exactly; your settings come back after sleep and on start.</div>
+</div>
+</body>
+</html>

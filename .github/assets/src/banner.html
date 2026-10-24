@@ -1,0 +1,89 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --w: 1280px; --h: 400px; }
+  html, body { margin: 0; background: transparent; }
+  body { width: var(--w); height: var(--h); font-family: 'Segoe UI Variable Display', 'Segoe UI', sans-serif; }
+  .card {
+    position: relative; width: var(--w); height: var(--h); border-radius: 28px; overflow: hidden;
+    background:
+      radial-gradient(900px 420px at 88% -10%, rgba(239, 68, 68, 0.30), transparent 60%),
+      radial-gradient(700px 380px at 72% 120%, rgba(244, 63, 94, 0.24), transparent 62%),
+      radial-gradient(520px 300px at 8% 110%, rgba(249, 115, 22, 0.14), transparent 65%),
+      linear-gradient(135deg, #070b14 0%, #0b1324 45%, #0d1a33 100%);
+    box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.14);
+  }
+  /* fine grid that fades out to the right */
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(252, 165, 165, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(252, 165, 165, 0.06) 1px, transparent 1px);
+    background-size: 40px 40px;
+    -webkit-mask-image: linear-gradient(90deg, rgba(0,0,0,0.9), rgba(0,0,0,0.15) 60%, transparent);
+  }
+  .mark { position: absolute; right: 70px; top: 50%; transform: translateY(-50%); }
+  .content { position: absolute; left: 84px; top: 0; bottom: 0; display: flex; flex-direction: column; justify-content: center; }
+  .eyebrow {
+    font-size: 15px; letter-spacing: 0.32em; text-transform: uppercase; color: #fca5a5; font-weight: 600;
+    margin-bottom: 14px;
+  }
+  h1 {
+    margin: 0; font-size: 104px; line-height: 1; font-weight: 650; letter-spacing: -0.035em;
+    background: linear-gradient(180deg, #ffffff 0%, #fee2e2 70%, #f5a5a5 100%);
+    -webkit-background-clip: text; color: transparent;
+  }
+  .tag { margin-top: 18px; font-size: 25px; color: #c9c3d0; font-weight: 400; letter-spacing: -0.005em; }
+  .chips { margin-top: 30px; display: flex; gap: 10px; }
+  .chip {
+    font-size: 14.5px; font-weight: 600; color: #f3e3e6; padding: 8px 14px; border-radius: 999px;
+    background: rgba(252, 165, 165, 0.08); box-shadow: inset 0 0 0 1px rgba(252, 165, 165, 0.22);
+  }
+  .chip b { color: #fca5a5; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="grid"></div>
+  <!-- the mark: a gauge whose needle sits in the red, with the panel's bolt at its hub -->
+  <svg class="mark" width="300" height="300" viewBox="0 0 300 300" fill="none">
+    <defs>
+      <radialGradient id="core" cx="0.5" cy="0.45" r="0.7">
+        <stop offset="0" stop-color="#fee2e2" stop-opacity="0.85"/>
+        <stop offset="0.35" stop-color="#f87171" stop-opacity="0.45"/>
+        <stop offset="1" stop-color="#7f1d1d" stop-opacity="0"/>
+      </radialGradient>
+      <linearGradient id="arc" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0" stop-color="#fda4af" stop-opacity="0.35"/>
+        <stop offset="1" stop-color="#ef4444" stop-opacity="1"/>
+      </linearGradient>
+    </defs>
+    <circle cx="150" cy="150" r="140" stroke="#fca5a5" stroke-opacity="0.16" stroke-width="1"/>
+    <circle cx="150" cy="150" r="84" fill="url(#core)" fill-opacity="0.5"/>
+    <!-- 270 degree dial, open at the bottom -->
+    <path d="M70.8 229.2 A112 112 0 1 1 229.2 229.2" stroke="#fca5a5" stroke-opacity="0.22" stroke-width="10" stroke-linecap="round"/>
+    <path d="M70.8 229.2 A112 112 0 1 1 250.8 102.3" stroke="url(#arc)" stroke-width="10" stroke-linecap="round"/>
+    <g stroke="#fecaca" stroke-opacity="0.7" stroke-width="2" stroke-linecap="round">
+      <path d="M87.8 212.2 L98.4 201.6"/><path d="M62 150 L77 150"/><path d="M87.8 87.8 L98.4 98.4"/>
+      <path d="M150 62 L150 77"/><path d="M212.2 87.8 L201.6 98.4"/><path d="M238 150 L223 150"/>
+      <path d="M212.2 212.2 L201.6 201.6"/>
+    </g>
+    <path d="M150 150 L214 106" stroke="#fff1f2" stroke-width="4" stroke-linecap="round"/>
+    <circle cx="150" cy="150" r="22" fill="#1a0f1c" stroke="#f87171" stroke-width="2"/>
+    <path d="M153 136 L142 152 H150 L147 164 L158 148 H150 Z" fill="#fff1f2"/>
+  </svg>
+  <div class="content">
+    <div class="eyebrow">Decky Loader for Windows</div>
+    <h1>Overdrive</h1>
+    <div class="tag">Performance, power limits, FPS limit and fans for the ROG Ally family</div>
+    <div class="chips">
+      <div class="chip"><b>Auto</b> TDP</div>
+      <div class="chip">Silent, Balanced, Turbo or your own watts</div>
+      <div class="chip">Custom fan curves</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
