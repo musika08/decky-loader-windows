@@ -26,3 +26,18 @@ Rules for the next probe:
 - Run the XInput watcher between every single write; if the gamepad disappears, stop and restore.
 - Keep the touchscreen on as a fallback input.
 - Read G-Helper's issues/changelog for Xbox Ally X remapping first.
+
+## Retest the same day (after research), Steam Big Picture in front: both work
+
+Tool: a probe that checks XInput pad 0 after every write and rewrites G-Helper's full default set if the pad is gone for 5 s.
+Single-zone writes, no commit reports, no mode write needed. The pad stayed present after every write.
+1. Zone 5 with A's layer-2 slot = B (`5A D1 02 05 2C | 01 01 | 01 02 | 01 02 | 00`): plain A still A; back button held + A acted as B. Combos work.
+2. Zone 8 with the right back button (M1) = B, left (M2) and both layer-2 slots at the defaults: the right back button acted as B (went back from a game page); A and the sticks kept working; the left one still worked as the layer-2 key.
+3. Zone 5 and zone 8 restored to the defaults; pad present.
+
+Findings:
+- On this device the back buttons are the layer-2 ("secondary function") key by default (codes 02-8E / 02-8F). Holding one makes other buttons use their layer-2 binding.
+- The first probe's "nothing happened" was most likely tested on Steam's home screen, where B does nothing. The pad loss earlier is still unexplained (it happened around the time Steam was closed and reopened).
+- While another window is in front, Steam's desktop layout turns the controller into keyboard keys (A = Enter) and XInput shows no buttons, so on-device tests must run with Steam Big Picture in front.
+
+Owner decision: each back button can be either the Shift (layer-2) key for combos, or a normal button; and Traction lets the owner set what the combos (layer-2 bindings of other buttons) do.
